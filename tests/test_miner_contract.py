@@ -227,3 +227,95 @@ def test_the_managed_layer_writes_only_pinned_keys(tmp_path):
     )
     written = yaml.safe_load(write_managed_layer(profile, tmp_path).read_text())
     assert sorted(written) == sorted(PINNED_CONFIG_KEYS)
+
+
+# --- the submission actually reaches a run ----------------------------------------------------
+
+
+def _submission(tmp_path, soul="Be terse.", skill="# Strategy\n\nCombine inspection commands."):
+    (tmp_path / "SOUL.md").write_text(soul, encoding="utf-8")
+    d = tmp_path / "skills" / "spark-hermes"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(skill, encoding="utf-8")
+    return tmp_path
+
+
+HARNESS = (
+    "You are a Hermes agent working in a task workspace.\n\n"
+    "Every number you report must come from a tool result you actually observed."
+)
+
+
+def test_soul_goes_at_the_head_and_the_harness_keeps_its_invariants(tmp_path):
+    """The contract says SOUL.md is "loaded at the head of the system prompt". The harness
+    prompt follows it, so a submission cannot displace the rules the benchmark's own
+    measurements depend on -- a miner sets the identity, the harness keeps the invariants."""
+    from hermes.profile import compose_system_prompt
+
+    out = compose_system_prompt(HARNESS, _submission(tmp_path))
+    assert out.startswith("Be terse.")
+    assert "must come from a tool result" in out
+    assert "# Strategy: spark-hermes" in out
+
+
+def test_a_submission_with_no_soul_still_composes(tmp_path):
+    from hermes.profile import compose_system_prompt
+
+    d = tmp_path / "skills" / "spark-hermes"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("# Strategy\n\nDo less.", encoding="utf-8")
+    out = compose_system_prompt(HARNESS, tmp_path)
+    assert out.startswith("You are a Hermes agent")
+    assert "Do less." in out
+
+
+def test_references_are_refused_rather_than_silently_dropped(tmp_path):
+    """The contract admits references so a miner can "optimise *when* extra knowledge is worth
+    its tokens", which only exists with lazy loading. This runner has none, and file_read is
+    confined to the workspace so the agent could not reach them anyway.
+
+    Eager loading destroys the trade-off; silent ignoring scores a miner on a strategy that
+    never ran. Refusing says so."""
+    from hermes.profile import ProfileError, compose_system_prompt
+
+    sub = _submission(tmp_path)
+    refs = sub / "skills" / "spark-hermes" / "references"
+    refs.mkdir()
+    (refs / "debugging.md").write_text("# Debugging", encoding="utf-8")
+
+    with pytest.raises(ProfileError, match="no lazy-loading affordance"):
+        compose_system_prompt(HARNESS, sub)
+
+
+def test_an_empty_soul_does_not_add_blank_leading_lines(tmp_path):
+    from hermes.profile import compose_system_prompt
+
+    out = compose_system_prompt(HARNESS, _submission(tmp_path, soul="   \n\n  "))
+    assert out.startswith("You are a Hermes agent")
+
+
+def test_the_runner_refuses_a_bad_submission_before_contacting_the_model(capsys, tmp_path):
+    """Validated before anything is paid for. Discovering a contract violation after a suite
+    has run means the run happened and cannot be scored."""
+    from hermesbench.runner import main
+
+    (tmp_path / "mcp.json").write_text("{}", encoding="utf-8")
+    code = main(
+        [
+            "--suite",
+            "all",
+            "--task-ids",
+            "fix-failing-test",
+            "--workspace-root",
+            str(tmp_path / "ws"),
+            "--miner-dir",
+            str(tmp_path),
+            "--model",
+            "x",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--allow-unsandboxed",
+        ]
+    )
+    assert code == 2
+    assert "miner submission refused" in capsys.readouterr().err

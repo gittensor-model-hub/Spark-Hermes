@@ -206,12 +206,80 @@ def doctor_probe(managed_dir_env: str | None) -> dict[str, Any]:
     }
 
 
+def compose_system_prompt(base: str, miner_dir: Path) -> str:
+    """Fold a validated miner submission into the harness system prompt.
+
+    `assemble` proves a submission is *allowed*; this is what makes it *take effect*. Until
+    both existed in one path the miner-editable surface was unreachable: the contract, the
+    pinned config keys and the profile were all built and tested, while the runner read its
+    system prompt from a single file with no way in. A miner could submit a perfect SKILL.md
+    and it would change nothing about a run.
+
+    ## Order, and why
+
+    `SOUL.md` goes at the head, where the contract says it belongs -- "the profile's
+    behavioural identity, loaded at the head of the system prompt". The harness prompt follows
+    it, so the rules the benchmark's own measurements depend on -- report only numbers you
+    observed, recover rather than work around -- cannot be displaced by a submission. A miner
+    sets the identity; the harness keeps the invariants.
+
+    ## `references/` is refused rather than ignored
+
+    The contract admits `skills/*/references/*.md` so a miner can "optimise *when* extra
+    knowledge is worth its tokens". That property only exists with lazy loading: Hermes pulls a
+    reference in when the agent reaches for it, and pays for it then. This runner has no such
+    affordance, and `LocalToolExecutor` confines `file_read` to the workspace, so the agent
+    could not reach a strategy directory even if it were told where one was.
+
+    That leaves two bad options and one honest one. Eager loading destroys the exact trade-off
+    references exist for, since every task would pay for every reference whether it used one or
+    not. Silent ignoring is worse: a miner would tune references and then be scored on a
+    strategy that never contained them, with nothing to show the difference. So they are refused
+    with a reason, and stay refused until lazy loading exists.
+
+    ## What this does to token accounting, stated because it runs against the miner
+
+    `SKILL.md` is loaded eagerly, which production Hermes would not do -- it reads a skill's
+    full text only when the agent reaches for it. A long SKILL.md therefore costs tokens here on
+    every task from the first turn, so the token metric under this runner is stricter than
+    production would be. Recorded rather than hidden: a miner optimising against this number
+    deserves to know which direction the difference runs.
+    """
+    soul = miner_dir / "SOUL.md"
+    skills = sorted(miner_dir.glob("skills/*/SKILL.md"))
+    references = sorted(miner_dir.glob("skills/*/references/*.md"))
+
+    if references:
+        shown = ", ".join(p.relative_to(miner_dir).as_posix() for p in references[:3])
+        raise ProfileError(
+            f"submission carries {len(references)} reference file(s) ({shown}"
+            f"{', ...' if len(references) > 3 else ''}), and this runner has no lazy-loading "
+            "affordance for them. Loading them eagerly would destroy the token trade-off they "
+            "exist for, since every task would pay for every reference whether it used one or "
+            "not; ignoring them would score you on a strategy that never ran. Fold what you "
+            "need into SKILL.md, or wait for reference loading."
+        )
+
+    parts: list[str] = []
+    if soul.is_file():
+        text = soul.read_text(encoding="utf-8").strip()
+        if text:
+            parts.append(text)
+    parts.append(base.strip())
+    for skill in skills:
+        text = skill.read_text(encoding="utf-8").strip()
+        if text:
+            parts.append(f"# Strategy: {skill.parent.name}\n\n{text}")
+    return "\n\n".join(parts) + "\n"
+
+
 __all__ = [
     "MANAGED_DIR_ENV",
     "PINNED_CONFIG_KEYS",
     "ProfileError",
     "RunProfile",
     "assemble",
+    "compose_system_prompt",
     "doctor_probe",
     "managed_config",
     "write_managed_layer",

@@ -576,6 +576,17 @@ def main(argv: list[str] | None = None) -> int:
         help="comma-separated task ids, so one baseline can be sharded across processes",
     )
     parser.add_argument(
+        "--miner-dir",
+        type=Path,
+        default=None,
+        help=(
+            "a miner submission to run: validated against hermes/miner_contract.json, then "
+            "SOUL.md and SKILL.md are composed into the system prompt. This is both the "
+            "validator's execution step and the miner's local evaluation -- the same code path, "
+            "so a miner sees what the validator will see."
+        ),
+    )
+    parser.add_argument(
         "--allow-unsandboxed",
         action="store_true",
         help=(
@@ -654,6 +665,41 @@ def main(argv: list[str] | None = None) -> int:
 
     schemas = load_tool_schemas(HARNESS_DIR / "tools.json")
     system_prompt = (HARNESS_DIR / "system_prompt.txt").read_text(encoding="utf-8")
+
+    # The step that made the miner-editable surface reachable. `hermes.miner_contract` and
+    # `hermes.profile` were both built and tested and called from nowhere but tests, so a
+    # submission could be validated and then had no way to affect a run: this file read one
+    # system prompt from one path. A miner could write a perfect SKILL.md and change nothing.
+    #
+    # Validated BEFORE the model is contacted. Discovering a contract violation after a suite
+    # has run means the run was paid for and cannot be scored.
+    if args.miner_dir is not None:
+        from hermes.base_model import load as load_pin
+        from hermes.profile import PINNED_CONFIG_KEYS, ProfileError, assemble, compose_system_prompt
+
+        pin = load_pin()
+        try:
+            profile = assemble(
+                # The agent is pinned by commit elsewhere; a run driven from this CLI is
+                # validator-executed by construction, which is what makes the config pin hold.
+                agent_repository="NousResearch/hermes-agent",
+                agent_commit="0" * 40,
+                model_repository=pin.repository,
+                model_revision=pin.revision,
+                config=dict.fromkeys(PINNED_CONFIG_KEYS, "pinned"),
+                miner_dir=args.miner_dir,
+                validator_executed=True,
+            )
+            system_prompt = compose_system_prompt(system_prompt, args.miner_dir)
+        except ProfileError as exc:
+            print(f"hermesbench: miner submission refused: {exc}", file=sys.stderr)
+            return 2
+        print(
+            f"hermesbench: running submission {args.miner_dir} "
+            f"({len(profile.miner_files)} file(s): {', '.join(profile.miner_files)}); "
+            f"system prompt {len(system_prompt)} chars",
+            file=sys.stderr,
+        )
     dialect = DIALECTS[args.dialect]
     complete = openai_completion(base_url=args.base_url, model=args.model, api_key=os.environ.get(args.api_key_env, ""))
 
