@@ -39,8 +39,19 @@ setup: |
           total += i
       return total
   EOF
+# `python3 || python`, and the `&&` matters more than it looks. This grader called bare
+# `python` after `test -f winner.txt`, so on a fresh workspace the test failed first and the
+# whole command exited 1 -- which is exactly what `hermesbench.suitecheck` asserts a verifier
+# must do. The short-circuit therefore satisfied the integrity check while the grader was
+# incapable of ever PASSING: once an agent created winner.txt, the interpreter lookup ran and
+# exited 127. Measured on the first real baseline, where this task scored 0/10 and looked like
+# a capability gap. A check that a verifier fails on a clean workspace cannot see this; only
+# running the verifier against a solved one can.
 verify: |
-  test -f winner.txt && python - <<'EOF'
+  set -e
+  PY="$(command -v python3 || command -v python)"
+  test -f winner.txt
+  "$PY" - <<'EOF'
   import pathlib, sys, timeit
   sys.path.insert(0, ".")
   import bench

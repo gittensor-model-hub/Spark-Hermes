@@ -57,8 +57,17 @@ setup: |
 # against its own copy of the expectations. Grading the agent's own test file would let
 # it pass by rewriting the assertions, which is exactly what the prompt forbids; a grep
 # for the expected value is no better, since the value can be parked in a comment.
+# `python3 || python`, never bare `python`. This grader called bare `python` until the first
+# real baseline ran on a GPU box with no `python` alias, where it exited 127 with
+# `/bin/sh: 1: python: not found` -- so the task scored 0/10 and read as a capability gap in
+# the frozen model. The Dockerfile already diagnosed this exact failure for the AGENT's python
+# tool ("on a stock host it finds nothing at all, so the score was a function of whose shell
+# was running it"); the same reasoning was never applied to the graders. A grader is maintainer
+# code that must work wherever a validator runs it, not only inside one image.
 verify: |
-  python - <<'EOF'
+  set -e
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'EOF'
   import sys
   sys.path.insert(0, ".")
   from pkg.stats import mean, median
