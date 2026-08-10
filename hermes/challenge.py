@@ -404,6 +404,7 @@ __all__ = [
     "ChallengeError",
     "CHALLENGES_DIR",
     "classify",
+    "episode_metrics_of",
     "from_episode_log",
     "unverifiable_tasks",
     "open_challenge",
@@ -412,6 +413,34 @@ __all__ = [
 # --- opening challenges from a real baseline log ----------------------------------------------
 
 CHALLENGES_DIR = Path("datasets/challenges")
+
+
+def episode_metrics_of(row: dict[str, Any]) -> dict[str, Any]:
+    """The metric fields of one logged episode, whichever shape the log is in.
+
+    `JsonlEpisodeSink.append` wraps `EpisodeMetrics.to_record()` under a `"metrics"` key and adds
+    envelope facts beside it -- `episode`, `setup_failed`, `disqualified`. Older exports are flat.
+    Both are real inputs, so this normalises rather than requiring a converter.
+
+    `setup_failed` is lifted out of the wrapper deliberately. It appears in both places and they
+    are not redundant: the sink records the runner's verdict for the episode, and the metrics
+    record what the episode itself measured. Taking the wrapper's value when present keeps a
+    setup failure classified as infrastructure breakage rather than as an agent failure, which is
+    the distinction `open_challenge` refuses on.
+
+    Reading a nested log with a flat reader is silent rather than loud, which is why this exists
+    as a named function with its own tests: every lookup misses, every default applies, and ten
+    healthy episodes read as ten zero-token failures.
+    """
+    metrics = row.get("metrics")
+    if not isinstance(metrics, dict):
+        return row
+    merged = dict(metrics)
+    merged.setdefault("task_id", row.get("task_id"))
+    for key in ("setup_failed", "disqualified"):
+        if key in row:
+            merged[key] = row[key]
+    return merged
 
 
 def from_episode_log(
@@ -424,10 +453,14 @@ def from_episode_log(
 ) -> tuple[list[Challenge], list[tuple[str, str]]]:
     """Group a baseline's episodes by task and open what qualifies. Returns (opened, refused).
 
-    Consumes exactly what `hermesbench.runner --episodes-out` writes -- one
-    `EpisodeMetrics.to_record()` per line -- so the log a baseline already produces is the input
-    here rather than a second format somebody has to export. That was the missing join: the
-    baseline wrote metrics, this module could package them, and nothing carried one to the other.
+    Consumes what `hermesbench.runner --episodes-out` writes, via `episode_metrics_of`. The first
+    version of this claimed to consume that and did not: `JsonlEpisodeSink.append` nests the
+    metrics under a `"metrics"` key alongside `episode`, `task_id`, `setup_failed` and
+    `disqualified`, and this function read the metric names at the top level. Every lookup missed,
+    every `.get` returned its default, and a real log produced ten attempts of zero tokens that
+    all read as failures -- silently, because a missing key and a false value are the same thing
+    to `bool()`. It passed its tests because the tests, and the 190-episode file it was developed
+    against, were both flat exports rather than the sink's own output.
 
     Refusals are returned rather than logged away. A task that did not become a challenge is the
     more common outcome and the reason matters -- "the baseline handles this" and "the baseline is
@@ -436,7 +469,7 @@ def from_episode_log(
     """
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[str(row.get("task_id") or "")].append(row)
+        grouped[str(row.get("task_id") or "")].append(episode_metrics_of(row))
 
     opened: list[Challenge] = []
     refused: list[tuple[str, str]] = []

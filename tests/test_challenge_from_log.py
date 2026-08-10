@@ -19,6 +19,7 @@ import pytest
 from hermes.challenge import (
     Attempt,
     Baseline,
+    episode_metrics_of,
     from_episode_log,
     open_challenge,
     unverifiable_tasks,
@@ -201,3 +202,102 @@ def test_every_published_packet_is_a_work_order_and_names_its_withheld_check(pat
     assert record["withheld"]["body_included"] is False
     assert record["acceptance_thresholds_included"] is False
     assert "hidden_verify" in record["withheld"]["dropped_task_keys"]
+
+
+# --- the reader against the real producer, not a hand-shaped dict -------------------------------
+#
+# The bug this section exists for. `from_episode_log` claimed to consume what
+# `runner --episodes-out` writes and did not: `JsonlEpisodeSink.append` nests the metrics under a
+# "metrics" key beside `episode`, `task_id`, `setup_failed` and `disqualified`, and the reader
+# looked for metric names at the top level. Every lookup missed and every default applied, so a
+# real log of ten healthy episodes read as ten zero-token failures -- silently, because to `bool()`
+# a missing key and a false value are the same thing.
+#
+# It passed its tests because the tests and the 190-episode file it was developed against were
+# both flat exports. So these drive the actual sink.
+
+
+def _sunk(tmp_path, metrics_rows):
+    """Write episodes through the real JsonlEpisodeSink and read them back."""
+    from hermesbench.metrics import EpisodeMetrics
+    from hermesbench.sink import JsonlEpisodeSink, read_episodes
+
+    class _Integrity:
+        disqualified = False
+
+    class _Result:
+        def __init__(self, m):
+            self.task_id = m.task_id
+            self.metrics = m
+            self.setup_failed = m.setup_failed
+            self.integrity = _Integrity()
+
+    path = tmp_path / "episodes.jsonl"
+    with JsonlEpisodeSink(path) as sink:
+        for kw in metrics_rows:
+            sink.append(_Result(EpisodeMetrics(**kw)))
+    return list(read_episodes(path))
+
+
+def _metrics_kw(**kw):
+    base = dict(
+        task_id="t",
+        success=False,
+        tool_calls=9,
+        failed_calls=0,
+        hit_failure=False,
+        recovered=False,
+        mutated=True,
+        self_checked=True,
+        tokens_used=78_417,
+        wall_time_s=317.0,
+        steps=33,
+        max_steps_hit=True,
+        public_passed=False,
+    )
+    base.update(kw)
+    return base
+
+
+def test_the_reader_sees_real_numbers_through_the_sinks_own_wrapper(tmp_path):
+    """The regression. Before the fix this produced ten attempts of zero tokens that all read as
+    failures, and `open_challenge` happily packaged them."""
+    rows = _sunk(tmp_path, [_metrics_kw() for _ in range(10)])
+    assert "metrics" in rows[0], "the sink nests; if this changes the reader must be revisited"
+
+    opened, refused = from_episode_log(rows, epoch=EPOCH, task_pins=PINS)
+    assert opened and not refused
+    baseline = opened[0].baseline
+    assert baseline.median_tokens == 78_417, "tokens must survive the wrapper"
+    assert all(a.max_steps_hit for a in baseline.attempts)
+    assert baseline.attempts[0].steps == 33
+
+
+def test_a_flat_export_still_reads_because_both_shapes_are_real_inputs():
+    rows = [_row("t") for _ in range(10)]
+    opened, _ = from_episode_log(rows, epoch=EPOCH, task_pins=PINS)
+    assert opened and opened[0].baseline.attempts[0].tokens == 30_000
+
+
+def test_the_wrappers_setup_failed_wins_over_the_metrics_copy(tmp_path):
+    """It appears in both places and they are not redundant: the wrapper is the runner's verdict
+    for the episode, the metrics are what the episode measured. Taking the wrapper's keeps a
+    setup failure classified as infrastructure breakage rather than as an agent failure, which is
+    what `open_challenge` refuses on."""
+    rows = _sunk(tmp_path, [_metrics_kw(setup_failed=True) for _ in range(10)])
+    assert episode_metrics_of(rows[0])["setup_failed"] is True
+
+    opened, refused = from_episode_log(rows, epoch=EPOCH, task_pins=PINS)
+    assert not opened
+    assert refused and "infrastructure breakage" in refused[0][1]
+
+
+def test_normalising_a_row_with_no_metrics_key_returns_it_unchanged():
+    row = {"task_id": "t", "tokens_used": 5}
+    assert episode_metrics_of(row) is row
+
+
+def test_the_task_id_survives_when_only_the_wrapper_carries_it():
+    """`EpisodeMetrics.to_record` does emit task_id, but the wrapper is the authority on which
+    task the episode belongs to -- and a row grouped under "" is a row silently dropped."""
+    assert episode_metrics_of({"task_id": "real", "metrics": {"tokens_used": 1}})["task_id"] == "real"
