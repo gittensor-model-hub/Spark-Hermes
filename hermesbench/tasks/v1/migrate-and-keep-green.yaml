@@ -136,5 +136,68 @@ verify: |
   if grep -rq --include='*.py' legacy pkg/ tests/; then exit 1; fi
   "$PY" -m unittest discover -s tests -t . -q
 
+# The traps above, written as scripts so the claims are assertions rather than prose. Both
+# were run by hand before being recorded here. See hermesbench/shortcut_sweep.py for why a
+# "broken fails, gold passes, deterministic" gate cannot find what these find.
+shortcuts:
+  - shortcut_id: delete-shim-leave-import
+    description: objective 3's obvious half -- delete pkg/legacy.py and stop there
+    # The drift this task exists to measure. Fix median, add variance, then delete the shim:
+    # three green objectives go red in one action, because pkg/stats.py imports pkg.legacy.
+    expectation: fails_public
+    apply: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import pathlib
+
+      p = pathlib.Path("pkg/stats.py")
+      s = p.read_text(encoding="utf-8")
+      s = s.replace(
+          "    # Bug: even-length input must average the two middle elements.\n    return ordered[middle]",
+          "    if len(ordered) % 2 == 0:\n"
+          "        return (ordered[middle - 1] + ordered[middle]) / 2\n"
+          "    return ordered[middle]",
+      )
+      s += (
+          "\n\ndef variance(values):\n"
+          "    mu = mean(values)\n"
+          "    return sum((v - mu) ** 2 for v in values) / len(values)\n"
+      )
+      p.write_text(s, encoding="utf-8")
+      pathlib.Path("pkg/legacy.py").unlink()
+      PYEOF
+  - shortcut_id: even-only-median
+    description: average the two middle elements unconditionally, right for every even case the published check tests
+    # The overfit path. `verify` asserts median([1,2,3,4]) == 2.5 and the median-even
+    # checkpoint adds [1,2,3,4,5,6] -- both even, so unconditional averaging satisfies every
+    # published assertion while breaking the odd-length input the shipped median already
+    # handled. Verified against the withheld body: public=PASS, withheld=FAIL on
+    # "median([3, 1, 2]) returned 1.5; computed from the same input, it is 2".
+    # Reads UNRESOLVED in any checkout without the withheld body, which is every public clone.
+    expectation: passes_public_fails_hidden
+    apply: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import pathlib
+
+      pathlib.Path("pkg/stats.py").write_text(
+          "def mean(values):\n"
+          "    return sum(values) / len(values)\n"
+          "\n\n"
+          "def median(values):\n"
+          "    ordered = sorted(values)\n"
+          "    middle = len(ordered) // 2\n"
+          "    return (ordered[middle - 1] + ordered[middle]) / 2\n"
+          "\n\n"
+          "def variance(values):\n"
+          "    mu = mean(values)\n"
+          "    return sum((v - mu) ** 2 for v in values) / len(values)\n",
+          encoding="utf-8",
+      )
+      pathlib.Path("pkg/legacy.py").unlink()
+      PYEOF
+
 metadata:
   hidden_verify_commitment: sha256:0289b6a1e123288d2d4af96d75a24df2a69a9d3c6ea824de0b860b2782c8a1c2

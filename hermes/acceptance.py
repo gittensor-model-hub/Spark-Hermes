@@ -215,14 +215,40 @@ def decide(
     )
 
 
-def dominates(candidate: Arm, incumbent: Arm) -> tuple[bool, str]:
+def dominates(candidate: Arm, incumbent: Arm, *, min_attempts: int = MIN_ATTEMPTS) -> tuple[bool, str]:
     """Whether a challenger may take the crown, on the deterministic metrics only.
 
     Tokens and tool calls are exact and recomputable from the trace. Wall time is not, and a
     king-of-the-hill bar that only ever rises would lock in whichever run got favourable
     scheduling -- permanently, because no later run could legitimately beat it. Latency is
     reported beside the crown and never gates it.
+
+    ## The attempt floor is the same floor `decide` applies, and for a worse reason
+
+    This function used to check `all_passed` and nothing else about sample size, which meant
+    a single passing attempt could take the crown -- while `decide` refused that same arm,
+    quoting the bound it implies: 1/1 pins the true success rate no higher than 20.7%. Two
+    gates disagreeing about what counts as evidence is bad on its own, but the asymmetry ran
+    the wrong way. `decide` awards a one-off acceptance; the crown *persists* and every later
+    challenger has to beat it. A king crowned on one lucky sample sets a bar that no honest
+    strategy can clear, and it does not decay.
+
+    A round shape that gives each miner one attempt at one task therefore cannot crown
+    anybody, which is the intended reading rather than an obstacle: it needs `min_attempts`
+    repeats per miner per task, and those repeats are also the only way the run-to-run spread
+    `decide` needs ever gets measured.
     """
+    from hermesbench.repeats import wilson
+
+    for label, arm in (("challenger", candidate), ("incumbent", incumbent)):
+        if arm.attempts < min_attempts:
+            bound = wilson(arm.passes, arm.attempts)
+            return False, (
+                f"the {label} has {arm.passes}/{arm.attempts} attempts, which bounds its true success "
+                f"rate only to {bound.low:.1%} at 95%; the crown persists and every later challenger "
+                f"must beat it, so it cannot be set from that. {min_attempts} attempts are the floor, "
+                "the same one decide() applies."
+            )
     if not candidate.all_passed:
         return False, "a challenger that does not pass every attempt cannot hold the crown"
     tokens = median(candidate.tokens) <= median(incumbent.tokens)

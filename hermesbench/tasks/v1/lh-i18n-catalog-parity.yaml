@@ -483,5 +483,89 @@ verify: |
       assert got["legend"] == expected_legend, f"{locale}: status_legend ignores the catalog ({got['legend']!r})"
   PYEOF
 
+# The two traps above, written as scripts. Both were run by hand before being recorded here,
+# and `forward-pass-no-recheck` is the one that mattered: against the ORIGINAL objective
+# ordering it PASSED all five checkpoints and the published check, which is what forced the
+# reordering. See hermesbench/shortcut_sweep.py.
+shortcuts:
+  - shortcut_id: forward-pass-no-recheck
+    description: do the five objectives once each, in the order the prompt lists them, and never revisit
+    # 105 of the 120 orderings finish with a regression; the prompt's order is deliberately one
+    # of them. Ends with lhi-catalogs-parallel red (unsorted after the later append) and
+    # lhi-checksums-current red (stale after the later edits) -- both green when they were done.
+    expectation: fails_public
+    apply: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      # 1: parity + sorted + no empties + no French-on-English
+      "$PY" - <<'PYEOF'
+      import json
+
+      en = json.load(open("locales/en.json"))
+      fr = json.load(open("locales/fr.json"))
+      fr.setdefault("status.offline", "Deconnecte")
+      for loc, d in (("en", en), ("fr", fr)):
+          with open(f"locales/{loc}.json", "w") as fh:
+              fh.write(json.dumps({k: d[k] for k in sorted(d)}, indent=2, ensure_ascii=False) + "\n")
+      PYEOF
+      # 2: checksums describe the catalogs -- ticked off early, invalidated by steps 3 and 4
+      "$PY" tools/sync_checksums.py >/dev/null
+      # 3: nav gains the logout entry, last
+      "$PY" - <<'PYEOF'
+      import json
+      import pathlib
+
+      ui = pathlib.Path("app/ui.py")
+      ui.write_text(
+          ui.read_text(encoding="utf-8").replace(
+              'NAV_ITEMS = ["home", "settings"]', 'NAV_ITEMS = ["home", "settings", "logout"]'
+          ),
+          encoding="utf-8",
+      )
+      for loc, label in (("en", "Log out"), ("fr", "Deconnexion")):
+          p = f"locales/{loc}.json"
+          d = json.load(open(p))
+          d["nav.logout"] = label
+          with open(p, "w") as fh:
+              fh.write(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
+      PYEOF
+      # 4: prune the dead keys
+      "$PY" - <<'PYEOF'
+      import json
+
+      for loc in ("en", "fr"):
+          p = f"locales/{loc}.json"
+          d = json.load(open(p))
+          for k in ("legacy.banner", "legacy.tooltip", "promo.spring"):
+              d.pop(k, None)
+          with open(p, "w") as fh:
+              fh.write(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
+      PYEOF
+      # 5: resolve -- read-only, nothing to do
+  - shortcut_id: literal-grep-prune
+    description: prune every catalog key that does not appear as a quoted literal in app/
+    # app/ui.py assembles nav.* and status.* with f-strings, so a literal grep sees only
+    # app.title and app.footer as live and drops all five keys the UI needs. Verified:
+    # lhi-dead-keys-pruned goes GREEN while lhi-ui-strings-resolve fails -- it passes its own
+    # review, which is the property that makes this trap worth having.
+    expectation: fails_public
+    apply: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import json
+      import pathlib
+      import re
+
+      src = "\n".join(p.read_text(encoding="utf-8") for p in pathlib.Path("app").rglob("*.py"))
+      live = set(re.findall(r'"([a-z]+\.[a-z]+)"', src)) | set(re.findall(r"'([a-z]+\.[a-z]+)'", src))
+      for loc in ("en", "fr"):
+          p = f"locales/{loc}.json"
+          d = {k: v for k, v in json.load(open(p)).items() if k in live}
+          with open(p, "w") as fh:
+              fh.write(json.dumps(d, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+      PYEOF
+      "$PY" tools/sync_checksums.py >/dev/null
+
 metadata:
   hidden_verify_commitment: sha256:6b27ddebd7b66463d64d3abf33a5e337b558698831aa6ece4fa674af08da586d

@@ -148,6 +148,36 @@ def test_a_challenger_that_fails_an_attempt_cannot_hold_the_crown():
     assert "every attempt" in reason
 
 
+def test_a_single_attempt_cannot_take_the_crown():
+    """The crown persists and every later challenger must beat it, so a bar set from one
+    lucky sample is worse than a one-off acceptance from one: it does not decay."""
+    ok, reason = dominates(_steady(1, 1_000, 2), _steady(MIN_ATTEMPTS, 4_100, 6))
+    assert ok is False
+    assert "20.7%" in reason and "the crown persists" in reason
+
+
+def test_a_challenger_cannot_be_crowned_against_a_one_attempt_incumbent():
+    """Otherwise the floor is trivially bypassed from the other side: stand up a weak
+    incumbent on one run, then beat it."""
+    ok, reason = dominates(_steady(MIN_ATTEMPTS, 1_000, 2), _steady(1, 4_100, 6))
+    assert ok is False
+    assert "incumbent" in reason
+
+
+def test_the_two_gates_agree_about_what_counts_as_evidence():
+    """The defect this closes: dominates() accepted an arm that decide() refused, and the
+    asymmetry ran the wrong way -- the persistent gate was the lenient one."""
+    thin = _steady(1, 3_000, 5)
+    assert decide(candidate=thin, baseline=BASELINE).accepted is False
+    assert dominates(thin, BASELINE)[0] is False
+
+
+def test_the_floor_is_overridable_so_a_calibration_run_can_lower_it():
+    """The baseline run has to be able to establish a first incumbent before ten repeats of
+    everything exist. Explicit parameter, not a silent default."""
+    assert dominates(_steady(3, 1_000, 2), _steady(3, 4_100, 6), min_attempts=3)[0] is True
+
+
 def test_latency_is_absent_from_the_crown_by_construction():
     """A bar that only rises would lock in whichever run got favourable scheduling,
     permanently, because no later run could legitimately beat it."""

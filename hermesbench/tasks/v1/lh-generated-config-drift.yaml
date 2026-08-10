@@ -378,5 +378,38 @@ verify: |
   PYEOF
   "$PY" -m unittest discover -s tests -t . -q
 
+# The trap above, written as a script. Run by hand before being recorded here.
+# See hermesbench/shortcut_sweep.py.
+shortcuts:
+  - shortcut_id: regenerate-to-satisfy-noop
+    description: satisfy objectives 1 and 2 by hand-editing the generated module, then satisfy objective 3 by regenerating
+    # Maximally hostile and verified as such: at the moment before the regenerate, retries,
+    # timeout and suite are all GREEN. Running the generator -- the obvious fix for objective 3
+    # -- flips all three red AND does not satisfy objective 3 either, because
+    # lhg-regeneration-is-a-noop requires config/service.ini to carry TIMEOUT_S and RETRIES.
+    expectation: fails_public
+    apply: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      printf '\nRETRIES = 5\n' >> app/settings.py
+      "$PY" - <<'PYEOF'
+      import pathlib
+
+      p = pathlib.Path("app/client.py")
+      p.write_text(
+          "from app.settings import ENDPOINT, RETRIES, TIMEOUT_S\n"
+          "\n\n"
+          "def build_request(path):\n"
+          '    """Build the envelope the transport layer sends."""\n'
+          "    return {\n"
+          '        "url": ENDPOINT + path,\n'
+          '        "timeout": TIMEOUT_S,\n'
+          '        "retries": RETRIES,\n'
+          "    }\n",
+          encoding="utf-8",
+      )
+      PYEOF
+      "$PY" tools/gen_config.py >/dev/null
+
 metadata:
   hidden_verify_commitment: sha256:a859c6e53f5f1f88247921e59b593828e07f29f194af2e19e2563e8e245b7a58

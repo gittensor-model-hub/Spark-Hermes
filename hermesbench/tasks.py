@@ -58,6 +58,63 @@ class Checkpoint:
         )
 
 
+# What a declared shortcut is expected to do. Named constants rather than bare strings, so a
+# typo in a task file is a load error instead of a shortcut that silently asserts nothing.
+FAILS_PUBLIC = "fails_public"
+PASSES_PUBLIC_FAILS_HIDDEN = "passes_public_fails_hidden"
+SHORTCUT_EXPECTATIONS = (FAILS_PUBLIC, PASSES_PUBLIC_FAILS_HIDDEN)
+
+
+@dataclass(frozen=True)
+class Shortcut:
+    """A plausible-lazy strategy, written down as a script and expected to be caught.
+
+    This exists because "broken workspace fails, correct solution passes, deterministic
+    across repeats" -- the obvious way to validate a task before it reaches anyone -- proves
+    a task is *well-formed* and says nothing about whether it is *trivial*. Both defects
+    found in this corpus by hand passed all three of those checks:
+
+      * `tc-log-rotation-order` shipped a NOTES.md hint that made 86% of plausible orderings
+        produce the graded-correct answer;
+      * `lh-i18n-catalog-parity` listed its objectives so that a single forward pass in the
+        prompt's own order satisfied all five checkpoints and the published check.
+
+    Neither is visible from a fresh workspace failing and a correct solution passing, because
+    both of those stayed true throughout. The only thing that catches them is executing the
+    lazy strategy and finding that it wins. So each trap a task claims in a comment gets a
+    script here, and the sweep turns the claim into an assertion that runs.
+
+    `expectation` separates the two useful outcomes. `fails_public` is a shortcut the
+    published check already rejects. `passes_public_fails_hidden` is the more valuable kind:
+    an overfit path caught only by the withheld check, which is what `overfit_rate` measures.
+    The second is only decidable where the withheld tree is present, so the sweep reports it
+    unresolved rather than passing when it cannot be checked.
+    """
+
+    shortcut_id: str
+    apply: str
+    expectation: str = FAILS_PUBLIC
+    description: str = ""
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any], *, origin: str = "<memory>") -> Shortcut:
+        missing = [key for key in ("shortcut_id", "apply") if not record.get(key)]
+        if missing:
+            raise TaskError(f"{origin}: shortcut is missing required field(s): {', '.join(missing)}")
+        expectation = str(record.get("expectation") or FAILS_PUBLIC)
+        if expectation not in SHORTCUT_EXPECTATIONS:
+            raise TaskError(
+                f"{origin}: shortcut {record['shortcut_id']!r} expectation {expectation!r} is not one of "
+                f"{', '.join(SHORTCUT_EXPECTATIONS)}"
+            )
+        return cls(
+            shortcut_id=str(record["shortcut_id"]),
+            apply=str(record["apply"]),
+            expectation=expectation,
+            description=str(record.get("description") or ""),
+        )
+
+
 @dataclass(frozen=True)
 class Task:
     """One HermesBench task.
@@ -114,6 +171,10 @@ class Task:
     # one is not. A model that passes public and fails hidden has learned the benchmark
     # rather than the job, and that gap is reported rather than hidden.
     hidden_verify: str = ""
+    # Plausible-lazy strategies this task claims to catch, written as scripts so the claim is
+    # executable. A task whose header describes a trap and declares no shortcut has an
+    # untested claim -- which is how both defects in this corpus shipped. See `Shortcut`.
+    shortcuts: tuple[Shortcut, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -190,6 +251,18 @@ class Task:
         if checkpoints and checkpoint_every < 1:
             raise TaskError(f"{origin}: checkpoint_every must be >= 1, got {checkpoint_every}")
 
+        raw_shortcuts = record.get("shortcuts") or []
+        if not isinstance(raw_shortcuts, list):
+            raise TaskError(f"{origin}: task {record['task_id']!r} shortcuts must be a list")
+        shortcuts = tuple(Shortcut.from_record(s, origin=origin) for s in raw_shortcuts)
+        seen_shortcuts: set[str] = set()
+        for shortcut in shortcuts:
+            if shortcut.shortcut_id in seen_shortcuts:
+                # Duplicate ids would collapse in the sweep report, so a shortcut that started
+                # winning could hide behind a same-named one that still loses.
+                raise TaskError(f"{origin}: duplicate shortcut_id {shortcut.shortcut_id!r}")
+            seen_shortcuts.add(shortcut.shortcut_id)
+
         return cls(
             task_id=str(record["task_id"]),
             prompt=str(record["prompt"]),
@@ -208,6 +281,7 @@ class Task:
             verification_tools=tuple(str(t) for t in record.get("verification_tools", ())),
             protected_paths=tuple(str(p) for p in record.get("protected_paths", ())),
             hidden_verify=str(record.get("hidden_verify") or ""),
+            shortcuts=shortcuts,
             max_verification_steps=int(record.get("max_verification_steps", 40)),
             metadata=record.get("metadata") or {},
         )
