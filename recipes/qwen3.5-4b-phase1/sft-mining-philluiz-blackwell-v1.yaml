@@ -1,0 +1,71 @@
+# philluiz blackwell v1 - fork of magicrails-blackwell-v3, trained 242 steps (best TritonBench
+# checkpoint by exec/correctness; final-step selection, no eval_loss best-model swap).
+# Axolotl SFT — beat Blackwell frontier on NEW mix pin (1154 rows, +25 v0.3 executable).
+# Prior: v1 overfit syntax-only (Triton 0.411); v2 gentle also 0.411 on old pin.
+# This run uses post-#278/#279 pin 201dec7e… with magicrails Blackwell v03 executable rows.
+#
+# Train:
+#   RUN_ID=... bash ~/sparkdistill/scripts/train_blackwell_v3.sh
+# Eval: no-think only.
+
+base_model: Qwen/Qwen3.5-4B
+trust_remote_code: true
+
+chat_template: qwen3_5
+roles_to_train: ["assistant"]
+
+datasets:
+  - path: data/processed/sparkproof-mining_sft.jsonl
+    type: chat_template
+    field_messages: messages
+
+dataset_prepared_path: data/prepared/qwen3.5-4b-blackwell-v3
+val_set_size: 0.05
+output_dir: outputs/qwen3.5-4b-mining-philluiz-blackwell-v1
+
+sequence_len: 4096
+sample_packing: false  # disabled: axolotl FLA pack needs Python.h + layer_type; TF 5.12 uses block_type
+pad_to_sequence_len: true
+
+adapter: lora
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.08
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+gradient_accumulation_steps: 8
+micro_batch_size: 1
+num_epochs: 2
+max_steps: 242
+optimizer: adamw_torch
+lr_scheduler: cosine
+learning_rate: 5.0e-5
+warmup_ratio: 0.1
+weight_decay: 0.01
+max_grad_norm: 1.0
+seed: 42
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: sdpa
+
+evals_per_epoch: 6
+saves_per_epoch: 6
+save_total_limit: 8
+load_best_model_at_end: false
+metric_for_best_model: eval_loss
+greater_is_better: false
+logging_steps: 5
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin

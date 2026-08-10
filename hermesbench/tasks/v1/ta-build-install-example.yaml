@@ -1,0 +1,280 @@
+# Terminal agent: unpack a vendored source tarball, install it with its own installer,
+# run the installed thing, and fix the crash it produces.
+#
+# The trap this task exists for is the *stale install*. The installer copies the library
+# into a prefix, so the bug can be fixed in two places -- the source tree or the copy the
+# launcher actually imports -- and fixing either one alone leaves the workspace in a state
+# that looks fixed from one angle and broken from the other. Both are checked, separately,
+# so "patched the installed copy" and "fixed the source but never reinstalled" are
+# distinguishable from a real fix rather than both reading as generic failure.
+#
+# Everything is local files: no network, no package index, no build backend.
+task_id: ta-build-install-example
+tags: [terminal_agent, build, install, offline]
+prompt: |
+  `dist/tallykit-0.4.1.tar.gz` is the vendored source for a small command-line tool. It
+  is not unpacked and not installed. There is no network here -- everything you need is
+  already in this workspace.
+
+  Get it working, end to end:
+
+    1. Unpack the tarball in the workspace root, so the source tree is at
+       `tallykit-0.4.1/`.
+    2. Install it with its own installer into a prefix inside this workspace, so that
+       `prefix/bin/tally` is an executable launcher.
+    3. Run that launcher on `data/samples.txt`. It will fail. Find the cause and fix it.
+    4. The fix belongs in the vendored source tree, and the copy the launcher imports
+       must also be fixed -- reinstalling from source later must not bring the bug back.
+    5. Write the installed tool's summary line for `data/samples.txt` into `report.txt`:
+       exactly the line the tool prints, and nothing else.
+
+  Keep the tool's output format exactly as shipped. `data/samples.txt` is a fixture --
+  do not edit it.
+tools: [terminal, file_read, file_write, python]
+# Read-only tools. Re-running the installed launcher to see whether the fix took is the
+# behaviour this task most wants to reward, so it must not compete with the step budget
+# that the install work itself is spending.
+verification_tools: [terminal, file_read, python]
+# Same reasoning as v0's fix-failing-test: `terminal` is excluded even though the install
+# runs through it, because terminal is also how the agent re-runs the tool, and counting
+# it as a mutation would let the self-check reset its own clock.
+mutating_tools: [file_write, edit, python]
+# The fixture the deliverable is computed from. Editing it -- e.g. deleting the comment
+# lines that trigger the crash -- would satisfy the letter of "make it run" while
+# dodging the bug entirely.
+protected_paths:
+  - data/samples.txt
+timeout_s: 600
+max_steps: 45
+max_verification_steps: 40
+# Sample every step: the install/fix/reinstall ordering is only a few steps long, so a
+# coarser interval would miss the window where the source is fixed but the installed
+# copy is not.
+checkpoint_every: 1
+setup: |
+  set -e
+  mkdir -p data dist build_tmp/tallykit-0.4.1/lib/tallykit build_tmp/tallykit-0.4.1/bin
+
+  printf '0.4.1\n' > build_tmp/tallykit-0.4.1/VERSION
+
+  cat > build_tmp/tallykit-0.4.1/lib/tallykit/__init__.py <<'EOF'
+  """tallykit -- summarise a column of integers."""
+
+  __version__ = "0.4.1"
+  EOF
+
+  cat > build_tmp/tallykit-0.4.1/lib/tallykit/stats.py <<'EOF'
+  """Summarise a file holding one integer per line."""
+
+  import sys
+
+
+  def summarize(text):
+      """Return (count, total, mean) over the integers in `text`.
+
+      Blank lines are skipped. Every other line is expected to hold one integer.
+      """
+      values = []
+      for line in text.splitlines():
+          line = line.strip()
+          if not line:
+              continue
+          values.append(int(line))
+      count = len(values)
+      total = sum(values)
+      mean = total / count if count else 0.0
+      return count, total, mean
+
+
+  def main():
+      if len(sys.argv) != 2:
+          sys.stderr.write("usage: tally <file>\n")
+          raise SystemExit(2)
+      with open(sys.argv[1]) as handle:
+          count, total, mean = summarize(handle.read())
+      print("count=%d sum=%d mean=%.4f" % (count, total, mean))
+
+
+  if __name__ == "__main__":
+      main()
+  EOF
+
+  cat > build_tmp/tallykit-0.4.1/bin/tally.in <<'EOF'
+  #!/bin/sh
+  # Launcher template. install.sh substitutes __LIBDIR__ with the install prefix's lib
+  # directory; this file is not runnable until it does.
+  PYTHONPATH="__LIBDIR__${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m tallykit.stats "$@"
+  EOF
+
+  cat > build_tmp/tallykit-0.4.1/install.sh <<'EOF'
+  #!/bin/sh
+  # tallykit installer.
+  #
+  #   PREFIX=/somewhere sh install.sh      (default prefix: ./prefix, from the caller's
+  #                                         working directory)
+  #
+  # Copies the library into $PREFIX/lib and generates $PREFIX/bin/tally from the
+  # launcher template.
+  set -e
+  PREFIX=${PREFIX:-$PWD/prefix}
+  case "$PREFIX" in
+    /*) ;;
+    *) PREFIX="$PWD/$PREFIX" ;;
+  esac
+  here=$(cd "$(dirname "$0")" && pwd)
+  mkdir -p "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/share/tallykit"
+  rm -rf "$PREFIX/lib/tallykit"
+  cp -R "$here/lib/tallykit" "$PREFIX/lib/tallykit"
+  cp "$here/VERSION" "$PREFIX/share/tallykit/VERSION"
+  sed "s|__LIBDIR__|$PREFIX/lib|" "$here/bin/tally.in" > "$PREFIX/bin/tally"
+  chmod 755 "$PREFIX/bin/tally"
+  echo "installed tallykit $(cat "$here/VERSION") into $PREFIX"
+  EOF
+  chmod 755 build_tmp/tallykit-0.4.1/install.sh
+
+  cat > build_tmp/tallykit-0.4.1/README <<'EOF'
+  tallykit 0.4.1
+
+  Install:   PREFIX=$PWD/prefix sh tallykit-0.4.1/install.sh
+  Run:       prefix/bin/tally <file>
+
+  Prints one line: count=<n> sum=<n> mean=<n.nnnn>
+  EOF
+
+  # Built with tarfile rather than the tar binary so the workspace does not depend on
+  # which archiver the host happens to ship. Extraction has several routes; that is the
+  # agent's problem, not setup's.
+  python3 - <<'PY'
+  import tarfile
+
+  with tarfile.open("dist/tallykit-0.4.1.tar.gz", "w:gz") as archive:
+      archive.add("build_tmp/tallykit-0.4.1", arcname="tallykit-0.4.1")
+  PY
+  rm -rf build_tmp
+
+  cat > data/samples.txt <<'EOF'
+  # daily counts for week 31
+  12
+  7
+
+  # tuesday was quiet
+  3
+  21
+  -4
+
+  19
+  EOF
+checkpoints:
+  - checkpoint_id: source-unpacked
+    description: the vendored source tree is extracted at tallykit-0.4.1/
+    verify: |
+      set -e
+      test -f tallykit-0.4.1/install.sh
+      test -f tallykit-0.4.1/lib/tallykit/stats.py
+  - checkpoint_id: launcher-installed
+    description: prefix/bin/tally exists, is executable, and had its template filled in
+    # `if grep; then exit 1; fi`, never `! grep`: under set -e bash and dash both refuse
+    # to exit on a negated command, so the `!` form is a silent no-op.
+    verify: |
+      set -e
+      test -x prefix/bin/tally
+      test -f prefix/lib/tallykit/stats.py
+      if grep -q '__LIBDIR__' prefix/bin/tally; then exit 1; fi
+  - checkpoint_id: installed-copy-fixed
+    description: the installed launcher summarises a commented file correctly
+    verify: |
+      set -e
+      scratch=$(mktemp -d)
+      trap 'rm -rf "$scratch"' EXIT
+      cat > "$scratch/fresh.txt" <<'EOF'
+      # quarterly figures
+        40
+      5
+
+      # gap here
+      -11
+        8
+      EOF
+      got=$(./prefix/bin/tally "$scratch/fresh.txt")
+      test "$got" = "count=4 sum=42 mean=10.5000"
+  - checkpoint_id: source-tree-fixed
+    description: the vendored source itself carries the fix, not just the installed copy
+    verify: |
+      set -e
+      scratch=$(mktemp -d)
+      trap 'rm -rf "$scratch"' EXIT
+      cat > "$scratch/fresh.txt" <<'EOF'
+      # quarterly figures
+        40
+      5
+
+      # gap here
+      -11
+        8
+      EOF
+      got=$(PYTHONPATH=tallykit-0.4.1/lib python3 -m tallykit.stats "$scratch/fresh.txt")
+      test "$got" = "count=4 sum=42 mean=10.5000"
+  - checkpoint_id: report-written
+    description: report.txt holds the tool's summary line for data/samples.txt
+    verify: |
+      set -e
+      test -f report.txt
+      test "$(tr -d '\r' < report.txt | sed -n '1p')" = "count=6 sum=58 mean=9.6667"
+      test "$(tr -d '[:space:]' < report.txt)" = "count=6sum=58mean=9.6667"
+# Graded by running the installed tool on input it has never seen, not by reading the
+# artifact the agent left behind: a hand-written report.txt cannot survive this, and
+# neither can a fix applied only to whichever copy the agent happened to test.
+#
+# Expected values, computed here rather than taken from the workspace:
+#   fresh.txt  -> 40 + 5 + (-11) + 8 = 42 over 4 values, mean 10.5
+#   samples.txt-> 12 + 7 + 3 + 21 + (-4) + 19 = 58 over 6 values, mean 9.66666... -> 9.6667
+verify: |
+  set -e
+  test -f tallykit-0.4.1/install.sh
+  test -f tallykit-0.4.1/lib/tallykit/stats.py
+  test -x prefix/bin/tally
+  if grep -q '__LIBDIR__' prefix/bin/tally; then exit 1; fi
+
+  scratch=$(mktemp -d)
+  trap 'rm -rf "$scratch"' EXIT
+  cat > "$scratch/fresh.txt" <<'EOF'
+  # quarterly figures
+    40
+  5
+
+  # gap here
+  -11
+    8
+  EOF
+
+  installed=$(./prefix/bin/tally "$scratch/fresh.txt")
+  if [ "$installed" != "count=4 sum=42 mean=10.5000" ]; then
+      echo "installed tally printed: $installed" >&2
+      exit 1
+  fi
+
+  from_source=$(PYTHONPATH=tallykit-0.4.1/lib python3 -m tallykit.stats "$scratch/fresh.txt")
+  if [ "$from_source" != "count=4 sum=42 mean=10.5000" ]; then
+      echo "vendored source still broken, printed: $from_source" >&2
+      exit 1
+  fi
+
+  # A reinstall from the source tree must leave a working tool: this is what catches a
+  # fix applied only to the installed copy, which the two checks above cannot see.
+  PREFIX="$scratch/reinstall" sh tallykit-0.4.1/install.sh > /dev/null
+  reinstalled=$("$scratch/reinstall/bin/tally" "$scratch/fresh.txt")
+  if [ "$reinstalled" != "count=4 sum=42 mean=10.5000" ]; then
+      echo "reinstall from source resurrected the bug: $reinstalled" >&2
+      exit 1
+  fi
+
+  test -f report.txt
+  reported=$(tr -d '[:space:]' < report.txt)
+  if [ "$reported" != "count=6sum=58mean=9.6667" ]; then
+      echo "report.txt says: $reported" >&2
+      exit 1
+  fi
+  test "$(sed -n '1p' report.txt | tr -d '\r')" = "count=6 sum=58 mean=9.6667"
+
+metadata:
+  hidden_verify_commitment: sha256:3dc83558bd36b7ce0d5175d305a76ebcd9cc9786932d34b5037ef3fa0d0f33b0

@@ -1,0 +1,466 @@
+# Long-horizon: five objectives over two files that every objective touches.
+#
+# The catalogs in `locales/` are the shared surface, so every objective is one edit away
+# from breaking the others:
+#
+#   * "remove the keys nothing renders any more" is a trap -- `app/ui.py` assembles
+#     `nav.*` and `status.*` keys with f-strings, so a prune driven by grepping for
+#     string literals deletes exactly the keys the UI needs and passes its own review;
+#   * "add the logout entry" appends a key, which breaks the sorted-key objective unless
+#     the file is re-sorted, and breaks parity unless *both* catalogs get it;
+#   * "the checksum file must describe the catalogs" is satisfied by one command and
+#     invalidated by every subsequent catalog edit. It is the archetypal drift objective:
+#     easy to tick off early, silently false by the end.
+#
+# There is no ordering that avoids revisiting earlier work; the only way through is to
+# re-check. An agent that treats the list as a queue will finish with two or three
+# objectives it had already satisfied showing red.
+task_id: lh-i18n-catalog-parity
+tags: [long_horizon, swe, i18n, data-consistency]
+prompt: |
+  `app/ui.py` renders every user-visible string through the locale catalogs in
+  `locales/`. Do all five of the following, and make sure that everything you have
+  already finished is still true when you stop:
+
+    1. The navigation must gain a logout entry, last, rendered through the catalogs like
+       every other nav entry: `Log out` in English, `Deconnexion` in French.
+    2. The catalogs still carry keys that nothing in `app/` renders any more. Remove
+       every unused key from both catalogs -- and only those.
+    3. `locales/en.json` and `locales/fr.json` must end up holding exactly the same set
+       of keys, each file sorted by key, with no empty values and no French entry left
+       sitting on the English text.
+    4. Every string the UI renders must resolve in both locales, through the catalogs: an
+       unknown key must still raise rather than falling back to something. Translations
+       that are already there keep their current wording.
+    5. `locales/checksums.json` must describe the catalogs as they stand when you stop,
+       in the format it already uses.
+
+  Work in whatever order you like, and re-check your earlier work as you go.
+tools: [terminal, file_read, file_write, python]
+verification_tools: [terminal, file_read, python]
+# `python` and `terminal` mutate here: the natural way to re-sort a JSON catalog is a
+# short script, and an unlisted mutation drops the episode out of the self-check
+# denominator instead of scoring it.
+mutating_tools: [file_write, edit, python, terminal]
+timeout_s: 600
+max_steps: 60
+max_verification_steps: 60
+# Sample after every step: the checksum objective is invalidated by the *next* edit after
+# it is satisfied, so a coarser interval would miss the pass-then-fail window entirely.
+checkpoint_every: 1
+# No protected_paths: nothing in this workspace is a grader. Every objective below is
+# recomputed by this file against its own expectations, so there is no test file or
+# baseline an agent could edit its way past.
+setup: |
+  set -e
+  # Refuse to build a workspace we cannot grade.
+  PY="$(command -v python3 || command -v python)"
+  mkdir -p app locales tools
+  touch app/__init__.py
+
+  cat > app/ui.py <<'EOF'
+  """The console UI. Every user-visible string is rendered through a locale catalog."""
+
+  import json
+  from pathlib import Path
+
+  LOCALES = ("en", "fr")
+  NAV_ITEMS = ["home", "settings"]
+  STATUSES = ["ok", "degraded", "offline"]
+
+
+  def catalog(locale):
+      return json.loads((Path("locales") / f"{locale}.json").read_text(encoding="utf-8"))
+
+
+  def t(locale, key):
+      entries = catalog(locale)
+      if key not in entries:
+          raise KeyError(f"missing translation {locale}:{key}")
+      return entries[key]
+
+
+  def render_title(locale):
+      return t(locale, "app.title")
+
+
+  def render_footer(locale):
+      return t(locale, "app.footer")
+
+
+  def render_nav(locale):
+      return [t(locale, f"nav.{item}") for item in NAV_ITEMS]
+
+
+  def status_legend(locale):
+      return [t(locale, f"status.{name}") for name in STATUSES]
+  EOF
+
+  cat > tools/sync_checksums.py <<'EOF'
+  """Refresh locales/checksums.json from the catalogs on disk."""
+
+  import hashlib
+  import json
+  from pathlib import Path
+
+  LOCALES = ("en", "fr")
+  TARGET = Path("locales/checksums.json")
+
+
+  def describe(locale):
+      raw = (Path("locales") / f"{locale}.json").read_bytes()
+      return {
+          "sha256": hashlib.sha256(raw).hexdigest(),
+          "keys": len(json.loads(raw.decode("utf-8"))),
+      }
+
+
+  def main():
+      record = {locale: describe(locale) for locale in LOCALES}
+      TARGET.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+      print(f"wrote {TARGET}")
+
+
+  if __name__ == "__main__":
+      main()
+  EOF
+
+  cat > locales/en.json <<'EOF'
+  {
+    "app.footer": "All systems nominal",
+    "app.title": "Fleet Console",
+    "legacy.banner": "Try the new console",
+    "legacy.tooltip": "Click here to switch",
+    "nav.home": "Home",
+    "nav.settings": "Settings",
+    "promo.spring": "Spring release is here",
+    "status.degraded": "Degraded",
+    "status.offline": "Offline",
+    "status.ok": "Healthy"
+  }
+  EOF
+
+  # The state the checksums were last taken against.
+  cat > locales/fr.json <<'EOF'
+  {
+    "app.footer": "Tous les systemes sont nominaux",
+    "app.title": "Console de flotte",
+    "legacy.banner": "Essayez la nouvelle console",
+    "legacy.tooltip": "Cliquez ici pour basculer",
+    "nav.home": "Accueil",
+    "nav.settings": "Parametres",
+    "promo.spring": "La version de printemps est arrivee",
+    "status.degraded": "Degrade",
+    "status.offline": "Hors ligne",
+    "status.ok": "Operationnel"
+  }
+  EOF
+  "$PY" tools/sync_checksums.py >/dev/null
+
+  # ...and then someone hand-edited the French catalog without re-syncing: a key lost in
+  # a merge, and the ordering scrambled on the way through.
+  cat > locales/fr.json <<'EOF'
+  {
+    "nav.home": "Accueil",
+    "app.title": "Console de flotte",
+    "status.ok": "Operationnel",
+    "nav.settings": "Parametres",
+    "legacy.banner": "Essayez la nouvelle console",
+    "app.footer": "Tous les systemes sont nominaux",
+    "status.degraded": "Degrade",
+    "promo.spring": "La version de printemps est arrivee",
+    "legacy.tooltip": "Cliquez ici pour basculer"
+  }
+  EOF
+checkpoints:
+  - checkpoint_id: lhi-logout-localised
+    description: the nav renders a localised logout entry through the catalogs
+    # Asserted against the catalog's own values as well as the literal strings, so the
+    # entry has to exist in both catalogs and not only in the render path. That the
+    # renderer actually *reads* the catalogs is enforced by lhi-ui-strings-resolve, which
+    # re-renders against sentinel values.
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import json
+      import sys
+      from pathlib import Path
+
+      sys.path.insert(0, ".")
+      from app.ui import render_nav
+
+      expected = {"en": "Log out", "fr": "Deconnexion"}
+      for locale, label in expected.items():
+          entries = json.loads((Path("locales") / f"{locale}.json").read_text(encoding="utf-8"))
+          assert entries.get("nav.logout") == label, f"{locale}: nav.logout is {entries.get('nav.logout')!r}"
+          nav = render_nav(locale)
+          assert nav[-1] == label, f"{locale}: nav ends with {nav[-1:]!r}, expected {label!r}"
+          assert len(nav) == 3, f"{locale}: nav is {nav!r}"
+      PYEOF
+  - checkpoint_id: lhi-dead-keys-pruned
+    description: the keys nothing renders any more are gone from both catalogs
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import json
+      from pathlib import Path
+
+      DEAD = ("legacy.banner", "legacy.tooltip", "promo.spring")
+      for locale in ("en", "fr"):
+          entries = json.loads((Path("locales") / f"{locale}.json").read_text(encoding="utf-8"))
+          still_there = [key for key in DEAD if key in entries]
+          assert not still_there, f"{locale} still carries {still_there}"
+      PYEOF
+  - checkpoint_id: lhi-catalogs-parallel
+    description: both catalogs hold the same keys, sorted, with distinct non-empty values
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import json
+      from pathlib import Path
+
+      catalogs = {}
+      for locale in ("en", "fr"):
+          entries = json.loads((Path("locales") / f"{locale}.json").read_text(encoding="utf-8"))
+          keys = list(entries)
+          assert keys == sorted(keys), f"{locale}.json is not sorted by key"
+          for key, value in entries.items():
+              assert isinstance(value, str) and value.strip(), f"{locale}:{key} is empty"
+          catalogs[locale] = entries
+
+      missing = set(catalogs["en"]) ^ set(catalogs["fr"])
+      assert not missing, f"key sets differ: {sorted(missing)}"
+      untranslated = [k for k, v in catalogs["fr"].items() if v == catalogs["en"][k]]
+      assert not untranslated, f"French still shows the English text for {untranslated}"
+      PYEOF
+  - checkpoint_id: lhi-ui-strings-resolve
+    description: every rendered string still resolves in both locales, with its wording intact
+    # The objective a literal-grep prune destroys: `nav.*` and `status.*` are assembled
+    # from lists in app/ui.py, so they look unreferenced to a search for quoted keys.
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import sys
+
+      sys.path.insert(0, ".")
+      from app.ui import render_footer, render_title, status_legend, t
+
+      assert render_title("en") == "Fleet Console", render_title("en")
+      assert render_title("fr") == "Console de flotte", render_title("fr")
+      assert render_footer("en") == "All systems nominal", render_footer("en")
+      assert render_footer("fr") == "Tous les systemes sont nominaux", render_footer("fr")
+      assert status_legend("en") == ["Healthy", "Degraded", "Offline"], status_legend("en")
+
+      legend_fr = status_legend("fr")
+      assert legend_fr[:2] == ["Operationnel", "Degrade"], legend_fr
+      # status.offline was lost from the French catalog; any real translation of it will
+      # do, so long as it is not the English string left in place.
+      assert legend_fr[2].strip() and legend_fr[2] != "Offline", legend_fr
+
+      try:
+          t("en", "no.such.key")
+      except KeyError:
+          pass
+      else:
+          raise AssertionError("t() must raise on an unknown key, not fall back")
+      PYEOF
+      # "Through the catalogs" is the half of this objective that literal assertions
+      # cannot see: a renderer that returned the expected strings from a hardcoded table
+      # would satisfy every check above. Re-render in a fresh interpreter against a copy
+      # of the workspace whose catalog values are sentinels, and require the output to
+      # follow them.
+      scratch="$(mktemp -d)"
+      trap 'rm -rf "$scratch"' EXIT
+      cp -a . "$scratch/ws"
+      cat > "$scratch/ws/_probe.py" <<'PROBEEOF'
+      import json
+      import sys
+
+      sys.path.insert(0, ".")
+      from app.ui import render_footer, render_nav, render_title, status_legend
+
+      print(json.dumps({
+          locale: {
+              "title": render_title(locale),
+              "footer": render_footer(locale),
+              "nav": render_nav(locale),
+              "legend": status_legend(locale),
+          }
+          for locale in ("en", "fr")
+      }))
+      PROBEEOF
+      "$PY" - "$scratch/ws" <<'PYEOF'
+      import json
+      import subprocess
+      import sys
+      from pathlib import Path
+
+      ws = Path(sys.argv[1])
+      sentinels = {}
+      for locale in ("en", "fr"):
+          path = ws / "locales" / f"{locale}.json"
+          loaded = json.loads(path.read_text(encoding="utf-8"))
+          entries = {key: f"<{locale}:{key}>" for key in loaded}
+          sentinels[locale] = entries
+          path.write_text(json.dumps(entries, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+      probe = subprocess.run(
+          [sys.executable, "_probe.py"], cwd=ws, capture_output=True, text=True,
+      )
+      assert probe.returncode == 0, f"the UI could not render from the catalogs: {probe.stderr}"
+      rendered = json.loads(probe.stdout)
+
+      for locale in ("en", "fr"):
+          entry = sentinels[locale]
+          got = rendered[locale]
+          assert got["title"] == entry.get("app.title"), f"{locale}: render_title ignores the catalog ({got['title']!r})"
+          assert got["footer"] == entry.get("app.footer"), f"{locale}: render_footer ignores the catalog ({got['footer']!r})"
+          expected_nav = [entry.get("nav.home"), entry.get("nav.settings"), entry.get("nav.logout")]
+          assert got["nav"] == expected_nav, f"{locale}: render_nav ignores the catalog ({got['nav']!r})"
+          expected_legend = [entry.get("status.ok"), entry.get("status.degraded"), entry.get("status.offline")]
+          assert got["legend"] == expected_legend, f"{locale}: status_legend ignores the catalog ({got['legend']!r})"
+      PYEOF
+  - checkpoint_id: lhi-checksums-current
+    description: the checksum file describes the catalogs as they are on disk
+    # Recomputed here rather than by re-running tools/sync_checksums.py: the grader must
+    # not be the thing being graded.
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import hashlib
+      import json
+      from pathlib import Path
+
+      record = json.loads(Path("locales/checksums.json").read_text(encoding="utf-8"))
+      for locale in ("en", "fr"):
+          raw = (Path("locales") / f"{locale}.json").read_bytes()
+          entry = record[locale]
+          assert entry["sha256"] == hashlib.sha256(raw).hexdigest(), f"{locale}: stale sha256"
+          assert entry["keys"] == len(json.loads(raw.decode("utf-8"))), f"{locale}: stale key count"
+      PYEOF
+verify: |
+  set -e
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'PYEOF'
+  import hashlib
+  import json
+  import sys
+  from pathlib import Path
+
+  sys.path.insert(0, ".")
+  from app.ui import render_footer, render_nav, render_title, status_legend, t
+
+  EXPECTED_KEYS = [
+      "app.footer",
+      "app.title",
+      "nav.home",
+      "nav.logout",
+      "nav.settings",
+      "status.degraded",
+      "status.offline",
+      "status.ok",
+  ]
+
+  catalogs = {}
+  for locale in ("en", "fr"):
+      entries = json.loads((Path("locales") / f"{locale}.json").read_text(encoding="utf-8"))
+      keys = list(entries)
+      assert keys == sorted(keys), f"{locale}.json is not sorted by key"
+      # Exactly the live keys: the dead ones gone, and nothing the UI renders taken with
+      # them. Stated as an equality so over-pruning and under-pruning both fail here.
+      assert keys == EXPECTED_KEYS, f"{locale}.json holds {keys}"
+      for key, value in entries.items():
+          assert isinstance(value, str) and value.strip(), f"{locale}:{key} is empty"
+      catalogs[locale] = entries
+
+  untranslated = [k for k, v in catalogs["fr"].items() if v == catalogs["en"][k]]
+  assert not untranslated, f"French still shows the English text for {untranslated}"
+
+  assert render_nav("en") == ["Home", "Settings", "Log out"], render_nav("en")
+  assert render_nav("fr") == ["Accueil", "Parametres", "Deconnexion"], render_nav("fr")
+  assert render_title("en") == "Fleet Console", render_title("en")
+  assert render_title("fr") == "Console de flotte", render_title("fr")
+  assert render_footer("en") == "All systems nominal", render_footer("en")
+  assert render_footer("fr") == "Tous les systemes sont nominaux", render_footer("fr")
+  assert status_legend("en") == ["Healthy", "Degraded", "Offline"], status_legend("en")
+  legend_fr = status_legend("fr")
+  assert legend_fr[:2] == ["Operationnel", "Degrade"], legend_fr
+  assert legend_fr[2].strip() and legend_fr[2] != "Offline", legend_fr
+
+  try:
+      t("en", "no.such.key")
+  except KeyError:
+      pass
+  else:
+      raise AssertionError("t() must raise on an unknown key, not fall back")
+
+  record = json.loads(Path("locales/checksums.json").read_text(encoding="utf-8"))
+  for locale in ("en", "fr"):
+      raw = (Path("locales") / f"{locale}.json").read_bytes()
+      entry = record[locale]
+      assert entry["sha256"] == hashlib.sha256(raw).hexdigest(), f"{locale}: stale sha256"
+      assert entry["keys"] == len(json.loads(raw.decode("utf-8"))), f"{locale}: stale key count"
+  PYEOF
+  # Everything above is satisfiable by a renderer that stopped consulting the catalogs and
+  # returned the expected strings from a hardcoded table. Re-render in a fresh interpreter
+  # against a copy of the workspace whose catalog values are sentinels, and require the
+  # output to follow them -- that is what "rendered through the catalogs" means.
+  scratch="$(mktemp -d)"
+  trap 'rm -rf "$scratch"' EXIT
+  cp -a . "$scratch/ws"
+  cat > "$scratch/ws/_probe.py" <<'PROBEEOF'
+  import json
+  import sys
+
+  sys.path.insert(0, ".")
+  from app.ui import render_footer, render_nav, render_title, status_legend
+
+  print(json.dumps({
+      locale: {
+          "title": render_title(locale),
+          "footer": render_footer(locale),
+          "nav": render_nav(locale),
+          "legend": status_legend(locale),
+      }
+      for locale in ("en", "fr")
+  }))
+  PROBEEOF
+  "$PY" - "$scratch/ws" <<'PYEOF'
+  import json
+  import subprocess
+  import sys
+  from pathlib import Path
+
+  ws = Path(sys.argv[1])
+  sentinels = {}
+  for locale in ("en", "fr"):
+      path = ws / "locales" / f"{locale}.json"
+      loaded = json.loads(path.read_text(encoding="utf-8"))
+      entries = {key: f"<{locale}:{key}>" for key in loaded}
+      sentinels[locale] = entries
+      path.write_text(json.dumps(entries, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+  probe = subprocess.run(
+      [sys.executable, "_probe.py"], cwd=ws, capture_output=True, text=True,
+  )
+  assert probe.returncode == 0, f"the UI could not render from the catalogs: {probe.stderr}"
+  rendered = json.loads(probe.stdout)
+
+  for locale in ("en", "fr"):
+      entry = sentinels[locale]
+      got = rendered[locale]
+      assert got["title"] == entry.get("app.title"), f"{locale}: render_title ignores the catalog ({got['title']!r})"
+      assert got["footer"] == entry.get("app.footer"), f"{locale}: render_footer ignores the catalog ({got['footer']!r})"
+      expected_nav = [entry.get("nav.home"), entry.get("nav.settings"), entry.get("nav.logout")]
+      assert got["nav"] == expected_nav, f"{locale}: render_nav ignores the catalog ({got['nav']!r})"
+      expected_legend = [entry.get("status.ok"), entry.get("status.degraded"), entry.get("status.offline")]
+      assert got["legend"] == expected_legend, f"{locale}: status_legend ignores the catalog ({got['legend']!r})"
+  PYEOF
+
+metadata:
+  hidden_verify_commitment: sha256:6b27ddebd7b66463d64d3abf33a5e337b558698831aa6ece4fa674af08da586d

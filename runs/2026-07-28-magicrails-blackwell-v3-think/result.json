@@ -1,0 +1,10 @@
+{
+  "verified": false,
+  "reason": "attestation_integrity_failed",
+  "issues": [
+    "GPU attestation JWKS signature failed: platform: Signature has expired; GPU-0: Signature has expired",
+    "GPU attestation signed eat_nonce does not bind claim_sha256 for this bundle"
+  ],
+  "label": "eval:REJECT",
+  "run_id": "2026-07-28-magicrails-blackwell-v3-think"
+}

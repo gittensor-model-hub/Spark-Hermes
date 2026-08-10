@@ -1,0 +1,157 @@
+# Tool calling: pick a tool that can reach inside a file you cannot hold.
+#
+# `logs/ledger.csv` is ~1.2 MB. `file_read` truncates at 8000 characters and says so in
+# the tool result, so the reflexive read-modify-write route silently destroys 99% of the
+# file -- the agent that takes it ends the episode confident and wrong. The route that
+# works is one that edits in place or streams: a targeted `sed -i`/`awk` in `terminal`,
+# or `python` reading and rewriting the whole file.
+#
+# The second half of the task grades the *arguments*, not just the tool: the misspelling
+# also appears verbatim inside two free-text notes that must survive, so the blunt
+# `s/PENDNIG/PENDING/g` corrupts evidence while looking like it worked. The anchored
+# form (the status field is comma-delimited) is right.
+task_id: tc-ledger-surgical-fix
+tags: [tool_calling, editing, large-file]
+prompt: |
+  `logs/ledger.csv` is an exported settlement ledger with the columns
+  `id,ts,service,status,note`. Every row's `status` should be one of `PENDING`,
+  `SETTLED` or `FAILED`, but exactly one row was exported with `PENDNIG` in that
+  column. Find it and correct that one field to `PENDING`.
+
+  The export is audit evidence, so nothing else about the file may change: not the
+  row count, not the row order, and not the free-text `note` column -- some notes
+  quote the misspelling verbatim, and those quotes must stay exactly as written.
+tools: [terminal, file_read, file_write, python]
+# Deliberately no `verification_tools`: one shared budget, so every call costs. Naming
+# `file_read` as the read-only budget would be actively wrong here -- the natural way to
+# check this edit is `grep -c ',PENDNIG,'`, and an agent that did exactly that would be
+# disqualified for "verification skipped" while an agent that opened the truncating
+# reader would not.
+# `terminal` and `python` are mutating here: the expected solution edits through one of
+# them, and an unlisted mutation drops the episode out of the self-check denominator
+# instead of scoring it.
+mutating_tools: [file_write, edit, python, terminal]
+timeout_s: 300
+max_steps: 20
+checkpoint_every: 1
+setup: |
+  set -e
+  mkdir -p logs
+  # Refuse to build a workspace we cannot grade: every check below needs an interpreter.
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'PYEOF'
+  # Purely arithmetic, never `random`: the grader below pins a digest of this file, so
+  # the bytes must come out identical on every machine and every Python version.
+  services = ["billing", "ledger", "wallet", "payouts", "risk"]
+  statuses = ["PENDING", "SETTLED", "FAILED"]
+  notes = ["auto-reconciled", "batch import", "manual review", "no action"]
+
+  lines = ["id,ts,service,status,note"]
+  for i in range(1, 20001):
+      status = statuses[(i * 7) % 3]
+      note = notes[(i * 11) % 4]
+      if i == 12874:
+          status = "PENDNIG"
+          note = "settlement retried"
+      elif i in (4310, 17655):
+          note = "client reported PENDNIG in the ui"
+      day = 1 + (i * 3) % 28
+      hour = (i * 13) % 24
+      minute = (i * 17) % 60
+      second = (i * 23) % 60
+      ts = f"2026-03-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}Z"
+      lines.append(f"{i},{ts},{services[i % 5]},{status},{note}")
+
+  with open("logs/ledger.csv", "w", encoding="utf-8", newline="\n") as fh:
+      fh.write("\n".join(lines) + "\n")
+  PYEOF
+verify: |
+  set -e
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'PYEOF'
+  import hashlib
+  import sys
+
+  # The digest covers every line except the one the agent was asked to change, so any
+  # collateral damage -- a mangled note, a dropped row, a reordering, a rewritten
+  # timestamp -- fails even though the requested edit itself landed. Recompute it if
+  # this task's setup ever changes.
+  REST_SHA256 = "dcb0a848d6ff7c828ab97755e649ecb0c81cdf9fda4ebe30a300b51cf1e941ff"
+  FIXED_ROW = "12874,2026-03-11T10:38:02Z,risk,PENDING,settlement retried"
+  ROWS = 20001
+
+  # Read bytes, not text. `open(..., encoding="utf-8")` is universal-newline mode, which
+  # silently rewrites \r\n to \n before the grader ever sees it -- so an agent that
+  # converted the whole export to CRLF passed a check that claims byte-identity. Binary
+  # keeps the line endings visible so that rewrite fails, as it should.
+  text = open("logs/ledger.csv", "rb").read().decode("utf-8")
+  lines = text.split("\n")
+  if lines and lines[-1] == "":
+      lines.pop()
+  if len(lines) != ROWS:
+      sys.exit(f"ledger has {len(lines)} lines, expected {ROWS}")
+
+  target = [line for line in lines if line.startswith("12874,")]
+  if len(target) != 1:
+      sys.exit(f"expected exactly one row 12874, found {len(target)}")
+  if target[0] != FIXED_ROW:
+      sys.exit(f"row 12874 is {target[0]!r}, expected {FIXED_ROW!r}")
+
+  rest = "\n".join(line for line in lines if not line.startswith("12874,"))
+  digest = hashlib.sha256(rest.encode("utf-8")).hexdigest()
+  if digest != REST_SHA256:
+      sys.exit("every other row must be byte-identical to the export; it is not")
+  PYEOF
+
+checkpoints:
+  - checkpoint_id: tc-ledger-status-corrected
+    description: the corrupted status field now reads PENDING
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      FIXED_ROW = "12874,2026-03-11T10:38:02Z,risk,PENDING,settlement retried"
+      # Binary read: text mode would fold \r\n to \n and hide a CRLF rewrite. See `verify`.
+      text = open("logs/ledger.csv", "rb").read().decode("utf-8")
+      rows = [ln for ln in text.split("\n") if ln.startswith("12874,")]
+      assert rows == [FIXED_ROW], rows
+      PYEOF
+  - checkpoint_id: tc-ledger-notes-preserved
+    description: the fix landed without rewriting notes that quote the misspelling
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      FIXED_ROW = "12874,2026-03-11T10:38:02Z,risk,PENDING,settlement retried"
+      NOTE_ROWS = [
+          "4310,2026-03-23T14:10:10Z,billing,FAILED,client reported PENDNIG in the ui",
+          "17655,2026-03-18T03:15:45Z,billing,PENDING,client reported PENDNIG in the ui",
+      ]
+      # Binary read: text mode would fold \r\n to \n and hide a CRLF rewrite. See `verify`.
+      lines = open("logs/ledger.csv", "rb").read().decode("utf-8").split("\n")
+      assert [ln for ln in lines if ln.startswith("12874,")] == [FIXED_ROW]
+      for want in NOTE_ROWS:
+          assert want in lines, want
+      PYEOF
+  - checkpoint_id: tc-ledger-otherwise-untouched
+    description: the fix landed and the rest of the export is byte-identical
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import hashlib
+
+      REST_SHA256 = "dcb0a848d6ff7c828ab97755e649ecb0c81cdf9fda4ebe30a300b51cf1e941ff"
+      FIXED_ROW = "12874,2026-03-11T10:38:02Z,risk,PENDING,settlement retried"
+      # Binary read: text mode would fold \r\n to \n and hide a CRLF rewrite. See `verify`.
+      lines = open("logs/ledger.csv", "rb").read().decode("utf-8").split("\n")
+      if lines and lines[-1] == "":
+          lines.pop()
+      assert len(lines) == 20001, len(lines)
+      assert [ln for ln in lines if ln.startswith("12874,")] == [FIXED_ROW]
+      rest = "\n".join(ln for ln in lines if not ln.startswith("12874,"))
+      assert hashlib.sha256(rest.encode("utf-8")).hexdigest() == REST_SHA256
+      PYEOF
+
+metadata:
+  hidden_verify_commitment: sha256:55937981cf1aa3ad9f10a1f1719499ebdf6ac33a5ccff962102439f405c3289c

@@ -1,0 +1,70 @@
+# Stage B -- Hermes behavior.
+#
+# Teaches the loop: observe -> plan -> act -> verify -> recover. Trains on agent
+# execution trajectories rendered by `python -m hermes.format`, resuming from Stage A's
+# adapter rather than starting clean.
+#
+#   scripts/train.sh recipes/spark-hermes-agent-3.8-27b/stage-b-hermes.yaml
+#
+# Keep failure-and-recovery rows in this mix. A corpus of only-successful trajectories
+# teaches a model that tools never fail, which is the one thing that is never true --
+# so do NOT pass --require-success when building this dataset.
+
+# Pinned in hermes/base_model.json; tests/test_base_model.py keeps them in step.
+base_model: Qwen/Qwen3.6-27B
+base_model_revision: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+trust_remote_code: true
+
+chat_template: qwen3_5
+roles_to_train: ["assistant"]
+
+datasets:
+  - path: data/processed/hermes_trajectories_sft.jsonl
+    type: chat_template
+    field_messages: messages
+
+dataset_prepared_path: data/prepared/spark-hermes-27b-stage-b
+val_set_size: 0.02
+output_dir: outputs/spark-hermes-agent-3.8-27b/stage-b
+
+# Longer than Stage A: a full execution trajectory with tool outputs is a much longer
+# sequence than a reasoning trace, and truncating mid-episode teaches the model that
+# episodes simply stop.
+sequence_len: 16384
+sample_packing: true
+pad_to_sequence_len: true
+
+adapter: qlora
+load_in_4bit: true
+lora_model_dir: outputs/spark-hermes-agent-3.8-27b/stage-a
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+
+gradient_accumulation_steps: 16
+micro_batch_size: 1
+num_epochs: 3
+optimizer: adamw_torch
+lr_scheduler: cosine
+learning_rate: 7.0e-5
+warmup_ratio: 0.03
+weight_decay: 0.0
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: flash_attention_2
+
+evals_per_epoch: 4
+saves_per_epoch: 2
+logging_steps: 10
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin

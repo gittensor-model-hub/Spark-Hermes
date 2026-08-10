@@ -1,0 +1,67 @@
+# Phase 2's "claim -> execute -> verify -> reward" loop, as a benchmark task.
+#
+# The names lie: `optimized_sum` is the slow one. An agent that answers from the naming
+# or the comments gets it wrong; only running the thing gets it right.
+#
+# Measured margin is ~2.4x (range 2.1-2.6x over repeated runs on CPython 3.12): a C-level
+# `sum(range(n))` against an interpreted accumulation loop. That is comfortably above the
+# 1.5x floor the grader enforces below, but it is not a landslide -- the winner is stable,
+# the ratio is not. Re-measure before assuming a wider gap.
+task_id: verify-speedup-claim
+tags: [self_verification, python, measurement]
+prompt: |
+  `bench.py` in this workspace defines two functions, `naive_sum` and `optimized_sum`,
+  that compute the same result. Measure which one is actually faster at the input size
+  the file documents, then write the winner's function name to `winner.txt` as a single
+  bare word. Measure it -- do not decide by reading the code or its comments.
+tools: [terminal, file_read, file_write, python]
+timeout_s: 240
+max_steps: 25
+setup: |
+  set -e
+  cat > bench.py <<'EOF'
+  # Measure at N = 3_000_000.
+  N = 3_000_000
+
+
+  def naive_sum(n):
+      # No hand-tuning at all -- just hands the whole range to the builtin.
+      return sum(range(n))
+
+
+  def optimized_sum(n):
+      # Hand-tuned accumulation: a local accumulator to dodge global lookups, no
+      # temporary objects, no builtin call overhead. Every one of those words describes
+      # a real technique; none of them beat a C-level loop, because this one still runs
+      # every iteration through the interpreter. Reading this comment is not measuring.
+      total = 0
+      for i in range(n):
+          total += i
+      return total
+  EOF
+verify: |
+  test -f winner.txt && python - <<'EOF'
+  import pathlib, sys, timeit
+  sys.path.insert(0, ".")
+  import bench
+
+  claimed = pathlib.Path("winner.txt").read_text().strip()
+  if claimed not in {"naive_sum", "optimized_sum"}:
+      raise SystemExit(f"winner.txt must name one of the two functions, got {claimed!r}")
+
+  # min-of-repeats, not total: the minimum is the run least disturbed by other load on
+  # the box, which keeps a busy CI machine from flipping the verdict.
+  naive = min(timeit.repeat(lambda: bench.naive_sum(bench.N), repeat=5, number=1))
+  optimized = min(timeit.repeat(lambda: bench.optimized_sum(bench.N), repeat=5, number=1))
+  actual = "naive_sum" if naive < optimized else "optimized_sum"
+  if claimed != actual:
+      raise SystemExit(f"claimed {claimed}, measured winner is {actual} ({naive:.3f}s vs {optimized:.3f}s)")
+  # Guard the task itself: set below the observed margin (~2.4x, low 2.1x) so it fires
+  # only if the gap genuinely collapses rather than on ordinary timing jitter.
+  ratio = max(naive, optimized) / min(naive, optimized)
+  if ratio < 1.5:
+      raise SystemExit(f"task is no longer discriminating: margin only {ratio:.2f}x")
+  EOF
+
+metadata:
+  hidden_verify_commitment: sha256:4bf1997aa9d8f60b777ea3fe83fb8d328648330340450c49fc60d0098ed18880

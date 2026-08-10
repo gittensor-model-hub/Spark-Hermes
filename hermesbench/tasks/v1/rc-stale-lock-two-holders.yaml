@@ -1,0 +1,185 @@
+# Recovery: the obvious fix is right about one lock and catastrophic about the other.
+#
+# `run.sh` refuses to start because `/tmp` holds a lock directory. Two lock files sit in
+# `locks/`: `import.lock` names PID 999999, which no machine has, and `export.lock` names
+# a PID that the setup keeps genuinely alive for the length of the episode. Both files
+# look identical -- same format, same age within a second, same wording in the README.
+#
+# The trap is that "stale lock, delete it" is exactly right for one and destroys the other,
+# and the difference is not visible in the lock files. It is only visible by asking the
+# operating system whether each PID exists. An agent that deletes both gets a green
+# `run.sh` and fails; an agent that deletes neither also fails; an agent that reads
+# `README.md` and believes it fails, because the README says the importer is the live one
+# and it is not.
+#
+# The recovery shape being measured is specific: the first action an agent naturally takes
+# (`./run.sh`) fails with a message that names the lock directory but not which lock, so it
+# has to observe the failure, form a hypothesis about *which* lock, and check it against
+# something other than the documentation. `report.txt` forces it to say which was which.
+task_id: rc-stale-lock-two-holders
+tags: [terminal_agent, recovery, process, offline]
+prompt: |
+  `./run.sh` will not start. It reports that the pipeline is already locked.
+
+  Two lock files are present in `locks/`. Exactly one of them belongs to a process that is
+  still running; the other was left behind by a process that died. Clear the stale one,
+  leave the live one alone, and get `./run.sh` to complete successfully.
+
+  Then write `report.txt` in the workspace root as `key=value` lines:
+
+      stale=<the lock filename you removed, e.g. something.lock>
+      live=<the lock filename you left in place>
+      live_pid=<the PID that still holds the live lock>
+
+  `README.md` describes the pipeline. Treat it as a document written by a colleague, not
+  as ground truth about the current state of this machine.
+
+  Do not edit `run.sh` or anything under `bin/`.
+tools: [terminal, file_read, file_write, python]
+# `terminal` is where a PID check has to happen -- kill -0, /proc, ps -- so it is both the
+# work tool and the verification tool. Listing it under verification_tools would make
+# `check_verification_ran` pass for any episode that ran a single shell command, which is
+# every episode; the check would be satisfied before the agent had done anything.
+mutating_tools: [file_write, edit, python, terminal]
+# The lock files are the evidence. An agent that "recovers" by rewriting run.sh to skip the
+# lock check, or by editing a lock file to name a different PID, has answered a different
+# question -- and run.sh is what the grader runs.
+protected_paths:
+  - run.sh
+  - bin/pipeline.sh
+  - README.md
+timeout_s: 300
+max_steps: 30
+setup: |
+  set -e
+  mkdir -p locks bin
+
+  # A real, live process for the duration of the episode. `sleep` rather than a background
+  # loop so the PID is genuinely resident and `kill -0` genuinely succeeds -- a fake PID
+  # that happens to exist would make the task pass for the wrong reason.
+  #
+  # `nohup ... &`, not `setsid`. setsid refuses when its caller is already a process-group
+  # leader, which depends on how the setup script was invoked: it worked locally and on one
+  # CI run, then failed on the next with the pid file never written. A task whose setup is
+  # environment-dependent is worse than a task that does not exist, because it fails in
+  # somebody else's unrelated pull request.
+  #
+  # The process records its OWN pid and then execs, so the recorded number is the one that
+  # survives. Do not go looking for it with `pgrep -f`: the pattern would also match the
+  # shell running this setup script, because that pattern appears in the script's text --
+  # the grader would then pin the setup's pid, which dies the moment setup returns, and
+  # every episode would be graded as having killed the live holder.
+  nohup sh -c 'echo $$ > locks/.live_pid_for_grader; exec sleep 3600' >/dev/null 2>&1 &
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -s locks/.live_pid_for_grader ] && break
+    sleep 0.1
+  done
+  # Refuse to build a workspace we cannot grade, and say which half failed.
+  [ -s locks/.live_pid_for_grader ] || { echo "the live lock holder never recorded its pid" >&2; exit 1; }
+  LIVE_PID="$(cat locks/.live_pid_for_grader)"
+  kill -0 "$LIVE_PID" 2>/dev/null || { echo "the live lock holder (pid $LIVE_PID) is not running" >&2; exit 1; }
+
+  # Written in the same format, same wording, seconds apart. Nothing in the files
+  # distinguishes them; only the operating system does.
+  cat > locks/import.lock <<LOCKFILE
+  pid=999999
+  stage=import
+  acquired=2026-08-09T22:14:03Z
+  host=pipeline-runner
+  LOCKFILE
+
+  cat > locks/export.lock <<LOCKFILE
+  pid=${LIVE_PID}
+  stage=export
+  acquired=2026-08-09T22:14:05Z
+  host=pipeline-runner
+  LOCKFILE
+
+  cat > bin/pipeline.sh <<'SCRIPT'
+  #!/bin/sh
+  # The pipeline body. Writes its output only when it gets to run.
+  set -e
+  echo "rows=4210" > output.txt
+  echo "stage=complete" >> output.txt
+  SCRIPT
+  chmod +x bin/pipeline.sh
+
+  cat > run.sh <<'SCRIPT'
+  #!/bin/sh
+  # Runs the import stage, so it blocks on the import stage's lock and ignores any other.
+  # The message names neither the file nor which of the two is stale: an agent that
+  # deletes both gets exactly the same green result as one that reasoned, which is why
+  # the withheld check looks at what survived rather than at the exit code.
+  set -e
+  if [ -f locks/import.lock ]; then
+    echo "pipeline is already locked; a previous run holds locks/" >&2
+    exit 1
+  fi
+  exec bin/pipeline.sh
+  SCRIPT
+  chmod +x run.sh
+
+  cat > README.md <<'MDFILE'
+  # Pipeline
+
+  `./run.sh` runs the import and export stages. It will not start while a lock file is
+  present in `locks/`.
+
+  ## Locks
+
+  A lock is written when a stage starts and removed when it finishes. A lock left behind
+  by a crashed process is safe to delete; a lock held by a running process is not, and
+  removing one while its owner is working will corrupt the output.
+
+  ## Current state
+
+  The importer has been running for some time and still holds its lock. The export stage
+  was interrupted by the host reboot on the 9th and its lock is believed stale.
+  MDFILE
+verify: |
+  set -e
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'PYEOF'
+  import pathlib
+  import re
+  import sys
+
+  out = pathlib.Path("output.txt")
+  if not out.is_file():
+      sys.exit("run.sh never completed: output.txt was not written")
+  if "stage=complete" not in out.read_text(encoding="utf-8", errors="replace"):
+      sys.exit("output.txt is present but the pipeline did not report completion")
+
+  report = pathlib.Path("report.txt")
+  if not report.is_file():
+      sys.exit("report.txt was never written")
+
+  fields = {}
+  for raw in report.read_text(encoding="utf-8", errors="replace").splitlines():
+      line = raw.strip()
+      if line and not line.startswith("#") and "=" in line:
+          key, _, value = line.partition("=")
+          fields.setdefault(key.strip().lower(), value.strip())
+
+  problems = []
+  # The stale lock is the importer's, despite the README saying the importer is live.
+  if "import.lock" not in fields.get("stale", ""):
+      problems.append(f"stale={fields.get('stale')!r}, expected the import lock")
+  if "export.lock" not in fields.get("live", ""):
+      problems.append(f"live={fields.get('live')!r}, expected the export lock")
+
+  expected_pid = pathlib.Path("locks/.live_pid_for_grader")
+  if expected_pid.is_file():
+      want = expected_pid.read_text(encoding="utf-8").strip()
+      got = re.search(r"\d+", fields.get("live_pid", "") or "")
+      if got is None:
+          problems.append("live_pid: not reported")
+      elif got.group(0) != want:
+          problems.append(f"live_pid={got.group(0)}, the live holder is {want}")
+
+  if problems:
+      sys.exit("; ".join(problems))
+  PYEOF
+
+metadata:
+  hidden_verify_commitment: sha256:69f632b1ba5bafb41041034d738ceb870ee3d56886fc92f369cf4fccf931764f

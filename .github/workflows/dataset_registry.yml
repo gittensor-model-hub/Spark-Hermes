@@ -1,0 +1,97 @@
+name: Dataset registry gate
+
+on:
+  # Use the trusted base branch for code execution while retaining write access
+  # for labels and merge on fork PRs. The untrusted PR is fetched as a git
+  # object only; none of its code or workflows are executed.
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - "datasets/registry.jsonl"
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  # Verify each PR independently; only merge-eligible runs contend on main.
+  group: dataset-registry-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted SparkDistill base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Configure git identity for automated commits
+        run: |
+          git config --global user.name "gittensor-dataset-bot"
+          git config --global user.email "gittensor-dataset-bot@users.noreply.github.com"
+
+      - name: Read untrusted submission without executing it
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags origin \
+            "${BASE_REF}:refs/remotes/origin/dataset-base"
+          git fetch --no-tags origin \
+            "pull/${PR_NUMBER}/head:refs/remotes/origin/dataset-pr-head"
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > /tmp/pr_body.md
+          MERGE_BASE="$(git merge-base \
+            refs/remotes/origin/dataset-base \
+            refs/remotes/origin/dataset-pr-head)"
+          git diff --name-only \
+            "${MERGE_BASE}" \
+            refs/remotes/origin/dataset-pr-head > /tmp/changed_paths.txt
+
+      - name: Checkout SparkProof
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gittensor-model-hub/SparkProof
+          path: SparkProof
+          # Pinned to the SparkProof v0.3.0 release commit (not the moving main): the dataset
+          # gate verifies every submission against exactly this released verifier — which carries
+          # the DPO correctness pairs + attested `preferences_sha256` this repo's DPO track
+          # consumes, plus the v0.3.0 attestation hardening. Bump deliberately when SparkProof
+          # cuts a new release the gate should adopt.
+          ref: 3104e282fe67c35ad205a5be18b61624d42b2038 # SparkProof v0.3.0
+          # SparkProof is private; the default GITHUB_TOKEN cannot read it.
+          token: ${{ secrets.SPARKPROOF_CHECKOUT_TOKEN }}
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install SparkProof
+        working-directory: SparkProof
+        run: uv sync --extra dev --frozen
+
+      - name: Install SparkDistill
+        run: uv sync --extra dev --frozen
+
+      - name: Verify, label, and merge eligible dataset
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARKDISTILL_MINING_DATASET_REPO: gittensor-model-hub/sparkproof-mining
+        run: |
+          uv run python -m eval.registry_gate \
+            --base-ref refs/remotes/origin/dataset-base \
+            --head-ref refs/remotes/origin/dataset-pr-head \
+            --sparkproof-root SparkProof \
+            --out eval/results/registry_gate_report.json \
+            --pr-body-file /tmp/pr_body.md \
+            --changed-paths-file /tmp/changed_paths.txt \
+            --apply-label \
+            --close-on-reject \
+            --merge-on-pass \
+            --pr-number ${{ github.event.pull_request.number }}

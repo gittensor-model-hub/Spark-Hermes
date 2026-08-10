@@ -1,0 +1,31 @@
+{"example_id": "cuda-01", "gold": "cuda", "task": "This Triton matmul kernel is slower than the cuBLAS baseline. Profile it with Nsight and find where the time goes."}
+{"example_id": "cuda-02", "gold": "cuda", "task": "Rewrite the attention CUDA kernel to use tensor cores and improve occupancy on Blackwell."}
+{"example_id": "cuda-03", "gold": "cuda", "task": "Shared memory bank conflicts are hurting this reduction kernel. Fix the access pattern so loads coalesce."}
+{"example_id": "cuda-04", "gold": "cuda", "task": "Port this CUTLASS GEMM epilogue to a Triton kernel and confirm numerics match within tolerance."}
+{"example_id": "cuda-05", "gold": "cuda", "task": "TensorRT is producing different output than the PyTorch reference for this layer. Find where the graph conversion diverges."}
+{"example_id": "firmware-01", "gold": "firmware", "task": "The UART driver on this STM32 board drops bytes at 115200 baud. Debug the interrupt handler and fix it."}
+{"example_id": "firmware-02", "gold": "firmware", "task": "Write a Zephyr device driver for an I2C temperature sensor and wire it into the device tree."}
+{"example_id": "firmware-03", "gold": "firmware", "task": "Our ESP32 OTA update bricks the device when power is lost mid-write. Make the bootloader handle a partial image."}
+{"example_id": "firmware-04", "gold": "firmware", "task": "FreeRTOS task is overflowing its stack under load. Find the culprit and size the stack correctly."}
+{"example_id": "firmware-05", "gold": "firmware", "task": "U-Boot fails to bring up the SPI flash on this board revision. Compare the register init against the datasheet."}
+{"example_id": "cyber-01", "gold": "cyber", "task": "Triage this CVE against our vendored copy of the library and determine whether we are actually affected."}
+{"example_id": "cyber-02", "gold": "cyber", "task": "ASan reports a use-after-free in the parser. Build a minimal proof of concept that reproduces it."}
+{"example_id": "cyber-03", "gold": "cyber", "task": "Write a fuzzer harness for this binary format and run it until it finds a memory corruption bug."}
+{"example_id": "cyber-04", "gold": "cyber", "task": "Verify that the upstream patch actually closes the heap overflow, rather than just moving the crash."}
+{"example_id": "cyber-05", "gold": "cyber", "task": "Audit this endpoint for SQL injection and demonstrate the vulnerability if one exists."}
+{"example_id": "swe-01", "gold": "swe", "task": "The pytest suite has a failing test after the dependency upgrade. Find the root cause and open a pull request."}
+{"example_id": "swe-02", "gold": "swe", "task": "Use git bisect to find the commit that introduced this regression and explain what changed."}
+{"example_id": "swe-03", "gold": "swe", "task": "Refactor this module to remove the circular import, keeping the public API stable."}
+{"example_id": "swe-04", "gold": "swe", "task": "This traceback shows a type error in production. Add a regression test that fails before your fix."}
+{"example_id": "swe-05", "gold": "swe", "task": "Resolve the merge conflict in the changelog and make sure the code review comments are addressed."}
+{"example_id": "general-01", "gold": "general", "task": "Summarize the tradeoffs between renting cloud GPUs and buying hardware for a small team."}
+{"example_id": "general-02", "gold": "general", "task": "Draft an onboarding document explaining how our release process works to a new hire."}
+{"example_id": "general-03", "gold": "general", "task": "Explain the difference between eventual and strong consistency to a non-engineer."}
+{"example_id": "general-04", "gold": "general", "task": "Help me plan the agenda for a two-day technical offsite."}
+{"example_id": "general-05", "gold": "general", "task": "What should I consider when choosing a license for an open source project?"}
+{"example_id": "ambiguous-01", "gold": "general", "task": "Make it faster."}
+{"example_id": "ambiguous-02", "gold": "general", "task": "Something is broken in the build. Take a look."}
+{"example_id": "ambiguous-03", "gold": "general", "task": "Review this code and tell me what you think."}
+{"example_id": "cross-01", "gold": "general", "task": "Our CUDA kernel has a buffer overflow that a fuzzer found; write the patch, add a regression test, and open a pull request."}
+{"example_id": "cross-02", "gold": "firmware", "task": "The firmware driver's DMA path may be exploitable. Audit it, then optimize the transfer throughput once it is safe."}
+{"example_id": "cross-03", "gold": "general", "task": "Profile the CUDA kernel, fuzz the parser it feeds, fix whatever either turns up, and open a pull request with regression tests."}

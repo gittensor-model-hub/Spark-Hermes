@@ -1,0 +1,80 @@
+# Axolotl SFT — target: raise triton_exec_pass_rate above the frontier floor of 0.0.
+#
+# Frontier (blackwell, run 2026-07-11): triton 0.42778, syntax_pass 1.0, exec_pass 0.0,
+# correctness 0.0. The student writes syntactically valid Triton that never runs, so the
+# headroom is executability, not more syntax fluency.
+#
+# Measured on the canonical pin (1154 rows, sha 201dec7e, Qwen3.5-4B tokenizer):
+#   median 1121 tok - p90 2879 - p99 6759 - max 9176
+#   59 rows (5.1%) exceed the 4096 sequence_len every prior recipe used.
+# Those 59 are the longest, most complex kernels - exactly the executable-shaped examples -
+# and they were being truncated mid-kernel, teaching the model to emit prefixes that parse
+# but cannot run. sequence_len 8192 leaves only 2 rows (0.2%) truncated.
+#
+# Other deltas vs magicrails-blackwell-v3 (the +2.99% eval:XS run):
+#   epochs 2 -> 3   (v1 overfit at 5 epochs syntax-only; 2 was likely under-trained)
+# Kept from v3 because it demonstrably scored: lr 5e-5, warmup 0.1, wd 0.01, dropout 0.08,
+# grad_accum 8, CCE plugin, best-checkpoint selection on eval_loss.
+# sample_packing stays off: axolotl FLA packing needs layer_type but TF 5.12 emits
+# block_type, independent of the Python.h issue this box does have solved.
+
+base_model: Qwen/Qwen3.5-4B
+trust_remote_code: true
+
+chat_template: qwen3_5
+roles_to_train: ["assistant"]
+
+datasets:
+  - path: data/processed/sparkproof-mining_sft.jsonl
+    type: chat_template
+    field_messages: messages
+
+dataset_prepared_path: data/prepared/qwen3.5-4b-bf-v1
+val_set_size: 0.05
+output_dir: outputs/qwen3.5-4b-bf-v4
+
+sequence_len: 8192
+sample_packing: false
+pad_to_sequence_len: true
+
+adapter: lora
+lora_r: 128
+lora_alpha: 256
+lora_dropout: 0.08
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+gradient_accumulation_steps: 8
+micro_batch_size: 1
+num_epochs: 5
+optimizer: adamw_torch
+lr_scheduler: cosine
+learning_rate: 5.0e-5
+warmup_ratio: 0.1
+weight_decay: 0.01
+max_grad_norm: 1.0
+seed: 42
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: sdpa
+
+evals_per_epoch: 4
+saves_per_epoch: 4
+save_total_limit: 6
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+logging_steps: 5
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin

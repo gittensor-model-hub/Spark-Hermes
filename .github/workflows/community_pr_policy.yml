@@ -1,0 +1,61 @@
+name: Community PR policy
+
+# Auto-close community PRs that are not optimization submissions. Maintainers
+# (OWNER/MEMBER/COLLABORATOR) and bots (e.g. dependabot) are exempt; a community PR
+# stays open only when it is a training-track or dataset-track submission. The
+# eval/scoring harness, tooling, and docs are maintainer-owned.
+on:
+  pull_request_target:
+    types: [opened, reopened, edited, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: community-pr-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  enforce-community-pr-policy:
+    # Only act on open PRs; never re-close an already-closed/merged one.
+    if: github.event.pull_request.state == 'open'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Read untrusted PR metadata without executing it
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/policy-base"
+          git fetch --no-tags origin "pull/${PR_NUMBER}/head:refs/remotes/origin/policy-pr-head"
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > /tmp/pr_body.md
+          MERGE_BASE="$(git merge-base refs/remotes/origin/policy-base refs/remotes/origin/policy-pr-head)"
+          git diff --name-only "${MERGE_BASE}" refs/remotes/origin/policy-pr-head > /tmp/changed_paths.txt
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install SparkDistill
+        run: uv sync --extra dev --extra proof --frozen
+
+      - name: Enforce community PR policy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          uv run python -m eval.community_pr_policy \
+            --author-association "${{ github.event.pull_request.author_association }}" \
+            --author-login "${{ github.event.pull_request.user.login }}" \
+            --author-type "${{ github.event.pull_request.user.type }}" \
+            --pr-body-file /tmp/pr_body.md \
+            --changed-paths-file /tmp/changed_paths.txt \
+            --pr-number ${{ github.event.pull_request.number }} \
+            --apply

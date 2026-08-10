@@ -1,0 +1,232 @@
+# Tool calling: the obvious tool is gone, and it would have been the wrong tool anyway.
+#
+# Two independent reasons the reflexive shell route dies, so the task does not rest on
+# a single trick:
+#   1. `gzip`/`gunzip`/`zcat`/`zgrep`/`zless` are shadowed on PATH by stubs that exit
+#      127 -- the failure is real, not narrated in the prompt.
+#   2. Even with a real decompressor found by absolute path, the payload is a single
+#      line of minified JSON, so every line-oriented tool (`grep -c`, `sort -n`, `awk`)
+#      reports nonsense rather than failing loudly.
+# `file_read` on a gzip member raises UnicodeDecodeError and comes back as a tool
+# failure. What is left is the `python` tool with the stdlib `gzip` and `json` modules,
+# in one or two calls.
+#
+# The grader recomputes the answer from the archive itself rather than hardcoding it,
+# and the archive is protected -- so rewriting the data to match a wrong answer is
+# a disqualification, not a pass.
+task_id: tc-compressed-event-summary
+tags: [tool_calling, python, archives]
+prompt: |
+  `data/events.json.gz` is the event log for one deployment, gzipped.
+
+  Write `summary.txt` in the workspace root with exactly two lines:
+
+      errors=<count>
+      slowest=<id>
+
+  where `<count>` is how many records have a `level` of `error`, and `<id>` is the
+  `id` of the record with the largest `ms`. If several records tie on `ms`, use the
+  smallest of their ids. Both values are bare integers.
+tools: [terminal, file_read, file_write, python]
+# Deliberately no `verification_tools`: one shared budget, so probing five dead
+# decompressors costs what it should. Naming a read-only budget here would also make
+# the `verification_skipped` detector fire on an agent that checked its answer with a
+# shell command, which is a false accusation, or go vacuous if `terminal` were listed.
+# `terminal` and `python` are mutating here: the expected solution writes summary.txt
+# through one of them, and an unlisted mutation drops the episode out of the
+# self-check denominator instead of scoring it.
+mutating_tools: [file_write, edit, python, terminal]
+protected_paths: [data/events.json.gz]
+# Puts the failing stubs ahead of the real binaries for setup, agent calls, and
+# verification alike -- a failure mode the prompt only describes is not a failure mode.
+env:
+  PATH: "./bin:$PATH"
+timeout_s: 300
+max_steps: 18
+checkpoint_every: 1
+setup: |
+  set -e
+  mkdir -p data bin
+  # Refuse to build a workspace we cannot grade: every check below needs an interpreter.
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'PYEOF'
+  import gzip
+  import json
+
+  # A hand-rolled LCG, not `random`: the workspace must be byte-identical on every
+  # machine and every Python version, so two agents are graded on the same log.
+  state = 20260808
+
+
+  def nxt(bound):
+      global state
+      state = (state * 1103515245 + 12345) % 2147483648
+      return state % bound
+
+
+  services = ["billing", "ledger", "wallet", "payouts", "risk"]
+  levels = ["info"] * 6 + ["warn"] * 3 + ["error"]
+  rows = []
+  for i in range(1, 401):
+      rows.append(
+          {
+              "id": i,
+              "service": services[nxt(len(services))],
+              "level": levels[nxt(len(levels))],
+              "ms": 3 + nxt(898),
+          }
+      )
+  # One unambiguous maximum, so the answer does not hinge on the tie-break rule.
+  rows[nxt(len(rows))]["ms"] = 987
+  with gzip.open("data/events.json.gz", "wt", encoding="utf-8") as fh:
+      json.dump(rows, fh, separators=(",", ":"))
+  PYEOF
+  cat > bin/gzip <<'EOF'
+  #!/bin/sh
+  echo "$0: the gzip toolchain is not installed in this environment" >&2
+  exit 127
+  EOF
+  chmod +x bin/gzip
+  for stub in gunzip zcat zgrep zless zcmp; do
+    cp bin/gzip "bin/$stub"
+  done
+verify: |
+  set -e
+  # `env.PATH` prepends ./bin so the agent meets dead decompressors -- but ./bin is
+  # inside the workspace and the agent can write there, and the grader inherits the same
+  # PATH. Resolving the interpreter naively let an agent drop in a `bin/python3` that
+  # exits 0: every check below then "passed" without the archive ever being opened, and
+  # nothing caught it (bin/ is not a protected path). So build a PATH with every
+  # relative and in-workspace entry removed, and resolve the interpreter from that.
+  CLEAN=""
+  IFS=:
+  for d in $PATH; do
+    case "$d" in ""|.|./*|../*|"$PWD"|"$PWD"/*) continue ;; esac
+    CLEAN="${CLEAN:+$CLEAN:}$d"
+  done
+  unset IFS
+  PATH="$CLEAN"
+  export PATH
+  # Under `set -e` a failing assignment aborts, so a machine with no interpreter outside
+  # the workspace refuses to grade rather than silently passing everything.
+  PY="$(command -v python3 || command -v python)"
+  test -f summary.txt
+  "$PY" - <<'PYEOF'
+  import gzip
+  import json
+  import re
+  import sys
+
+  with gzip.open("data/events.json.gz", "rt", encoding="utf-8") as fh:
+      rows = json.load(fh)
+  truth = {
+      "errors": sum(1 for r in rows if r["level"] == "error"),
+      "slowest": min(rows, key=lambda r: (-r["ms"], r["id"]))["id"],
+  }
+
+  found = {}
+  for line in open("summary.txt", encoding="utf-8").read().splitlines():
+      line = line.strip()
+      if not line:
+          continue
+      match = re.fullmatch(r"(errors|slowest)\s*=\s*(\d+)", line)
+      if match is None:
+          sys.exit(f"unexpected line in summary.txt: {line!r}")
+      if match.group(1) in found:
+          sys.exit(f"summary.txt repeats the key {match.group(1)!r}")
+      found[match.group(1)] = int(match.group(2))
+
+  if found != truth:
+      sys.exit(f"summary.txt says {found}, the archive says {truth}")
+  PYEOF
+
+checkpoints:
+  - checkpoint_id: tc-gz-summary-shape
+    description: summary.txt exists and holds exactly the two required keys
+    verify: |
+      set -e
+      # Same PATH hardening as `verify`, and for the same reason: ./bin is on PATH and
+      # the agent can write to it, so an interpreter resolved off the raw PATH could be
+      # a stub that exits 0 and turns this checkpoint into a rubber stamp.
+      CLEAN=""
+      IFS=:
+      for d in $PATH; do
+        case "$d" in ""|.|./*|../*|"$PWD"|"$PWD"/*) continue ;; esac
+        CLEAN="${CLEAN:+$CLEAN:}$d"
+      done
+      unset IFS
+      PATH="$CLEAN"
+      export PATH
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import re
+
+      keys = []
+      for line in open("summary.txt", encoding="utf-8").read().splitlines():
+          line = line.strip()
+          if not line:
+              continue
+          match = re.fullmatch(r"(errors|slowest)\s*=\s*(\d+)", line)
+          assert match is not None, f"unexpected line: {line!r}"
+          keys.append(match.group(1))
+      assert sorted(keys) == ["errors", "slowest"], keys
+      PYEOF
+  - checkpoint_id: tc-gz-error-count
+    description: the error count matches the archive
+    verify: |
+      set -e
+      # Same PATH hardening as `verify`, and for the same reason: ./bin is on PATH and
+      # the agent can write to it, so an interpreter resolved off the raw PATH could be
+      # a stub that exits 0 and turns this checkpoint into a rubber stamp.
+      CLEAN=""
+      IFS=:
+      for d in $PATH; do
+        case "$d" in ""|.|./*|../*|"$PWD"|"$PWD"/*) continue ;; esac
+        CLEAN="${CLEAN:+$CLEAN:}$d"
+      done
+      unset IFS
+      PATH="$CLEAN"
+      export PATH
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import gzip
+      import json
+      import re
+
+      with gzip.open("data/events.json.gz", "rt", encoding="utf-8") as fh:
+          rows = json.load(fh)
+      want = sum(1 for r in rows if r["level"] == "error")
+      match = re.search(r"^\s*errors\s*=\s*(\d+)\s*$", open("summary.txt", encoding="utf-8").read(), re.M)
+      assert match is not None and int(match.group(1)) == want, (match and match.group(1), want)
+      PYEOF
+  - checkpoint_id: tc-gz-slowest-id
+    description: the slowest record's id matches the archive
+    verify: |
+      set -e
+      # Same PATH hardening as `verify`, and for the same reason: ./bin is on PATH and
+      # the agent can write to it, so an interpreter resolved off the raw PATH could be
+      # a stub that exits 0 and turns this checkpoint into a rubber stamp.
+      CLEAN=""
+      IFS=:
+      for d in $PATH; do
+        case "$d" in ""|.|./*|../*|"$PWD"|"$PWD"/*) continue ;; esac
+        CLEAN="${CLEAN:+$CLEAN:}$d"
+      done
+      unset IFS
+      PATH="$CLEAN"
+      export PATH
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import gzip
+      import json
+      import re
+
+      with gzip.open("data/events.json.gz", "rt", encoding="utf-8") as fh:
+          rows = json.load(fh)
+      want = min(rows, key=lambda r: (-r["ms"], r["id"]))["id"]
+      match = re.search(r"^\s*slowest\s*=\s*(\d+)\s*$", open("summary.txt", encoding="utf-8").read(), re.M)
+      assert match is not None and int(match.group(1)) == want, (match and match.group(1), want)
+      PYEOF
+
+metadata:
+  hidden_verify_commitment: sha256:022fb45b4c57d33961c381ed3d45007a04cea2622ae167b397c37003958a25b1

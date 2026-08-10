@@ -1,0 +1,12 @@
+{
+  "run_id": "2026-07-29-philluiz-blackwell-xl-v1",
+  "proof_bundle": "https://huggingface.co/galuis116/sparkdistill-2026-07-29-philluiz-blackwell-xl-v1",
+  "scores": {
+    "gsm8k": 0.6,
+    "triton": 0.735,
+    "triton_quick": 0.735,
+    "triton_exec_pass_rate": 1.0,
+    "triton_correctness": 1.0,
+    "triton_syntax_pass_rate": 1.0
+  }
+}

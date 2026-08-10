@@ -1,0 +1,32 @@
+{
+  "_comment": "sparkdistill scoring intent for SN74 / Gittensor. SN74 pays VERIFIED DISTILLATION QUALITY IMPROVEMENT ONLY. This file is documentation - the live payout is fixed_base_score x label_multiplier from the org config (master_repositories.json), not this file.",
+  "model": "quality-only",
+  "scoring": "Each merged PR scores fixed_base_score (1.0) x its quality tier label. Training-track eval:* tiers pay 2x the dataset:* tier at the same letter (XS/S/M/L/XL). BASELINE (first verified checkpoint on a new student/phase) pays 2.0. A verified quality improvement is scored the same wherever it lands (teacher / recipes / eval) - there is no per-subsystem emission budget.",
+  "label_multipliers": {
+    "_comment": "Live values in gittensor master_repositories.json (gittensor-model-hub/SparkDistill-Hermes). Payout = fixed_base_score (1.0) x multiplier x time_decay.",
+    "eval:XL": 8.0,
+    "eval:L": 5.0,
+    "eval:M": 3.0,
+    "eval:S": 2.0,
+    "eval:XS": 1.0,
+    "eval:BASELINE": 2.0,
+    "eval:none": 0.0,
+    "eval:REJECT": 0.0,
+    "dataset:xl": 4.0,
+    "dataset:l": 2.5,
+    "dataset:m": 1.5,
+    "dataset:s": 1.0,
+    "dataset:xs": 0.5,
+    "dataset:none": 0.0,
+    "dataset:REJECT": 0.0
+  },
+  "non_quality_prs": "Welcome, but score 0. Correct-but-not-better (eval:none), tooling, benchmarks, docs, and refactors earn no SN74 emission. The eval/scoring harness is maintainer-owned (see CONTRIBUTING.md).",
+  "areas": {
+    "_comment": "Categorization only - drives the deterministic area:* labels for display, NOT emission weights.",
+    "teacher": "teacher-trajectory generation, sampling, and provider integrations",
+    "recipes": "Axolotl training recipes - data mix, hyperparameters, adapter config",
+    "eval": "benchmark harness + eval scoring + cheap proof verification (harness scripts are maintainer-owned)",
+    "proof": "GPU confidential-computing attestation + Hugging Face proof-bundle packaging/publishing"
+  },
+  "notes": "Tiers are maturity-adaptive: as a student checkpoint nears its teacher's benchmark ceiling, improvement is scored vs remaining headroom. Full reward model: https://github.com/gittensor-ai-lab"
+}

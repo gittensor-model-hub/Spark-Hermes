@@ -1,0 +1,399 @@
+# Terminal agent: a dependency/version problem with no package index in sight.
+#
+# The obvious first move -- `tools/install_dep.sh corelib` -- succeeds and still leaves
+# the app broken, because the pin it resolves is stale. Fixing that surfaces a second,
+# different failure: the 2.x line moved the API the app calls. So the shape being measured
+# is "the command worked, the program still doesn't", twice in a row, offline.
+#
+# Four cheats are closed deliberately. The vendored dependency trees are protected paths,
+# so putting the removed function back into corelib 2.1.0 disqualifies the run; and the
+# grader re-installs from the pin into a throwaway directory rather than trusting
+# whatever is sitting in ./deps, so hand-patching the installed copy does not survive.
+#
+# The other two are the ones that skip the migration entirely, and neither is visible to
+# any check on the app's *output*: dropping a `corelib.py` compat shim next to report.py
+# (it shadows the installed package, because a script's own directory precedes PYTHONPATH),
+# and simply parsing the dates inline and never importing corelib at all. A third variant
+# teaches `tools/install_dep.sh` -- which is not protected, and which the clean-room step
+# re-runs -- to graft `parse_date` back on after every install. All three are caught by
+# substitution: the final step runs the app against a corelib whose `dates.parse` shifts
+# the year, and requires the report to move with it. Only an app that really routes
+# through the installed package can.
+task_id: ta-vendored-version-conflict
+tags: [terminal_agent, dependencies, versioning, offline]
+prompt: |
+  `app/report.py` summarises `data/events.csv` into `out/summary.csv` (one
+  `YYYY-MM,total` line per month, ascending). It is currently unusable. There is no
+  network here: every dependency you could need is already vendored under `vendor/`,
+  and `tools/install_dep.sh` is how things get installed into `./deps`.
+
+  Leave the workspace in this state:
+
+    1. `sh run.sh` exits 0 and writes the correct `out/summary.csv`.
+    2. The dependency installed in `./deps` satisfies what `app/requirements.txt` asks
+       for.
+    3. It installs that way for the next person too: `sh tools/install_dep.sh corelib`
+       with no version argument must install the satisfying version, from a clean
+       start, without anyone knowing which one to name.
+    4. `app/report.py` still gets its date handling *from the installed corelib*. Do not
+       work around the dependency: no local `corelib` module beside the app, no shim
+       that puts the old API back, no parsing the dates inline.
+
+  Read-only: `run.sh`, `data/events.csv`, and the vendored dependency sources under
+  `vendor/corelib-*/corelib/`. Everything else -- including the pin file and the
+  application code -- is yours to change.
+tools: [terminal, file_read, file_write, python]
+verification_tools: [terminal, file_read, python]
+# `terminal` is left out on purpose, matching v0's fix-failing-test: it is the tool the
+# agent re-runs the app with, and calling it a mutation would let a self-check reset the
+# very clock that measures self-checking. The application edit lands via file_write/edit.
+mutating_tools: [file_write, edit, python]
+# The two vendored trees are evidence, not workspace: restoring `parse_date` into the
+# 2.x package would "fix" the app while defeating the entire point of the task, and the
+# stale 1.4.2 tree has to stay as it is for the pin to mean anything. run.sh is the
+# contract the grader runs the app under, and events.csv is the fixture the expected
+# output is computed from.
+protected_paths:
+  - run.sh
+  - data/events.csv
+  - vendor/corelib-1.4.2/corelib/__init__.py
+  - vendor/corelib-2.1.0/corelib/__init__.py
+  - vendor/corelib-2.1.0/corelib/dates.py
+timeout_s: 600
+max_steps: 45
+max_verification_steps: 40
+checkpoint_every: 1
+setup: |
+  set -e
+  mkdir -p app data tools vendor/corelib-1.4.2/corelib vendor/corelib-2.1.0/corelib
+
+  cat > vendor/corelib-1.4.2/corelib/__init__.py <<'EOF'
+  """corelib 1.4.x -- the last release with date parsing in the package root."""
+
+  __version__ = "1.4.2"
+
+
+  def parse_date(text):
+      """Parse an ISO-8601 date into a plain (year, month, day) tuple."""
+      year, month, day = text.split("-")
+      return (int(year), int(month), int(day))
+  EOF
+
+  cat > vendor/corelib-2.1.0/corelib/__init__.py <<'EOF'
+  """corelib 2.x -- see MIGRATION.md for what moved out of the package root."""
+
+  from . import dates
+
+  __version__ = "2.1.0"
+  __all__ = ["dates"]
+  EOF
+
+  cat > vendor/corelib-2.1.0/corelib/dates.py <<'EOF'
+  """Date handling. Split out of the package root in 2.0."""
+
+  from collections import namedtuple
+
+  Date = namedtuple("Date", "year month day")
+
+
+  def parse(text):
+      """Parse an ISO-8601 date into a Date namedtuple."""
+      year, month, day = text.split("-")
+      return Date(int(year), int(month), int(day))
+  EOF
+
+  cat > vendor/corelib-2.1.0/MIGRATION.md <<'EOF'
+  # Migrating to corelib 2.x
+
+  * `corelib.parse_date(text)` was **removed** in 2.0. Use `corelib.dates.parse(text)`.
+    It returns a `Date` namedtuple (`.year`, `.month`, `.day`) instead of a plain
+    3-tuple; indexing still works, so `parsed[0]` is still the year.
+  * `corelib.__version__` is unchanged in meaning.
+  EOF
+
+  cat > vendor/pinned.txt <<'EOF'
+  # Default versions used when install_dep.sh is called without an explicit version.
+  # One `name-version` per line.
+  corelib-1.4.2
+  EOF
+
+  cat > tools/install_dep.sh <<'EOF'
+  #!/bin/sh
+  # Install a vendored dependency into $DEPS (default ./deps).
+  #
+  #   tools/install_dep.sh corelib          # resolves the pin in vendor/pinned.txt
+  #   tools/install_dep.sh corelib-2.1.0    # installs that exact version
+  #
+  # There is no index and no download: everything comes from vendor/.
+  set -e
+  name=$1
+  if [ -z "$name" ]; then
+      echo "usage: install_dep.sh <name>[-<version>]" >&2
+      exit 2
+  fi
+  DEPS=${DEPS:-$PWD/deps}
+  case "$DEPS" in
+    /*) ;;
+    *) DEPS="$PWD/$DEPS" ;;
+  esac
+  root=$(cd "$(dirname "$0")/.." && pwd)
+  case "$name" in
+    *-*.*)
+      dir="$root/vendor/$name"
+      ;;
+    *)
+      pinned=$(grep "^$name-" "$root/vendor/pinned.txt" | head -n 1)
+      if [ -z "$pinned" ]; then
+          echo "install_dep.sh: no pin for $name in vendor/pinned.txt" >&2
+          exit 1
+      fi
+      dir="$root/vendor/$pinned"
+      ;;
+  esac
+  if [ ! -d "$dir" ]; then
+      echo "install_dep.sh: no vendored source at $dir" >&2
+      exit 1
+  fi
+  package=${name%%-*}
+  mkdir -p "$DEPS"
+  rm -rf "$DEPS/$package"
+  cp -R "$dir/$package" "$DEPS/$package"
+  echo "installed $(basename "$dir") into $DEPS"
+  EOF
+  chmod 755 tools/install_dep.sh
+
+  cat > run.sh <<'EOF'
+  #!/bin/sh
+  # Run the report against the dependencies installed in $DEPS (default ./deps).
+  DEPS=${DEPS:-$PWD/deps}
+  case "$DEPS" in
+    /*) ;;
+    *) DEPS="$PWD/$DEPS" ;;
+  esac
+  PYTHONPATH="$DEPS${PYTHONPATH:+:$PYTHONPATH}" exec python3 app/report.py "$@"
+  EOF
+  chmod 755 run.sh
+
+  cat > app/requirements.txt <<'EOF'
+  corelib>=2.0
+  EOF
+
+  cat > app/report.py <<'EOF'
+  """Monthly totals from data/events.csv, written to out/summary.csv."""
+
+  import os
+
+  import corelib
+
+  REQUIRED = (2, 0)
+  _found = tuple(int(part) for part in corelib.__version__.split(".")[:2])
+  if _found < REQUIRED:
+      raise SystemExit(
+          "report.py needs corelib>=2.0 (see app/requirements.txt); the installed "
+          "corelib is %s" % corelib.__version__
+      )
+
+
+  def main():
+      totals = {}
+      with open(os.path.join("data", "events.csv")) as handle:
+          for row in handle:
+              row = row.strip()
+              if not row or row.startswith("#"):
+                  continue
+              date_text, amount = row.split(",")
+              parsed = corelib.parse_date(date_text)
+              key = "%04d-%02d" % (parsed[0], parsed[1])
+              totals[key] = totals.get(key, 0) + int(amount)
+      os.makedirs("out", exist_ok=True)
+      with open(os.path.join("out", "summary.csv"), "w") as handle:
+          for key in sorted(totals):
+              handle.write("%s,%d\n" % (key, totals[key]))
+      print("wrote out/summary.csv (%d months)" % len(totals))
+
+
+  if __name__ == "__main__":
+      main()
+  EOF
+
+  cat > data/events.csv <<'EOF'
+  # date,amount
+  2025-01-04,120
+  2025-01-19,80
+  2025-02-02,45
+  2025-02-27,-15
+  2025-03-11,300
+  2025-03-12,10
+  2025-01-31,5
+  EOF
+checkpoints:
+  - checkpoint_id: deps-hold-corelib-2x
+    description: the dependency installed in ./deps satisfies corelib>=2.0
+    verify: |
+      set -e
+      test -f deps/corelib/__init__.py
+      PYTHONPATH=deps python3 -c "
+      import corelib
+      major = int(corelib.__version__.split('.')[0])
+      raise SystemExit(0 if major >= 2 else 1)
+      "
+  - checkpoint_id: default-install-resolves-2x
+    description: install_dep.sh with no version installs a satisfying corelib from clean
+    verify: |
+      set -e
+      scratch=$(mktemp -d)
+      trap 'rm -rf "$scratch"' EXIT
+      DEPS="$scratch/deps" sh tools/install_dep.sh corelib > /dev/null
+      PYTHONPATH="$scratch/deps" python3 -c "
+      import corelib
+      major = int(corelib.__version__.split('.')[0])
+      raise SystemExit(0 if major >= 2 else 1)
+      "
+  - checkpoint_id: report-runs-clean
+    description: sh run.sh exits 0 and leaves the right monthly totals
+    verify: |
+      set -e
+      scratch=$(mktemp -d)
+      trap 'rm -rf "$scratch"' EXIT
+      sh run.sh > /dev/null
+      printf '2025-01,205\n2025-02,30\n2025-03,310\n' > "$scratch/expected"
+      cmp -s out/summary.csv "$scratch/expected"
+  - checkpoint_id: app-works-on-pristine-vendor
+    description: the app runs against the untouched vendored 2.1.0 tree
+    # Run from a throwaway directory with only the fixture copied in, so this never
+    # writes the deliverable the previous checkpoint is grading, and so a hand-patched
+    # ./deps cannot stand in for a real migration.
+    verify: |
+      set -e
+      scratch=$(mktemp -d)
+      trap 'rm -rf "$scratch"' EXIT
+      root=$PWD
+      mkdir -p "$scratch/data"
+      cp data/events.csv "$scratch/data/events.csv"
+      cd "$scratch"
+      PYTHONPATH="$root/vendor/corelib-2.1.0" python3 "$root/app/report.py" > /dev/null
+      printf '2025-01,205\n2025-02,30\n2025-03,310\n' > expected
+      cmp -s out/summary.csv expected
+  - checkpoint_id: app-uses-installed-corelib
+    description: the report's dates come from the installed corelib, not a shim or inline parsing
+    # Same substitution the grader ends on, so the timeline cannot show this objective met
+    # while `verify` disagrees: an app whose dates come from somewhere other than the
+    # installed package does not move when the package's parser moves.
+    verify: |
+      set -e
+      scratch=$(mktemp -d)
+      trap 'rm -rf "$scratch"' EXIT
+      mkdir -p "$scratch/probe" "$scratch/run/data"
+      cp -R vendor/corelib-2.1.0/corelib "$scratch/probe/corelib"
+      cat >> "$scratch/probe/corelib/dates.py" <<'EOF'
+
+      _grader_real_parse = parse
+
+
+      def parse(text):
+          parsed = _grader_real_parse(text)
+          return Date(parsed.year + 1000, parsed.month, parsed.day)
+      EOF
+      cp -R app "$scratch/run/app"
+      cp data/events.csv "$scratch/run/data/events.csv"
+      printf '3025-01,205\n3025-02,30\n3025-03,310\n' > "$scratch/expected"
+      cd "$scratch/run"
+      PYTHONPATH="$scratch/probe" python3 app/report.py > /dev/null
+      cmp -s out/summary.csv "$scratch/expected"
+# Expected totals, computed here and not read out of the workspace:
+#   2025-01: 120 + 80 + 5 = 205
+#   2025-02: 45 + (-15)   = 30
+#   2025-03: 300 + 10     = 310
+verify: |
+  set -e
+  scratch=$(mktemp -d)
+  trap 'rm -rf "$scratch"' EXIT
+  root=$PWD
+  printf '2025-01,205\n2025-02,30\n2025-03,310\n' > "$scratch/expected"
+
+  # 1. What the agent left behind actually runs and is correct.
+  sh run.sh > /dev/null
+  if cmp -s out/summary.csv "$scratch/expected"; then
+      :
+  else
+      echo "out/summary.csv is wrong:" >&2
+      cat out/summary.csv >&2
+      exit 1
+  fi
+
+  # 2. The installed dependency satisfies app/requirements.txt.
+  PYTHONPATH=deps python3 -c "
+  import corelib
+  major = int(corelib.__version__.split('.')[0])
+  if major < 2:
+      raise SystemExit('deps/ holds corelib %s, below the required 2.0' % corelib.__version__)
+  "
+
+  # 3. Clean room: install from the pin into a throwaway prefix and run the app there,
+  #    with only the fixture carried across. This is what a fresh checkout would get, so
+  #    a hand-patched ./deps or a one-off install command does not survive it.
+  DEPS="$scratch/deps" sh tools/install_dep.sh corelib > /dev/null
+  PYTHONPATH="$scratch/deps" python3 -c "
+  import corelib
+  major = int(corelib.__version__.split('.')[0])
+  if major < 2:
+      raise SystemExit('the default install still resolves corelib %s' % corelib.__version__)
+  "
+  mkdir -p "$scratch/run/data"
+  cp data/events.csv "$scratch/run/data/events.csv"
+  # Subshell, not a bare `cd`: the checks below have to run back at the workspace root,
+  # and under `set -e` a failing subshell still aborts the script.
+  (
+      cd "$scratch/run"
+      PYTHONPATH="$scratch/deps" python3 "$root/app/report.py" > /dev/null
+      if cmp -s out/summary.csv "$scratch/expected"; then
+          :
+      else
+          echo "clean-room run produced:" >&2
+          cat out/summary.csv >&2
+          exit 1
+      fi
+  )
+
+  # 4. The app must actually route through the installed corelib. Every check above is
+  #    satisfied just as well by an app that never imports it -- a `corelib.py` shim
+  #    dropped beside report.py shadows the installed package, and inlining the date
+  #    split removes the dependency altogether -- and both leave the migration undone.
+  #
+  #    Proof by substitution rather than by reading the source, which a comment could
+  #    fake: build a corelib whose `dates.parse` shifts the year by 1000 (the shipped
+  #    2.1.0 package, which is a protected path, with an override appended, so the rest
+  #    of the API is exactly as released) and require the report to move with it. The
+  #    whole app directory is copied across, so a shim travels with it and shadows the
+  #    probe exactly as it would shadow the real thing -- and is caught by the year not
+  #    moving.
+  mkdir -p "$scratch/probe"
+  cp -R vendor/corelib-2.1.0/corelib "$scratch/probe/corelib"
+  cat >> "$scratch/probe/corelib/dates.py" <<'EOF'
+
+  _grader_real_parse = parse
+
+
+  def parse(text):
+      parsed = _grader_real_parse(text)
+      return Date(parsed.year + 1000, parsed.month, parsed.day)
+  EOF
+  mkdir -p "$scratch/probe_run/data"
+  cp -R app "$scratch/probe_run/app"
+  cp data/events.csv "$scratch/probe_run/data/events.csv"
+  printf '3025-01,205\n3025-02,30\n3025-03,310\n' > "$scratch/probe_expected"
+  (
+      cd "$scratch/probe_run"
+      PYTHONPATH="$scratch/probe" python3 app/report.py > /dev/null
+      if cmp -s out/summary.csv "$scratch/probe_expected"; then
+          :
+      else
+          echo "app/report.py is not getting its dates from the installed corelib:" >&2
+          echo "against a corelib whose dates.parse shifts the year by 1000 it wrote" >&2
+          cat out/summary.csv >&2
+          exit 1
+      fi
+  )
+
+metadata:
+  hidden_verify_commitment: sha256:c869c3a53dcb74d8a784a9d36af8941723fb0605affe87745fa2b38ae2e25b4a

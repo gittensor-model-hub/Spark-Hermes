@@ -1,0 +1,123 @@
+name: Rollout track gate
+
+# A sibling of training_track.yml, deliberately. That workflow already paid for the lessons
+# encoded here -- read the submission without executing it, resolve everything from the base
+# ref, hold a lock that matches what the job actually mutates -- and reinventing them would
+# mean learning them again.
+#
+# What it does NOT copy is the auto-merge. `--merge-on-pass` needs `contents: write`, and a
+# token with write on contents in a `pull_request_target` job is the single most dangerous
+# combination in GitHub Actions. The training track earned that permission by needing to
+# crown a frontier in the same job. This gate needs nothing of the kind: it decides one
+# data-only row, and a human clicking merge on a green check costs seconds. When auto-merge
+# is wanted here it should be its own change, argued on its own.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    # `paths`, not `paths-ignore`. A rollout submission touches exactly one file and
+    # `check_paths` refuses anything else, so firing on anything else is work with no
+    # possible outcome but a rejection the miner already gets from the path check.
+    paths:
+      - "datasets/rollouts.jsonl"
+
+permissions:
+  contents: read
+  # Enough to label and comment, and nothing that can advance a ref. See the note above.
+  pull-requests: write
+  issues: write
+
+concurrency:
+  # ITS OWN GROUP. Never `training-track-frontier-lock`.
+  #
+  # Two reasons, and the second is the one that bites. The obvious one: this gate mutates
+  # nothing shared -- no frontier, no ledger -- so it has no reason to serialise behind a
+  # training run. The subtle one is written into training_track.yml itself, which
+  # `paths-ignore`s datasets/rollouts.jsonl precisely because a rollout PR firing that
+  # workflow would queue every real SN74 training submission behind unrelated dataset work,
+  # while the gate returned `training:skipped` and the check went green. Sharing a group
+  # here would rebuild that hazard from the other side.
+  #
+  # Per-PR rather than global: two rollout submissions do not interact. `check_novelty`
+  # reads the base registry, so a second submission racing a first sees the base either way
+  # and the duplicate is caught at merge, not by queueing.
+  group: rollout-track-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify-rollout-track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout trusted SparkDistill base
+        # The BASE ref, pinned action, full history. Everything that runs in this job comes
+        # from here; nothing from the pull request is ever checked out.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Read untrusted submission without executing it
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Fetched into refs, read with git-show and git-diff. The head is never checked
+          # out, so no file from the pull request is ever on disk where something could
+          # execute it -- and this job holds secrets.
+          git fetch --no-tags origin \
+            "${BASE_REF}:refs/remotes/origin/rollout-base"
+          git fetch --no-tags origin \
+            "pull/${PR_NUMBER}/head:refs/remotes/origin/rollout-pr-head"
+          MERGE_BASE="$(git merge-base \
+            refs/remotes/origin/rollout-base \
+            refs/remotes/origin/rollout-pr-head)"
+          git diff --name-only \
+            "${MERGE_BASE}" \
+            refs/remotes/origin/rollout-pr-head > /tmp/changed_paths.txt
+          echo "${MERGE_BASE}" > /tmp/merge_base_ref.txt
+          echo "changed paths:"; cat /tmp/changed_paths.txt
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install SparkDistill
+        # --extra proof pulls in the attestation crypto: dcap-qvl verifies the Intel TDX
+        # quote against the PCK chain and Intel's PCS, pyjwt verifies NVIDIA's NRAS token
+        # against its JWKS. Without them every submission fails on attestation, which is
+        # the correct direction to fail but a confusing one to debug.
+        #
+        # No API key. Both roots are public and well-known, which is the point of reading
+        # a miner-published attestation rather than fetching a third party's receipt.
+        run: uv sync --extra dev --extra proof --frozen
+
+      - name: Decide the submission
+        id: gate
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          uv run python -m eval.rollout_track_cli \
+            --base-ref refs/remotes/origin/rollout-base \
+            --head-ref refs/remotes/origin/rollout-pr-head \
+            --changed-paths-file /tmp/changed_paths.txt \
+            --out /tmp/rollout_gate_report.json
+
+      - name: Report the decision on the pull request
+        # Runs whether the gate accepted or rejected: a rejection with no reasons posted is
+        # a miner guessing, and every reason was already collected.
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f /tmp/rollout_gate_report.json ]; then
+            echo "the gate produced no report"; exit 0
+          fi
+          VERDICT="$(jq -r '.verdict' /tmp/rollout_gate_report.json)"
+          {
+            echo "**${VERDICT}**"
+            echo
+            jq -r '.issues[]? | "- \(.)"' /tmp/rollout_gate_report.json
+          } > /tmp/comment.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/comment.md
+          gh pr edit "${{ github.event.pull_request.number }}" --add-label "${VERDICT}" || true

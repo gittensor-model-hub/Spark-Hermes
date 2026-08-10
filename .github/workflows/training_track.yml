@@ -1,0 +1,128 @@
+name: Training track gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+    paths-ignore:
+      - "datasets/registry.jsonl"
+      # The dataset track's own artifacts. Not ignored for tidiness: this workflow holds
+      # a global, non-cancelling lock (see `concurrency` below), so a dataset PR that
+      # fires it serialises every real SN74 training submission behind unrelated work.
+      # The gate itself correctly returns training:skipped, which is exactly what makes
+      # the problem silent -- the check passes and the queue backs up anyway.
+      - "datasets/rollouts.jsonl"
+      - "datasets/rounds/**"
+
+permissions:
+  actions: read
+  # contents: write is required for the --merge-on-pass auto-merge: `gh pr merge`
+  # calls the mergePullRequest GraphQL mutation, which advances the base ref and
+  # so needs write on contents. With contents: read it fails closed with
+  # "Resource not accessible by integration (mergePullRequest)", surfacing the
+  # gate as a failed check even when the submission verified clean.
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  # Serialize every training-track gate run across ALL PRs, not just reruns of the
+  # same one. Each run checks out runs/frontiers.json fresh and, on --merge-on-pass,
+  # crowns it in the same job (#316) — but two PRs gating concurrently can each read
+  # the frontier before either's crown has landed, so both get tiered against a stale
+  # value. That is exactly what happened to #310/#311/#312/#313: each was measured
+  # against the pre-#301 frontier because #301's (and then #308's) real, better
+  # composite hadn't been crowned yet, so runs that were actually regressions against
+  # the true state of the art still cleared the eval:S/eval:XL threshold and merged.
+  # A single global queue guarantees a PR's gate always sees every prior
+  # training-track merge's crowned frontier — no same-PR cancel-in-progress, since a
+  # second push to the same PR should still queue behind, not race, whatever else is
+  # gating. Shares its group with training_track_ledger.yml (fired by a *manual*
+  # merge) — that workflow reads/writes the exact same frontier files, so a manual
+  # merge racing an in-flight auto-merge gate is the same hazard under a different
+  # trigger; one queue across both workflows closes it too.
+  group: training-track-frontier-lock
+  cancel-in-progress: false
+
+jobs:
+  verify-training-track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout trusted SparkDistill base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Read untrusted submission without executing it
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags origin \
+            "${BASE_REF}:refs/remotes/origin/training-base"
+          git fetch --no-tags origin \
+            "pull/${PR_NUMBER}/head:refs/remotes/origin/training-pr-head"
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > /tmp/pr_body.md
+          MERGE_BASE="$(git merge-base \
+            refs/remotes/origin/training-base \
+            refs/remotes/origin/training-pr-head)"
+          git diff --name-only \
+            "${MERGE_BASE}" \
+            refs/remotes/origin/training-pr-head > /tmp/changed_paths.txt
+          echo "${MERGE_BASE}" > /tmp/merge_base_ref.txt
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install SparkDistill
+        # --extra proof pulls in pyjwt[crypto] and dcap-qvl — CI fail-closes on
+        # NRAS JWKS (GPU) + Intel DCAP/PCS (TDX) attestation crypto and
+        # claim_sha256 binding without a GPU. Attested eval samples covering
+        # every claimed benchmark complete verify_submission entirely on CPU.
+        run: uv sync --extra dev --extra proof --frozen
+
+      - name: Verify training-track policy
+        id: gate
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          uv run python -m eval.training_track_gate \
+            --head-ref refs/remotes/origin/training-pr-head \
+            --merge-base-ref "$(cat /tmp/merge_base_ref.txt)" \
+            --out eval/results/training_track_gate_report.json \
+            --pr-body-file /tmp/pr_body.md \
+            --changed-paths-file /tmp/changed_paths.txt \
+            --apply-label \
+            --close-on-reject \
+            --merge-on-pass \
+            --pr-number ${{ github.event.pull_request.number }}
+
+      - name: Record ledger + crown frontier for an auto-merged run
+        # A GITHUB_TOKEN merge raises no events, so training_track_ledger.yml never
+        # fires for a --merge-on-pass merge (#309): the run merges with a reward tier
+        # but the frontier never rises. Record + crown here instead, in the same job
+        # that already holds contents: write, right after the gate merged. Gated on the
+        # gate's `merged` output so a rejected/closed PR is never recorded. Refresh to
+        # the merged main first so the ledger reads attestation.json from its final
+        # path and the publish push fast-forwards. Idempotent with the ledger workflow
+        # (which still runs for human merges): eval.record_training_ledger skips a
+        # run_id already in the ledger.
+        if: steps.gate.outputs.merged == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "gittensor-eval-bot"
+          git config --global user.email "gittensor-eval-bot@users.noreply.github.com"
+          git fetch --no-tags origin main
+          git checkout -B main FETCH_HEAD
+          uv run python -m eval.record_training_ledger \
+            --pr-url "${{ github.event.pull_request.html_url }}" \
+            --pr-body-file /tmp/pr_body.md \
+            --head-ref main \
+            --merge-base-ref "$(cat /tmp/merge_base_ref.txt)" \
+            --changed-paths-file /tmp/changed_paths.txt \
+            --publish

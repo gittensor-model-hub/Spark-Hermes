@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.ruff_cache/
+.pytest_cache/
+.pyright/
+
+# uv
+uv.lock.tmp
+
+# Data / model artifacts (large, not checked in)
+data/raw/
+data/processed/
+data/prepared/
+*.jsonl
+!data/prompts/*.jsonl
+!eval/data/gsm8k_regression_50.jsonl
+!eval/data/gsm8k_fewshot_5.jsonl
+# Hermes agent task prompts and labeled routing sets are source, not generated data —
+# tracked, not ignored. Covers nested task dirs (hermes/tasks/, hermes/router/tasks/).
+!hermes/**/tasks/*.jsonl
+!hermes/tasks/*.jsonl
+checkpoints/
+outputs/
+eval/results/
+proof/_bundles/
+*.safetensors
+*.gguf
+# tritonbench is vendored (see tritonbench/VENDORED.md) so evaluators and miners
+# run the same harness; only its generated/derived artifacts stay ignored.
+tritonbench/.venv/
+tritonbench/.tmp/
+tritonbench/results/
+tritonbench/LLM_generated/
+!tritonbench/**/*.jsonl
+
+# runs/ledger.jsonl is the immutable proof-of-training log — tracked, not ignored
+!runs/ledger.jsonl
+# datasets/registry.jsonl is the immutable dataset-track registry — tracked, not ignored
+!datasets/registry.jsonl
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local scratch: status notes, working files, anything not meant to ship. Ignored rather
+# than committed so a working note never has to be written as if it were documentation.
+.local/

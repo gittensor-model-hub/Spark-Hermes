@@ -1,0 +1,110 @@
+# Long-horizon: a persistent objective that is easy to satisfy in pieces and easy to
+# break while satisfying the next piece. The interesting failure is not "couldn't do it"
+# -- it is finishing step 3 by undoing step 1, which a single end-of-episode check
+# cannot distinguish from never having done step 1 at all.
+task_id: migrate-and-keep-green
+tags: [long_horizon, swe, python, migration]
+prompt: |
+  This package computes statistics. Do all four of the following, and make sure that
+  everything you have already finished is still working when you stop:
+
+    1. `pkg/stats.py` must expose a working `median` that is correct for even-length
+       input (it currently is not).
+    2. Add a `variance` function to `pkg/stats.py` (population variance).
+    3. The deprecated `pkg/legacy.py` shim must be deleted, and nothing may import it.
+    4. `python -m unittest discover -s tests -t .` must pass at the end.
+
+  Work in whatever order you like. Re-check your earlier work as you go.
+tools: [terminal, file_read, file_write, python]
+verification_tools: [terminal, file_read, python]
+mutating_tools: [file_write, edit]
+timeout_s: 600
+max_steps: 60
+max_verification_steps: 60
+# Sample after every step. Drift is only visible if an objective is observed passing
+# *before* the step that breaks it, and this task's solutions are short enough that a
+# coarser interval would miss the window entirely. Costs one checkpoint sweep per step.
+checkpoint_every: 1
+setup: |
+  set -e
+  mkdir -p pkg tests
+  touch pkg/__init__.py tests/__init__.py
+  cat > pkg/stats.py <<'EOF'
+  from pkg.legacy import legacy_helper
+
+
+  def mean(values):
+      return sum(values) / len(values)
+
+
+  def median(values):
+      ordered = sorted(values)
+      middle = len(ordered) // 2
+      # Bug: even-length input must average the two middle elements.
+      return ordered[middle]
+  EOF
+  cat > pkg/legacy.py <<'EOF'
+  def legacy_helper():
+      return "deprecated"
+  EOF
+  cat > tests/test_stats.py <<'EOF'
+  import unittest
+
+  from pkg.stats import mean, median
+
+
+  class TestStats(unittest.TestCase):
+      def test_mean(self):
+          self.assertEqual(mean([1, 2, 3]), 2)
+
+      def test_median_even(self):
+          self.assertEqual(median([1, 2, 3, 4]), 2.5)
+  EOF
+# Each sub-objective is checkable on its own, so the timeline shows which one broke and
+# when. Note objective 1 and 3 interact: stats.py imports legacy, so deleting the shim
+# without fixing the import breaks median again -- that is the drift this task is for.
+checkpoints:
+  - checkpoint_id: median-even
+    description: median is correct for even-length input
+    verify: |
+      python -c "
+      import sys; sys.path.insert(0, '.')
+      from pkg.stats import median
+      assert median([1,2,3,4]) == 2.5, median([1,2,3,4])
+      assert median([1,2,3,4,5,6]) == 3.5
+      "
+  - checkpoint_id: variance-exists
+    description: population variance is implemented and correct
+    verify: |
+      python -c "
+      import sys; sys.path.insert(0, '.')
+      from pkg.stats import variance
+      assert abs(variance([1,2,3,4]) - 1.25) < 1e-9, variance([1,2,3,4])
+      "
+  - checkpoint_id: legacy-removed
+    description: the deprecated shim is gone and unreferenced
+    # `if grep; then exit 1; fi`, not `! grep`: under `set -e` bash never exits on a
+    # command whose status is inverted with `!`, so the negated form is a silent no-op.
+    # --include='*.py' keeps compiled bytecode in __pycache__ from counting as a
+    # reference -- the objective is that no source imports it, and an agent cannot
+    # reasonably be asked to scrub .pyc files it never created.
+    verify: |
+      test ! -f pkg/legacy.py
+      if grep -rq --include='*.py' legacy pkg/ tests/; then exit 1; fi
+  - checkpoint_id: suite-green
+    description: the test suite passes
+    verify: python -m unittest discover -s tests -t . -q
+verify: |
+  set -e
+  python -c "
+  import sys; sys.path.insert(0, '.')
+  from pkg.stats import median, variance
+  assert median([1,2,3,4]) == 2.5
+  assert abs(variance([1,2,3,4]) - 1.25) < 1e-9
+  "
+  test ! -f pkg/legacy.py
+  if grep -rq --include='*.py' legacy pkg/ tests/; then exit 1; fi
+  python -m unittest discover -s tests -t . -q
+
+metadata:
+  hidden_verify_commitment: sha256:0289b6a1e123288d2d4af96d75a24df2a69a9d3c6ea824de0b860b2782c8a1c2

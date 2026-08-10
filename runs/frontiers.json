@@ -1,0 +1,28 @@
+{
+  "blackwell": {
+    "gpu_architecture": "blackwell",
+    "run_id": "2026-07-29-philluiz-blackwell-xl-v1",
+    "proof_bundle": "https://huggingface.co/galuis116/sparkdistill-2026-07-29-philluiz-blackwell-xl-v1",
+    "scores": {
+      "gsm8k": 0.6,
+      "triton": 0.735,
+      "triton_quick": 0.735,
+      "triton_exec_pass_rate": 1.0,
+      "triton_correctness": 1.0,
+      "triton_syntax_pass_rate": 1.0
+    }
+  },
+  "hopper": {
+    "gpu_architecture": "hopper",
+    "run_id": "2026-07-15-magicrails-hopper-v2",
+    "proof_bundle": "https://huggingface.co/ssnowman/sparkdistill-2026-07-15-magicrails-hopper-v2",
+    "scores": {
+      "gsm8k": 0.74,
+      "triton": 0.3719444444444444,
+      "triton_quick": 0.3719444444444444,
+      "triton_exec_pass_rate": 0.0,
+      "triton_correctness": 0.0,
+      "triton_syntax_pass_rate": 0.6666666666666666
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "run_id": "2026-07-11-qwen3.5-4b-mining-001",
+  "bundle_files": [
+    ".gitattributes",
+    "eval_scores.json",
+    "manifest.json"
+  ],
+  "attestation_passed": true,
+  "attested_hwmodel": "GB20X",
+  "training_claim_issues": [],
+  "mix_provenance_issues": [],
+  "claim_bound": true,
+  "checkpoint_hash_match": true,
+  "claimed_scores": {
+    "gsm8k": 0.6,
+    "triton": 0.42777777777777776,
+    "triton_quick": 0.42777777777777776,
+    "triton_exec_pass_rate": 0.0,
+    "triton_correctness": 0.0,
+    "triton_syntax_pass_rate": 1.0
+  },
+  "proof_verified": true,
+  "tdx_bound": true
+}

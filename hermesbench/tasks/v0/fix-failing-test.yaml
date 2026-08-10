@@ -1,0 +1,74 @@
+# Stdlib-only on purpose: a benchmark task that needs pytest on PATH measures the
+# operator's environment as much as the agent.
+task_id: fix-failing-test
+tags: [terminal_agent, swe, python, debug]
+prompt: |
+  The Python package in this workspace has a failing test suite (`python -m unittest
+  discover -s tests`). Run the tests, find the bug, fix it in the source -- not in the
+  test -- and confirm the whole suite passes.
+tools: [terminal, file_read, file_write, python]
+timeout_s: 300
+max_steps: 30
+# The edit routes for this task, so self_check_rate can see the edit happen. `terminal`
+# is deliberately excluded even though `sed` could mutate through it: terminal is how the
+# agent re-runs the suite, and calling it a mutation would mean the self-check itself
+# reset the "did you look afterwards" clock. An agent that edits via sed reads as
+# never-mutated and drops out of that denominator — the documented blind spot.
+mutating_tools: [file_write, edit, python]
+# The test file is evidence, not workspace. Its digest is taken before the agent runs and
+# again after; any change disqualifies the episode outright. The verifier below already
+# asserts against its own expectations rather than the agent's tests, so this is defence
+# in depth -- an earlier version of this task greped for the expected value instead, and
+# that guard could be satisfied by putting the number in a comment.
+protected_paths:
+  - tests/test_stats.py
+setup: |
+  set -e
+  mkdir -p pkg tests
+  touch pkg/__init__.py tests/__init__.py
+  cat > pkg/stats.py <<'EOF'
+  def mean(values):
+      return sum(values) / len(values)
+
+
+  def median(values):
+      ordered = sorted(values)
+      middle = len(ordered) // 2
+      # Bug: even-length input must average the two middle elements.
+      return ordered[middle]
+  EOF
+  cat > tests/test_stats.py <<'EOF'
+  import unittest
+
+  from pkg.stats import mean, median
+
+
+  class TestStats(unittest.TestCase):
+      def test_mean(self):
+          self.assertEqual(mean([1, 2, 3]), 2)
+
+      def test_median_odd(self):
+          self.assertEqual(median([3, 1, 2]), 2)
+
+      def test_median_even(self):
+          self.assertEqual(median([1, 2, 3, 4]), 2.5)
+  EOF
+# Verification does NOT run the workspace's tests -- it imports pkg.stats and asserts
+# against its own copy of the expectations. Grading the agent's own test file would let
+# it pass by rewriting the assertions, which is exactly what the prompt forbids; a grep
+# for the expected value is no better, since the value can be parked in a comment.
+verify: |
+  python - <<'EOF'
+  import sys
+  sys.path.insert(0, ".")
+  from pkg.stats import mean, median
+
+  assert mean([1, 2, 3]) == 2, "mean is wrong"
+  assert median([3, 1, 2]) == 2, "odd-length median regressed"
+  assert median([1, 2, 3, 4]) == 2.5, f"even-length median still wrong: {median([1, 2, 3, 4])}"
+  assert median([4, 1, 3, 2]) == 2.5, "even-length median must sort first"
+  assert median([1, 2, 3, 4, 5, 6]) == 3.5, "even-length median wrong at length 6"
+  EOF
+
+metadata:
+  hidden_verify_commitment: sha256:a7e7273f2a2e8b7a894988690abf653d4350f22b33b9c5ba862d50c164f34f71

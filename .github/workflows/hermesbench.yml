@@ -1,0 +1,43 @@
+# The benchmark's own smoke run.
+#
+# ci.yml runs the harness's unit tests, which is not the same thing as the benchmark
+# producing a number. Until this job existed there was no reference run anyone could diff
+# against, and a change that broke task setup or verification would pass CI cleanly.
+#
+# This does not need a served model. It exercises everything up to the agent: every task
+# sets its workspace up, every published verifier runs against a *fresh* workspace and is
+# asserted to FAIL there, and every withheld verifier is asserted to pass against the
+# solved state its own task describes. A verifier that passes an untouched workspace is
+# not measuring the agent, and that is the failure mode this catches.
+name: hermesbench
+
+on:
+  pull_request:
+    paths:
+      - "hermesbench/**"
+      - "hermes/**"
+      - ".github/workflows/hermesbench.yml"
+  push:
+    branches: [main]
+  schedule:
+    # Nightly, so drift in the base image or a task's toolchain surfaces on its own
+    # rather than inside somebody's unrelated pull request.
+    - cron: "0 4 * * *"
+
+jobs:
+  suite-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: The suite loads and spans every capability category
+        run: uv run python -m hermesbench.runner --suite all --workspace-root /tmp/ws --list
+
+      - name: Setup runs and no published verifier passes an untouched workspace
+        run: uv run python -m hermesbench.suitecheck --suite all

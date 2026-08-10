@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "environment": "REMOTE",
+  "token": "[[\"JWT\", \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJOVi1BdHRlc3RhdGlvbi1TREsiLCJpYXQiOjE3ODUzMzEwNDUsImV4cCI6MTc4NTMzNDY0NSwibmJmIjoxNzg1MzMwOTI1LCJqdGkiOiJiZjY1YWY0ZS0xMjJhLTQzNDYtYmU1OS0wZmEyZDJlZWM5MzkifQ.ovfn7cjweIZTxP0Vdji5IJaJsDnYJDkHrMZtTKhCKqA\"], {\"REMOTE_GPU_CLAIMS\": [[\"JWT\", \"eyJraWQiOiJudi1lYXQta2lkLXByb2QtMjAyNjA3MjkwMjQ0MTc1MjgtYjIxYzRjYjUtZjliYy00OTlkLWIxZDYtMTlkM2UyNjM5MTkzIiwiYWxnIjoiRVMzODQifQ.eyJzdWIiOiJOVklESUEtUExBVEZPUk0tQVRURVNUQVRJT04iLCJ4LW52aWRpYS12ZXIiOiIyLjAiLCJuYmYiOjE3ODUzMzEwNDUsImlzcyI6Imh0dHBzOi8vbnJhcy5hdHRlc3RhdGlvbi5udmlkaWEuY29tIiwieC1udmlkaWEtb3ZlcmFsbC1hdHQtcmVzdWx0Ijp0cnVlLCJzdWJtb2RzIjp7IkdQVS0wIjpbIkRJR0VTVCIsWyJTSEEtMjU2IiwiODc4YmE3MzU2MzUyMTYyMzY2MGVmZDk1OTYzYTI2MGEyZjFkMTI4NjhjYzBmOGUzMTc5Y2FmOTg3ODk4NTBiMSJdXX0sImVhdF9ub25jZSI6IjU1YzU4MTEzOGRmZGY0YTU0YmIyM2U3OWM2ZDBjMTI4YzE5ODQ0NzE5NzA5OTFlNDdiYjA1NDM3MWE0NDE0ZjciLCJleHAiOjE3ODUzMzQ2NDUsImlhdCI6MTc4NTMzMTA0NSwianRpIjoiNmZlMGRlNGItM2Q1OC00OGE4LWIyODktMTI4NzYzOWQ4ZjcxIn0.WGuqkhh1I8IOFlIwzTUoT6-8fmcELL4CrUf7S-iOPU6smGi3ZhhO1mHP4WsB1upeiJiUv9LpLRsDAfNuMTvDrm8iOmdZcTzZpKIIrHQbDyzN4KfRwwBp8x_k1k41EmPF\"], {\"GPU-0\": \"eyJraWQiOiJudi1lYXQta2lkLXByb2QtMjAyNjA3MjkwMjQ0MTc1MjgtYjIxYzRjYjUtZjliYy00OTlkLWIxZDYtMTlkM2UyNjM5MTkzIiwiYWxnIjoiRVMzODQifQ.eyJ4LW52aWRpYS1ncHUtZHJpdmVyLXJpbS1zY2hlbWEtdmFsaWRhdGVkIjp0cnVlLCJpc3MiOiJodHRwczovL25yYXMuYXR0ZXN0YXRpb24ubnZpZGlhLmNvbSIsIngtbnZpZGlhLWdwdS1hdHRlc3RhdGlvbi1yZXBvcnQtY2VydC1jaGFpbi12YWxpZGF0ZWQiOnRydWUsImVhdF9ub25jZSI6IjU1YzU4MTEzOGRmZGY0YTU0YmIyM2U3OWM2ZDBjMTI4YzE5ODQ0NzE5NzA5OTFlNDdiYjA1NDM3MWE0NDE0ZjciLCJ4LW52aWRpYS1ncHUtdmJpb3MtcmltLXNpZ25hdHVyZS12ZXJpZmllZCI6dHJ1ZSwieC1udmlkaWEtZ3B1LXZiaW9zLXJpbS1mZXRjaGVkIjp0cnVlLCJleHAiOjE3ODUzMzQ2NDUsImlhdCI6MTc4NTMzMTA0NSwidWVpZCI6IjYyMjA0NjA3MDY3MTIxNTMwOTA5MzcwMjMwODMyMjc4MTkyMjI2MDM1MDEzMjIyOSIsImp0aSI6Ijg5ZjAwNTM4LWJlMmItNGE0OC05ZDFmLTg4YTU0ZTNhYmNjZSIsIngtbnZpZGlhLWdwdS1hdHRlc3RhdGlvbi1yZXBvcnQtbm9uY2UtbWF0Y2giOnRydWUsIngtbnZpZGlhLWdwdS12Ymlvcy1pbmRleC1uby1jb25mbGljdCI6dHJ1ZSwieC1udmlkaWEtZ3B1LXZiaW9zLXJpbS1jZXJ0LXZhbGlkYXRlZCI6dHJ1ZSwic2VjYm9vdCI6dHJ1ZSwieC1udmlkaWEtZ3B1LWF0dGVzdGF0aW9uLXJlcG9ydC1wYXJzZWQiOnRydWUsIngtbnZpZGlhLWdwdS1kcml2ZXItcmltLXNpZ25hdHVyZS12ZXJpZmllZCI6dHJ1ZSwieC1udmlkaWEtZ3B1LWFyY2gtY2hlY2siOnRydWUsIngtbnZpZGlhLWF0dGVzdGF0aW9uLXdhcm5pbmciOm51bGwsIm5iZiI6MTc4NTMzMTA0NSwieC1udmlkaWEtZ3B1LWRyaXZlci12ZXJzaW9uIjoiNTk1LjcxLjA1IiwieC1udmlkaWEtZ3B1LWRyaXZlci1yaW0tbWVhc3VyZW1lbnRzLWF2YWlsYWJsZSI6dHJ1ZSwieC1udmlkaWEtZ3B1LWF0dGVzdGF0aW9uLXJlcG9ydC1zaWduYXR1cmUtdmVyaWZpZWQiOnRydWUsImh3bW9kZWwiOiJHQjIwWCIsImRiZ3N0YXQiOiJkaXNhYmxlZCIsIngtbnZpZGlhLWdwdS1kcml2ZXItcmltLWZldGNoZWQiOnRydWUsIm9lbWlkIjoiNTcwMyIsIngtbnZpZGlhLWdwdS12Ymlvcy1yaW0tc2NoZW1hLXZhbGlkYXRlZCI6dHJ1ZSwibWVhc3JlcyI6InN1Y2Nlc3MiLCJ4LW52aWRpYS1ncHUtZHJpdmVyLXJpbS1jZXJ0LXZhbGlkYXRlZCI6dHJ1ZSwieC1udmlkaWEtZ3B1LXZiaW9zLXZlcnNpb24iOiI5OC4wMi45RS4wMC4wMSIsIngtbnZpZGlhLWdwdS12Ymlvcy1yaW0tbWVhc3VyZW1lbnRzLWF2YWlsYWJsZSI6dHJ1ZX0.V1IsjFZ0OyMNd00MMokMUKDO7nvkCeHJucalFtS3I1oj_SWTocm9GbQcV0qZHTqLiQVzTje7Zg7FEvjVAWOM_Cp9qKlYsEgjFdIy4xzvY8tuDwgygzsIhvQ4x2Y2GKoA\"}]}]",
+  "claims": {
+    "iss": "NV-Attestation-SDK",
+    "iat": 1785331045,
+    "exp": 1785334645,
+    "nbf": 1785330925,
+    "jti": "bf65af4e-122a-4346-be59-0fa2d2eec939",
+    "devices": {
+      "GPU-0": {
+        "x-nvidia-gpu-driver-rim-schema-validated": true,
+        "iss": "https://nras.attestation.nvidia.com",
+        "x-nvidia-gpu-attestation-report-cert-chain-validated": true,
+        "eat_nonce": "55c581138dfdf4a54bb23e79c6d0c128c1984471970991e47bb054371a4414f7",
+        "x-nvidia-gpu-vbios-rim-signature-verified": true,
+        "x-nvidia-gpu-vbios-rim-fetched": true,
+        "exp": 1785334645,
+        "iat": 1785331045,
+        "ueid": "622046070671215309093702308322781922260350132229",
+        "jti": "89f00538-be2b-4a48-9d1f-88a54e3abcce",
+        "x-nvidia-gpu-attestation-report-nonce-match": true,
+        "x-nvidia-gpu-vbios-index-no-conflict": true,
+        "x-nvidia-gpu-vbios-rim-cert-validated": true,
+        "secboot": true,
+        "x-nvidia-gpu-attestation-report-parsed": true,
+        "x-nvidia-gpu-driver-rim-signature-verified": true,
+        "x-nvidia-gpu-arch-check": true,
+        "x-nvidia-attestation-warning": null,
+        "nbf": 1785331045,
+        "x-nvidia-gpu-driver-version": "595.71.05",
+        "x-nvidia-gpu-driver-rim-measurements-available": true,
+        "x-nvidia-gpu-attestation-report-signature-verified": true,
+        "hwmodel": "GB20X",
+        "dbgstat": "disabled",
+        "x-nvidia-gpu-driver-rim-fetched": true,
+        "oemid": "5703",
+        "x-nvidia-gpu-vbios-rim-schema-validated": true,
+        "measres": "success",
+        "x-nvidia-gpu-driver-rim-cert-validated": true,
+        "x-nvidia-gpu-vbios-version": "98.02.9E.00.01",
+        "x-nvidia-gpu-vbios-rim-measurements-available": true
+      }
+    }
+  },
+  "tdx": null
+}

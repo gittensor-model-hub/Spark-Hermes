@@ -1,0 +1,51 @@
+name: Update canonical dataset pin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - datasets/registry.jsonl
+  # Bot merges from the dataset gate do not re-fire push workflows (GITHUB_TOKEN).
+  workflow_run:
+    workflows: ["Dataset registry gate"]
+    types: [completed]
+  # Safety net when registry merges bypass the dataset gate auto-pin step.
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh-pin:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity for automated commits
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install SparkDistill
+        run: uv sync --extra dev --frozen
+
+      - name: Refresh and publish datasets/canonical.json from HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run python -m eval.update_canonical_pin --publish

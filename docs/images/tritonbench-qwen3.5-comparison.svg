@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="470" viewBox="0 0 900 470" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+<rect x="0.5" y="0.5" width="899" height="469" rx="10" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)" stroke-width="1" />
+<text x="24" y="42" font-size="20" font-weight="700" fill="#0b0b0b">TritonBench: Qwen3.5 family vs. our fine-tuned 4B</text>
+<text x="24" y="64" font-size="12.5" fill="#52514e">3-problem quick corpus (vector_add, softmax, wrong_mask) &#8226; temperature 0 &#8226; thinking disabled &#8226; Blackwell SM120</text>
+<line x1="24" y1="80" x2="876" y2="80" stroke="#e1e0d9" stroke-width="1" />
+<text x="24" y="108" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="15" font-weight="600" fill="#0b0b0b">TritonBench composite score</text>
+<line x1="60" y1="320.0" x2="422.0" y2="320.0" stroke="#c3c2b7" stroke-width="1" />
+<text x="52" y="324.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">0.0</text>
+<line x1="60" y1="264.1" x2="422.0" y2="264.1" stroke="#e1e0d9" stroke-width="1" />
+<text x="52" y="268.1" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">0.2</text>
+<line x1="60" y1="208.2" x2="422.0" y2="208.2" stroke="#e1e0d9" stroke-width="1" />
+<text x="52" y="212.2" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">0.4</text>
+<line x1="60" y1="152.4" x2="422.0" y2="152.4" stroke="#e1e0d9" stroke-width="1" />
+<text x="52" y="156.4" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">0.6</text>
+<path d="M 107.33333333333334 320 L 107.33333333333334 220.61764705882354 Q 107.33333333333334 216.61764705882354 111.33333333333334 216.61764705882354 L 129.33333333333334 216.61764705882354 Q 133.33333333333334 216.61764705882354 133.33333333333334 220.61764705882354 L 133.33333333333334 320 Z" fill="#c3c2b7" />
+<text x="120.3" y="208.6" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" font-weight="500" fill="#52514e" text-anchor="middle">0.370</text>
+<text x="120.3" y="338.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" font-weight="500" fill="#52514e" text-anchor="middle">Qwen3.5-4B</text>
+<text x="120.3" y="352.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="10.5" fill="#898781" text-anchor="middle">(base)</text>
+<path d="M 228.00000000000003 320 L 228.00000000000003 192.11764705882356 Q 228.00000000000003 188.11764705882356 232.00000000000003 188.11764705882356 L 250.00000000000003 188.11764705882356 Q 254.00000000000003 188.11764705882356 254.00000000000003 192.11764705882356 L 254.00000000000003 320 Z" fill="#c3c2b7" />
+<text x="241.0" y="180.1" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" font-weight="500" fill="#52514e" text-anchor="middle">0.472</text>
+<text x="241.0" y="338.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" font-weight="500" fill="#52514e" text-anchor="middle">Qwen3.5-35B-A3B</text>
+<text x="241.0" y="352.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="10.5" fill="#898781" text-anchor="middle">(base)</text>
+<path d="M 348.6666666666667 320 L 348.6666666666667 154.6764705882353 Q 348.6666666666667 150.6764705882353 352.6666666666667 150.6764705882353 L 370.6666666666667 150.6764705882353 Q 374.6666666666667 150.6764705882353 374.6666666666667 154.6764705882353 L 374.6666666666667 320 Z" fill="#2a78d6" />
+<text x="361.7" y="142.7" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" font-weight="700" fill="#0b0b0b" text-anchor="middle">0.606</text>
+<text x="361.7" y="338.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" font-weight="700" fill="#0b0b0b" text-anchor="middle">Our fine-tuned 4B</text>
+<text x="361.7" y="352.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="10.5" fill="#898781" text-anchor="middle">(PR #301)</text>
+<text x="470.0" y="108" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="15" font-weight="600" fill="#0b0b0b">Executes and passes correctness</text>
+<line x1="506.0" y1="320.0" x2="868.0" y2="320.0" stroke="#c3c2b7" stroke-width="1" />
+<text x="498.0" y="324.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">0%</text>
+<line x1="506.0" y1="275.3" x2="868.0" y2="275.3" stroke="#e1e0d9" stroke-width="1" />
+<text x="498.0" y="279.3" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">20%</text>
+<line x1="506.0" y1="230.6" x2="868.0" y2="230.6" stroke="#e1e0d9" stroke-width="1" />
+<text x="498.0" y="234.6" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">40%</text>
+<line x1="506.0" y1="185.9" x2="868.0" y2="185.9" stroke="#e1e0d9" stroke-width="1" />
+<text x="498.0" y="189.9" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">60%</text>
+<line x1="506.0" y1="141.2" x2="868.0" y2="141.2" stroke="#e1e0d9" stroke-width="1" />
+<text x="498.0" y="145.2" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#898781" text-anchor="end">80%</text>
+<path d="M 553.3333333333334 320 L 553.3333333333334 320.0 Q 553.3333333333334 320.0 553.3333333333334 320.0 L 579.3333333333334 320.0 Q 579.3333333333334 320.0 579.3333333333334 320.0 L 579.3333333333334 320 Z" fill="#c3c2b7" />
+<text x="566.3" y="312.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" font-weight="500" fill="#52514e" text-anchor="middle">0%</text>
+<text x="566.3" y="338.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" font-weight="500" fill="#52514e" text-anchor="middle">Qwen3.5-4B</text>
+<text x="566.3" y="352.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="10.5" fill="#898781" text-anchor="middle">(base)</text>
+<path d="M 674.0 320 L 674.0 320.0 Q 674.0 320.0 674.0 320.0 L 700.0 320.0 Q 700.0 320.0 700.0 320.0 L 700.0 320 Z" fill="#c3c2b7" />
+<text x="687.0" y="312.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" font-weight="500" fill="#52514e" text-anchor="middle">0%</text>
+<text x="687.0" y="338.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" font-weight="500" fill="#52514e" text-anchor="middle">Qwen3.5-35B-A3B</text>
+<text x="687.0" y="352.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="10.5" fill="#898781" text-anchor="middle">(base)</text>
+<path d="M 794.6666666666667 320 L 794.6666666666667 174.98039215686273 Q 794.6666666666667 170.98039215686273 798.6666666666667 170.98039215686273 L 816.6666666666667 170.98039215686273 Q 820.6666666666667 170.98039215686273 820.6666666666667 174.98039215686273 L 820.6666666666667 320 Z" fill="#2a78d6" />
+<text x="807.7" y="163.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" font-weight="700" fill="#0b0b0b" text-anchor="middle">66.7%</text>
+<text x="807.7" y="338.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" font-weight="700" fill="#0b0b0b" text-anchor="middle">Our fine-tuned 4B</text>
+<text x="807.7" y="352.0" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="10.5" fill="#898781" text-anchor="middle">(PR #301)</text>
+<line x1="24" y1="366" x2="876" y2="366" stroke="#e1e0d9" stroke-width="1" />
+<text x="24" y="386" font-size="11" fill="#898781">Both baselines: exec_pass_rate = correctness = 0% on this corpus (code compiles, never runs correctly).</text>
+<text x="24" y="402" font-size="11" fill="#898781">Qwen3.5-35B-A3B required vLLM 0.26 (hybrid MoE unsupported on the pinned 0.25 stack) &#8212; see report for full methodology.</text>
+</svg>

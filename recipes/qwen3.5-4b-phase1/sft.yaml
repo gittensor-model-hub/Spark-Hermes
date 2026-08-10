@@ -1,0 +1,64 @@
+# Axolotl SFT — Phase 1 student: Qwen3.5-4B (canonical mining mix only).
+#
+# Production training-track submissions must use the pinned canonical dataset:
+#   scripts/prepare_mining_sft.sh
+#   scripts/train.sh recipes/qwen3.5-4b-phase1/sft.yaml
+#
+# Local teacher trajectories (phase1_sft.jsonl) are for dev smoke tests only and
+# are rejected by the training-track CI gate.
+
+base_model: Qwen/Qwen3.5-4B
+trust_remote_code: true
+
+chat_template: qwen3_5
+roles_to_train: ["assistant"]
+
+datasets:
+  - path: data/processed/sparkproof-mining_sft.jsonl
+    type: chat_template
+    field_messages: messages
+
+dataset_prepared_path: data/prepared/qwen3.5-4b-phase1
+val_set_size: 0.02
+output_dir: outputs/qwen3.5-4b-phase1
+
+sequence_len: 4096
+sample_packing: true
+pad_to_sequence_len: true
+
+# BF16 LoRA fits comfortably on RTX PRO 6000 Blackwell (96 GB) for 4B dense.
+adapter: lora
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+gradient_accumulation_steps: 4
+micro_batch_size: 2
+num_epochs: 2
+optimizer: adamw_torch
+lr_scheduler: cosine
+learning_rate: 1.0e-4
+warmup_ratio: 0.03
+weight_decay: 0.0
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: flash_attention_2
+
+evals_per_epoch: 4
+saves_per_epoch: 2
+logging_steps: 10
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin

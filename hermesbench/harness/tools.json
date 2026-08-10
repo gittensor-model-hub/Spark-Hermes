@@ -1,0 +1,43 @@
+{
+  "terminal": {
+    "description": "Run a shell command in the task workspace and return its combined output.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {"type": "string", "description": "The shell command to run."}
+      },
+      "required": ["command"]
+    }
+  },
+  "file_read": {
+    "description": "Read a UTF-8 text file from the task workspace.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string", "description": "Path relative to the workspace root."}
+      },
+      "required": ["path"]
+    }
+  },
+  "file_write": {
+    "description": "Write a UTF-8 text file in the task workspace, creating parent directories.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string", "description": "Path relative to the workspace root."},
+        "content": {"type": "string", "description": "The full file contents to write."}
+      },
+      "required": ["path", "content"]
+    }
+  },
+  "python": {
+    "description": "Run a Python snippet with the benchmark's own interpreter and return its output.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {"type": "string", "description": "The Python source to execute."}
+      },
+      "required": ["code"]
+    }
+  }
+}

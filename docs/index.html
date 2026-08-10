@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPARKDISTILL — verified Triton intelligence on Blackwell &amp; Hopper</title>
+<meta name="description" content="SPARKDISTILL is a trustless pipeline for building Triton-specialist AI from pinned frontier teachers, Blackwell or Hopper confidential-computing proofs, per-architecture frontier evaluation, and SN74 rewards on Gittensor.">
+<link rel="icon" href="https://github.com/gittensor-model-hub.png?size=64">
+<style>
+  :root {
+    --bg: #f8fbff;
+    --surface: rgba(255, 255, 255, 0.86);
+    --surface-solid: #ffffff;
+    --bg-alt: #f1f5ff;
+    --fg: #10152f;
+    --fg-muted-solid: #5b6380;
+    --border: rgba(56, 88, 190, 0.15);
+    --blue: #1576ed;
+    --blue-dark: #0645a8;
+    --purple: #7c32da;
+    --purple-bright: #a84cff;
+    --orange: #ff7224;
+    --accent: var(--blue);
+    --accent-fg: #ffffff;
+    --code-bg: #10152f;
+    --code-fg: #eef5ff;
+    --pill-bg: #eef3ff;
+    --shadow: 0 22px 60px rgba(42, 67, 157, 0.13);
+    --shadow-soft: 0 8px 28px rgba(42, 67, 157, 0.09);
+  }
+  :root[data-theme="dark"] {
+    --bg: #080b1d;
+    --surface: rgba(17, 22, 52, 0.86);
+    --surface-solid: #111634;
+    --bg-alt: #111733;
+    --fg: #f5f7ff;
+    --fg-muted-solid: #aab3d0;
+    --border: rgba(125, 154, 255, 0.2);
+    --blue: #48a0ff;
+    --blue-dark: #78b8ff;
+    --purple: #a964ff;
+    --purple-bright: #c184ff;
+    --orange: #ff8b45;
+    --accent: var(--blue);
+    --accent-fg: #07102b;
+    --code-bg: #050713;
+    --code-fg: #eef5ff;
+    --pill-bg: #171e43;
+    --shadow: 0 22px 70px rgba(0, 0, 0, 0.38);
+    --shadow-soft: 0 8px 28px rgba(0, 0, 0, 0.24);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #080b1d;
+      --surface: rgba(17, 22, 52, 0.86);
+      --surface-solid: #111634;
+      --bg-alt: #111733;
+      --fg: #f5f7ff;
+      --fg-muted-solid: #aab3d0;
+      --border: rgba(125, 154, 255, 0.2);
+      --blue: #48a0ff;
+      --blue-dark: #78b8ff;
+      --purple: #a964ff;
+      --purple-bright: #c184ff;
+      --orange: #ff8b45;
+      --accent: var(--blue);
+      --accent-fg: #07102b;
+      --code-bg: #050713;
+      --code-fg: #eef5ff;
+      --pill-bg: #171e43;
+      --shadow: 0 22px 70px rgba(0, 0, 0, 0.38);
+      --shadow-soft: 0 8px 28px rgba(0, 0, 0, 0.24);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { color-scheme: light dark; scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(circle at 10% 5%, color-mix(in srgb, var(--blue) 11%, transparent) 0, transparent 28rem),
+      radial-gradient(circle at 92% 16%, color-mix(in srgb, var(--purple) 12%, transparent) 0, transparent 30rem),
+      var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px; padding: 0.12em 0.42em; font-size: 0.88em; }
+  pre { background: var(--code-bg); color: var(--code-fg); border: 1px solid rgba(104, 137, 255, 0.2); border-radius: 18px; padding: 24px 26px; overflow-x: auto; font-size: 0.86em; line-height: 1.65; box-shadow: var(--shadow-soft); }
+  pre code { background: none; border: none; padding: 0; color: inherit; }
+
+  header.site {
+    position: sticky; top: 0; z-index: 10;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    backdrop-filter: blur(18px) saturate(150%);
+    border-bottom: 1px solid var(--border);
+  }
+  header.site .wrap { display: flex; align-items: center; justify-content: space-between; min-height: 72px; }
+  .brand { font-weight: 900; letter-spacing: -0.035em; font-size: 1.22rem; line-height: 1; }
+  .brand .spark { color: var(--blue-dark); }
+  .brand .bolt { color: var(--orange); padding: 0 0.04em; filter: drop-shadow(0 0 8px color-mix(in srgb, var(--orange) 45%, transparent)); }
+  .brand .distill { color: var(--purple); }
+  nav.links { display: flex; gap: 20px; font-size: 0.92rem; }
+  nav.links a { color: var(--fg-muted-solid); font-weight: 600; }
+  nav.links a:hover { color: var(--fg); text-decoration: none; }
+
+  .hero { padding: 56px 0 64px; text-align: center; position: relative; }
+  .hero::before {
+    content: ""; position: absolute; inset: 2rem 5% auto; height: 24rem; z-index: -1;
+    background: linear-gradient(100deg, color-mix(in srgb, var(--blue) 24%, transparent), color-mix(in srgb, var(--purple) 22%, transparent));
+    filter: blur(80px); opacity: 0.55; border-radius: 50%;
+  }
+  .hero img.banner {
+    display: block; width: 100%; height: auto; border-radius: 24px;
+    border: 1px solid color-mix(in srgb, var(--blue) 25%, var(--border));
+    box-shadow: var(--shadow), 0 0 0 8px color-mix(in srgb, var(--surface) 55%, transparent);
+    margin-bottom: 34px;
+  }
+  .hero h1 { font-size: clamp(2.15rem, 5vw, 4.1rem); line-height: 1.06; max-width: 900px; margin: 0 auto 20px; letter-spacing: -0.045em; }
+  .hero h1 a { color: inherit; text-decoration-color: var(--purple); text-decoration-thickness: 3px; text-underline-offset: 7px; }
+  .hero p.tagline { font-size: clamp(1.05rem, 2vw, 1.28rem); color: var(--fg-muted-solid); max-width: 780px; margin: 0 auto 30px; }
+  .cta-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  section:not(.hero) .cta-row { margin-top: 28px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 10px 22px; border-radius: 12px; font-weight: 750; font-size: 0.94rem; border: 1px solid var(--border); transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease; }
+  .btn:hover { transform: translateY(-2px); text-decoration: none; }
+  .btn.primary { background: linear-gradient(115deg, var(--blue), var(--purple)); color: #fff; border-color: transparent; box-shadow: 0 10px 26px color-mix(in srgb, var(--purple) 28%, transparent); }
+  .btn.ghost { color: var(--fg); background: color-mix(in srgb, var(--surface) 88%, transparent); backdrop-filter: blur(10px); }
+  .btn.ghost:hover { background: var(--surface-solid); box-shadow: var(--shadow-soft); }
+
+  section { padding: 72px 0; border-top: 1px solid var(--border); }
+  section:first-of-type { border-top: none; }
+  h2 { font-size: clamp(1.75rem, 3vw, 2.35rem); line-height: 1.15; margin: 0 0 20px; letter-spacing: -0.035em; }
+  h2::after { content: ""; display: block; width: 54px; height: 4px; margin-top: 12px; border-radius: 999px; background: linear-gradient(90deg, var(--blue), var(--purple)); }
+  h3 { font-size: 1.05rem; margin: 24px 0 8px; }
+  p { color: var(--fg-muted-solid); }
+  .lede { color: var(--fg); font-size: 1.1rem; max-width: 920px; }
+
+  .grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; margin-top: 28px; }
+  .card { position: relative; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 24px; box-shadow: var(--shadow-soft); backdrop-filter: blur(12px); transition: transform 180ms ease, border-color 180ms ease; }
+  .card::before { content: ""; position: absolute; inset: 0 auto auto 0; width: 100%; height: 3px; background: linear-gradient(90deg, var(--blue), var(--purple), var(--orange)); }
+  .card:hover { transform: translateY(-4px); border-color: color-mix(in srgb, var(--purple) 40%, var(--border)); }
+  .card h3 { margin-top: 0; font-size: 1rem; color: var(--fg); }
+  .card p { font-size: 0.92rem; margin-bottom: 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  .table-scroll { overflow-x: auto; margin-top: 22px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-soft); }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  th { color: var(--fg-muted-solid); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  ol.steps, ol.steps2 { list-style: none; padding: 0; counter-reset: steps; display: grid; gap: 12px; }
+  ol.steps li, ol.steps2 li { counter-increment: steps; position: relative; margin: 0; padding: 16px 18px 16px 58px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; color: var(--fg-muted-solid); }
+  ol.steps li::before, ol.steps2 li::before { content: counter(steps); position: absolute; left: 16px; top: 14px; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: linear-gradient(135deg, var(--blue), var(--purple)); color: #fff; font-weight: 800; font-size: 0.82rem; }
+
+  .pill { display: inline-block; background: var(--pill-bg); border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px; font-size: 0.76rem; font-weight: 750; color: var(--fg-muted-solid); text-transform: uppercase; letter-spacing: 0.04em; }
+  .hero-badge { margin-bottom: 22px; color: var(--purple); border-color: color-mix(in srgb, var(--purple) 38%, var(--border)); background: color-mix(in srgb, var(--purple) 10%, var(--surface)); }
+
+  .callout { background: linear-gradient(110deg, color-mix(in srgb, var(--blue) 8%, var(--surface)), color-mix(in srgb, var(--purple) 8%, var(--surface))); border: 1px solid var(--border); border-left: 4px solid var(--purple); border-radius: 14px; padding: 18px 20px; font-size: 0.92rem; margin-top: 24px; }
+  .callout p { margin: 0; }
+
+  #roadmap { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  #roadmap > h2 { grid-column: 1 / -1; }
+  .roadmap-item { margin: 0; padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow-soft); }
+  .roadmap-item h3 { margin: 12px 0 6px; }
+  .roadmap-item .pill { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 35%, var(--border)); }
+
+  #get-involved { text-align: center; margin: 70px 0; padding: 52px; border: 1px solid var(--border); border-radius: 24px; background: linear-gradient(120deg, color-mix(in srgb, var(--blue) 10%, var(--surface)), color-mix(in srgb, var(--purple) 12%, var(--surface))); box-shadow: var(--shadow); }
+  #get-involved h2::after { margin-left: auto; margin-right: auto; }
+  footer { padding: 42px 0 60px; text-align: center; color: var(--fg-muted-solid); font-size: 0.88rem; border-top: 1px solid var(--border); }
+  footer a { color: var(--fg-muted-solid); }
+
+  .spark-word { color: var(--blue-dark); }
+  .distill-word { color: var(--purple); }
+
+  @media (max-width: 820px) {
+    #roadmap { grid-template-columns: 1fr; }
+    .hero { padding-top: 36px; }
+  }
+  @media (max-width: 560px) {
+    nav.links { display: none; }
+    .wrap { padding-left: 18px; padding-right: 18px; }
+    .hero img.banner { border-radius: 14px; box-shadow: var(--shadow); }
+    section { padding: 52px 0; }
+    #get-involved { margin: 48px 0; padding: 34px 20px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <div class="brand" aria-label="SparkDistill"><span class="spark">SP</span><span class="bolt">⚡</span><span class="spark">RK</span><span class="distill">DISTILL</span></div>
+    <nav class="links">
+      <a href="#pipeline">Pipeline</a>
+      <a href="#sparkproof">SparkProof</a>
+      <a href="#verification">Verification</a>
+      <a href="#evaluation">Evaluation</a>
+      <a href="#triton">Train</a>
+      <a href="#mine">Mine</a>
+      <a href="https://github.com/gittensor-model-hub/SparkDistill-Hermes">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <section class="hero">
+    <img class="banner" src="images/banner.png" alt="SparkDistill banner">
+    <span class="pill hero-badge">Frontier teachers propose · Blackwell or Hopper proves · deterministic evaluation rewards</span>
+    <h1>Verified Triton intelligence for faster AI.</h1>
+    <p class="tagline"><strong><span class="spark-word">SPARK</span><span class="distill-word">DISTILL</span></strong> turns pinned frontier-model trajectories into GPU-validated training data, teaches compact students to develop, debug, and optimize Triton kernels, and rewards only measured improvements over the current frontier.</p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/gittensor-model-hub/SparkDistill-Hermes/blob/main/docs/miner-guide.md">Start mining</a>
+      <a class="btn ghost" href="https://github.com/gittensor-model-hub/SparkProof">Explore SparkProof</a>
+      <a class="btn ghost" href="https://huggingface.co/datasets/gittensor-model-hub/sparkproof-mining">Verified dataset</a>
+    </div>
+  </section>
+
+  <section id="pipeline">
+    <h2>One verifiable improvement loop</h2>
+    <p class="lede">The goal is a latest-<a href="https://github.com/triton-lang/triton">Triton</a> specialist stack—Triton 3.7.1 on NVIDIA Blackwell or Hopper today—that gets better through open competition rather than uncheckable claims. <a href="https://gittensor.io/">SN74 on Gittensor</a> rewards verified dataset contributions and verified model-quality gains inside the existing subnet.</p>
+    <div class="grid-cards">
+      <div class="card">
+        <span class="pill">01 · Generate</span>
+        <h3>Frontier models propose</h3>
+        <p>Only the pinned teacher basket—Claude Fable 5 and GPT-5.6 Sol at <code>xhigh</code> reasoning—may generate production trajectories. Arbitrary or cheaper substitute models are rejected by policy.</p>
+      </div>
+      <div class="card">
+        <span class="pill">02 · Prove</span>
+        <h3>Confidential GPU executes</h3>
+        <p>Generated Triton kernels are compiled, executed, numerically checked, screened for cheating and eval leakage, then proved on an NVIDIA RTX PRO 6000 Blackwell or Hopper H100/H200 confidential-computing node. SparkProof stamps each row with the architecture that validated it.</p>
+      </div>
+      <div class="card">
+        <span class="pill">03 · Distill</span>
+        <h3>Students learn verified work</h3>
+        <p>Accepted engineering rationale and final kernels become reasoning-format SFT records. Axolotl recipes train compact students whose job is Triton translation, correctness, debugging, profiling, and optimization.</p>
+      </div>
+      <div class="card">
+        <span class="pill">04 · Evaluate</span>
+        <h3>The frontier moves only on proof</h3>
+        <p>The validator compares the candidate and current frontier on the same held-out benchmark basket. SN74 rewards only the verified marginal gain; the winning public recipe and dataset become the next starting point.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="sparkproof">
+    <h2>How SparkProof works</h2>
+    <p class="lede"><a href="https://github.com/gittensor-model-hub/SparkProof">SparkProof</a> is the data-provenance layer. It does not trust a teacher's plausible-looking code or a miner's CSV. It keeps a row only after the code survives independent validation and the complete run is bound to confidential-computing evidence.</p>
+    <ol class="steps">
+      <li><strong>Build diverse training tasks.</strong> Seeded, stratified sampling draws from official Triton API documentation, semantics and tutorials, deterministic kernel mutations, PyTorch-to-Triton translation tasks, self-evolution, and failure mining. TritonBench remains evaluation-only.</li>
+      <li><strong>Call only pinned frontier teachers.</strong> Requests go through an approved gateway—OpenRouter or yunwu—to <code>claude-fable-5</code> and <code>gpt-5.6-sol</code> with <code>reasoning.effort=xhigh</code>. The exact request body is fingerprinted.</li>
+      <li><strong>Validate outside the model.</strong> The compiler, PyTorch oracle, anti-cheating checks, numerical tests, and the attested GPU—not the teacher—decide whether a kernel is correct. Bad candidates may be repaired; failures are preserved separately.</li>
+      <li><strong>Prove on confidential hardware.</strong> Production runs execute on a Blackwell RTX PRO 6000 or Hopper H100/H200 CC node inside an Intel TDX guest. NVIDIA GPU attestation is nonce-bound to the raw trajectory archive; an Intel TDX quote binds the measured VM to the same nonce.</li>
+      <li><strong>Seal the verified subset.</strong> SparkProof writes a <code>sparkproof-2</code> manifest, Merkle root, validation report, raw and verified trajectories, release-gate report, dataset hash, and <code>gpu_attestation.json</code> (including <code>tdx</code> on production bundles).</li>
+      <li><strong>Publish data and proof together.</strong> Hugging Face receives the SFT-ready rows plus the complete <code>proof/</code> directory, allowing validators to replay the checks without access to the miner's machine.</li>
+    </ol>
+    <div class="callout">
+      <p><strong>Teacher outputs are hypotheses, not ground truth.</strong> Production accepts only the pinned frontier-model basket, but correctness comes from compile-and-execute validation, independent numerical tests, decontamination, and the attested Blackwell or Hopper GPU.</p>
+    </div>
+  </section>
+
+  <section id="verification">
+    <h2>Cheap verification by anyone</h2>
+    <p class="lede">Proving requires a Blackwell RTX PRO 6000 or Hopper H100/H200 CC node. Verifying does not. GitHub Actions, a laptop, or any CPU host can download the published <code>proof/</code> directory and independently check policy, hashes, Merkle consistency, raw-to-verified filtering, and attestation binding.</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Verifier check</th><th>What it establishes</th></tr></thead>
+        <tbody>
+          <tr><td>Pinned teacher policy</td><td>Every row names an allowed frontier teacher and approved gateway model slug; substitute slugs fail production verification.</td></tr>
+          <tr><td><code>request_sha256</code></td><td>The stored prompt, model slug, generation settings, and <code>xhigh</code> reasoning request match the committed request fingerprint.</td></tr>
+          <tr><td>Validation reports</td><td>Only rows that passed Triton syntax, compile/execute, numerical correctness, and production policy are included in the verified dataset.</td></tr>
+          <tr><td>Raw → verified consistency</td><td>The miner cannot replace accepted rows after validation or hide where the verified subset came from.</td></tr>
+          <tr><td>Merkle root + dataset SHA-256</td><td>Any post-proof edit changes the committed bundle root or the registry-pinned trajectory hash.</td></tr>
+          <tr><td>GPU CC nonce binding</td><td>The NVIDIA attestation evidence is tied to the raw trajectory archive used in that proof.</td></tr>
+          <tr><td>Intel TDX binding</td><td><code>gpu_attestation.tdx</code> REPORTDATA commits the measured guest VM to the same dataset nonce (production required on new bundles).</td></tr>
+          <tr><td>Online NVIDIA + Intel verification</td><td><code>sparkproof-verify --online</code> verifies the NRAS JWT against NVIDIA JWKS and the TDX quote via Intel DCAP.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">
+      <p><strong>Exact trust boundary:</strong> SparkProof proves the recorded request, validation process, hardware evidence, and post-proof integrity. Commercial APIs do not provide provider-signed inference receipts, so offline verification cannot cryptographically prove what OpenAI or Anthropic executed internally. OpenRouter generation IDs can be re-queried with the creating key; yunwu currently has no equivalent external ledger.</p>
+    </div>
+  </section>
+
+  <section id="datasets">
+    <h2>From miner bundles to one canonical dataset</h2>
+    <p class="lede">A miner publishes its verified bundle to Hugging Face and opens a text-only PR adding the URL and pinned <code>trajectories_sha256</code> to <code>datasets/registry.jsonl</code>. The registry workflow runs before merge:</p>
+    <ol class="steps2">
+      <li>Download the miner's complete <code>proof/</code> directory from Hugging Face.</li>
+      <li>Re-run production SparkProof verification against the pinned generator and teacher policy.</li>
+      <li>Confirm Blackwell or Hopper CC evidence, release-gate success, row count, <code>gpu_architecture</code> (<code>blackwell</code> or <code>hopper</code>), and the exact SHA-256 claimed by the PR.</li>
+      <li>Require at least 25 verified rows for <code>dataset:xs</code>; larger contributions earn <code>s</code>, <code>m</code>, <code>l</code>, or <code>xl</code>.</li>
+      <li>Deduplicate and aggregate all accepted registry entries into <a href="https://huggingface.co/datasets/gittensor-model-hub/sparkproof-mining"><code>gittensor-model-hub/sparkproof-mining</code></a> with a provenance manifest.</li>
+      <li>Merge only after the canonical mining dataset publishes successfully. Rejected proofs are labeled <code>dataset:REJECT</code> and closed.</li>
+    </ol>
+    <div class="cta-row">
+      <a class="btn primary" href="https://huggingface.co/datasets/gittensor-model-hub/sparkproof-mining">Open canonical dataset</a>
+      <a class="btn ghost" href="https://github.com/gittensor-model-hub/SparkDistill-Hermes/blob/main/datasets/README.md">Registry specification</a>
+    </div>
+  </section>
+
+  <section id="evaluation">
+    <h2>Evaluation controls the frontier</h2>
+    <p class="lede">Dataset verification answers “is this training data authentic and GPU-validated?” Frontier evaluation answers “did this public dataset and recipe make the student measurably better?” They are separate gates.</p>
+    <div class="grid-cards">
+      <div class="card">
+        <h3>Only public inputs count</h3>
+        <p>The training submission is the public recipe plus a registry-backed dataset—not a secret checkpoint. Anyone can fork the current leader and try the next improvement.</p>
+      </div>
+      <div class="card">
+        <h3>Validator-owned evaluation</h3>
+        <p>Miners cannot submit the benchmark used to reward themselves. Frozen held-out prompts and protected TritonBench material remain isolated from training generation and decontamination fails closed if the corpus is unavailable.</p>
+      </div>
+      <div class="card">
+        <h3>Same run, same basket</h3>
+        <p>The candidate and current frontier are evaluated under the same deterministic harness. Reward is based on marginal quality delta, not a miner's claimed score or checkpoint rank.</p>
+      </div>
+      <div class="card">
+        <h3>Per-architecture frontiers</h3>
+        <p>TritonBench composites are hardware-sensitive, so Blackwell and Hopper each keep their own frontier bucket in <code>runs/frontiers.json</code>. A Hopper training run is tiered only against other Hopper runs, never against Blackwell numbers.</p>
+      </div>
+      <div class="card">
+        <h3>Verified wins become shared</h3>
+        <p>Passing improvements receive <code>eval:XS</code> through <code>eval:XL</code> (or <code>eval:BASELINE</code> for the first verified run on an architecture), are appended to the public run ledger, and become the new frontier every miner can build on.</p>
+      </div>
+    </div>
+    <div class="callout">
+      <p><strong>Proof of training:</strong> a <em>weights-free</em> claim bundle — evaluation scores, training time, GPU architecture claim, and a per-file hash manifest of the checkpoint — cryptographically bound twice via its <code>claim_sha256</code>: into the NRAS-signed GPU CC attestation nonce (the GPU), and into an Intel TDX quote's REPORTDATA whose MRTD measures the guest VM itself (the software environment). The validator verifies the proof from the published artifacts alone — attestations, nonce bindings, hashes, training budget — with no retraining. Trained weights never leave the miner's machine, and the public recipe + dataset keep every merged win reproducible by anyone. Unattested submissions fall back to retraining from source.</p>
+    </div>
+  </section>
+
+  <section id="triton">
+    <h2>Train, share the recipe, move the frontier</h2>
+    <p class="lede">Dataset miners feed the canonical mining mix; training miners turn that verified data into better students. The submission is never a secret checkpoint — it is the <strong>public Axolotl recipe</strong> plus the <strong>registry-backed dataset</strong> behind it. That design keeps improvement continuous, competitive, and fast.</p>
+    <ol class="steps">
+      <li><strong>Start from the current leader.</strong> Fork the frontier recipe under <code>recipes/</code> and point it at the canonical mining dataset or your own verified registry entry. Every merged win is public, so the next miner never starts from zero.</li>
+      <li><strong>Train and score locally.</strong> Run <code>scripts/install_train.sh</code>, <code>scripts/prepare_mining_sft.sh</code>, then <code>scripts/train.sh recipes/qwen3.5-4b-phase1/sft-mining.yaml</code> and <code>scripts/eval.sh</code> against the held-out frontier basket. You are competing on marginal quality delta — not a self-reported leaderboard.</li>
+      <li><strong>Open a narrow PR with the recipe and dataset.</strong> Commit the changed <code>sft.yaml</code> (or add a new recipe file) and cite the dataset URL or registry line. Small, focused recipe changes with a clear eval gain are easier to review and merge.</li>
+      <li><strong>Let the validator verify your proof.</strong> The validator checks your published claim bundle — GPU CC attestation, <code>claim_sha256</code> nonce binding, checkpoint hash manifest, and the 5-hour training budget — via <code>eval.verify</code>. The PR merges only if the proof verifies — not because you shipped weights, and no retraining is required for attested submissions.</li>
+      <li><strong>Winning recipes become shared infrastructure.</strong> Accepted runs receive <code>eval:XS</code> through <code>eval:XL</code>, enter the public run ledger, and become the next frontier every miner can fork. Copy the leader and add one optimization is expected — not cheating.</li>
+    </ol>
+    <div class="grid-cards">
+      <div class="card">
+        <h3>Continuous improvement</h3>
+        <p>Verified datasets aggregate into <code>sparkproof-mining</code>; verified recipes stack into a public frontier. Each accepted PR raises the bar the whole subnet trains against.</p>
+      </div>
+      <div class="card">
+        <h3>Open competition</h3>
+        <p>No private moats: whoever holds the frontier must have a fully public recipe and dataset behind it. Anyone can fork, experiment, and submit the next measurable win.</p>
+      </div>
+      <div class="card">
+        <h3>Move fast</h3>
+        <p>Reward tiers (<code>eval:XS</code>–<code>XL</code>) pay for verified marginal gains, not maintainer opinion. Tight recipe PRs, fast local eval loops, and the proof-of-training fast path keep the improvement cycle short.</p>
+      </div>
+    </div>
+    <div class="callout">
+      <p><strong>The loop closes in public:</strong> SparkProof miners grow verified Triton data → training miners distill better students from shared recipes → evaluation moves the frontier only on proof → the new leader's recipe and dataset become everyone's next starting point. That is how a latest-<a href="https://github.com/triton-lang/triton">Triton</a> specialist stack keeps improving without slowing down for trust.</p>
+    </div>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/gittensor-model-hub/SparkDistill-Hermes/tree/main/recipes">Browse recipes</a>
+      <a class="btn ghost" href="https://github.com/gittensor-model-hub/SparkDistill-Hermes/blob/main/docs/miner-guide.md#training-track">Training track guide</a>
+    </div>
+  </section>
+
+  <section id="mine">
+    <h2>Mine the dataset track</h2>
+    <p class="lede">A production miner needs a Blackwell RTX PRO 6000 or Hopper H100/H200 confidential-computing VM, a pinned SparkProof checkout, teacher-gateway credentials, and a Hugging Face token. Verification and registry review happen automatically after publication.</p>
+    <pre><code># On a Blackwell RTX PRO 6000 or Hopper H100/H200 CC VM
+git clone https://github.com/gittensor-model-hub/SparkProof.git
+git clone https://github.com/gittensor-model-hub/SparkDistill-Hermes.git
+cd SparkProof
+cp .env.example .env
+scripts/install.sh
+
+# Generate → best-of-N/repair → compile/execute → attest → release gate → publish
+scripts/run_triton_pipeline.sh \
+  --run-id my-triton-run \
+  --limit 25 \
+  --release-gate \
+  --publish your-hf-user/sparkproof-triton-v1
+
+# Build the text-only registry line for your PR
+cd ../SparkDistill
+scripts/registry_line.sh \
+  --bundle ../SparkProof/bundles/my-triton-run \
+  --miner your-github-handle \
+  --repo-id your-hf-user/sparkproof-triton-v1</code></pre>
+    <p>Production dataset PRs must contain exactly one append to <code>datasets/registry.jsonl</code>. The first merge/reward tier is 25 verified rows. See the <a href="https://github.com/gittensor-model-hub/SparkDistill-Hermes/blob/main/docs/miner-guide.md">complete miner guide</a> for policies, labels, failure modes, and the training track.</p>
+  </section>
+
+  <section id="roadmap">
+    <h2>Build toward the specialist stack</h2>
+    <div class="roadmap-item">
+      <span class="pill">Phase 1</span>
+      <h3>Dense Triton specialist</h3>
+      <p>Close the full SparkProof → canonical dataset → Axolotl SFT → held-out evaluation loop on Qwen3.5-4B, with every accepted training row and frontier improvement independently verifiable.</p>
+    </div>
+    <div class="roadmap-item">
+      <span class="pill">Phase 2</span>
+      <h3>MoE kernel expert</h3>
+      <p>Extend the verified data and recipe loop to Qwen3.6-35B-A3B, aligned with <code>sparkinfer</code>'s MoE serving focus while preserving the same public provenance and evaluation gates.</p>
+    </div>
+    <div class="roadmap-item">
+      <span class="pill">Phase 3</span>
+      <h3>Continuous verified improvement</h3>
+      <p>Feed every verified frontier back into generation, training, evaluation, and <code>sparkinfer</code> serving so kernel intelligence and edge inference performance improve together.</p>
+    </div>
+  </section>
+
+  <section id="get-involved">
+    <h2>Build the frontier in public</h2>
+    <p>Contribute verified datasets, better public recipes, or measurable evaluation improvements through SN74. Every accepted win becomes reusable infrastructure for the next miner—not a private moat.</p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/gittensor-model-hub/SparkDistill-Hermes/blob/main/docs/miner-guide.md">Read the miner guide</a>
+      <a class="btn ghost" href="https://github.com/gittensor-model-hub/SparkDistill-Hermes">View source</a>
+      <a class="btn ghost" href="https://github.com/gittensor-model-hub/SparkProof">Verify the proof layer</a>
+    </div>
+  </section>
+</div>
+
+<footer>
+  <div class="wrap">
+    MIT licensed &middot; <a href="https://github.com/gittensor-model-hub/SparkDistill-Hermes/blob/main/LICENSE">LICENSE</a> &middot; <a href="https://gittensor.io/">Gittensor / SN74</a>
+  </div>
+</footer>
+
+</body>
+</html>

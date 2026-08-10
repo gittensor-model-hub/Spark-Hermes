@@ -1,0 +1,54 @@
+{
+  "label": "eval:BASELINE",
+  "best_benchmark": null,
+  "best_pct_delta": null,
+  "regressions": [],
+  "per_benchmark": {
+    "gsm8k": {
+      "candidate": 0.74,
+      "frontier": null
+    },
+    "triton": {
+      "candidate": 0.3719444444444444,
+      "frontier": null
+    },
+    "triton_quick": {
+      "candidate": 0.3719444444444444,
+      "frontier": null
+    },
+    "triton_exec_pass_rate": {
+      "candidate": 0.0,
+      "frontier": null
+    },
+    "triton_correctness": {
+      "candidate": 0.0,
+      "frontier": null
+    },
+    "triton_syntax_pass_rate": {
+      "candidate": 0.6666666666666666,
+      "frontier": null
+    }
+  },
+  "verified": true,
+  "reason": null,
+  "run_id": "2026-07-15-magicrails-hopper-v2",
+  "gpu_architecture": "hopper",
+  "attested_eval_benchmarks": [
+    "gsm8k",
+    "triton"
+  ],
+  "attested_gsm8k_regression": true,
+  "claim_bound": true,
+  "gpu_signature": {
+    "verified": true,
+    "tokens_checked": 2,
+    "issues": []
+  },
+  "tdx_bound": true,
+  "tdx_signature": {
+    "verified": false,
+    "status": "dcap-qvl not installed",
+    "advisory_ids": []
+  },
+  "checkpoint_hash_match": null
+}

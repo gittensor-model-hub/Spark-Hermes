@@ -1,0 +1,110 @@
+{
+  "label": "eval:XL",
+  "best_benchmark": "triton",
+  "best_pct_delta": 21.2093449381585,
+  "regressions": [],
+  "per_benchmark": {
+    "triton": {
+      "candidate": 0.735,
+      "frontier": 0.6063888888888889,
+      "pct_delta": 21.2093449381585,
+      "regression_floor_pct": 2.0
+    }
+  },
+  "frontier_updates": [
+    "triton"
+  ],
+  "frontier_scores": {
+    "gsm8k": 0.6,
+    "triton": 0.735,
+    "triton_quick": 0.6063888888888889,
+    "triton_exec_pass_rate": 0.6666666666666666,
+    "triton_correctness": 0.6666666666666666,
+    "triton_syntax_pass_rate": 1.0
+  },
+  "gsm8k_regression_floor_pct": 2.0,
+  "gpu_architecture": "blackwell",
+  "verified": true,
+  "reason": null,
+  "scores": {
+    "triton": 0.735,
+    "triton_quick": 0.735,
+    "triton_exec_pass_rate": 1.0,
+    "triton_correctness": 1.0,
+    "triton_syntax_pass_rate": 1.0
+  },
+  "run_id": "2026-07-29-philluiz-blackwell-xl-v1",
+  "train_objective": null,
+  "attested_eval_benchmarks": [
+    "triton"
+  ],
+  "attested_gsm8k_regression": false,
+  "claim_bound": true,
+  "gpu_signature": {
+    "verified": true,
+    "tokens_checked": 2,
+    "issues": [],
+    "claims": {
+      "sub": "NVIDIA-PLATFORM-ATTESTATION",
+      "x-nvidia-ver": "2.0",
+      "nbf": 1785343393,
+      "iss": "https://nras.attestation.nvidia.com",
+      "x-nvidia-overall-att-result": true,
+      "submods": {
+        "GPU-0": [
+          "DIGEST",
+          [
+            "SHA-256",
+            "6edb0e923aa6aa7424f77bd9c96bca7ca6ddeebe74fbe39725c94124a7c77c6b"
+          ]
+        ]
+      },
+      "eat_nonce": "f82dc98b8905202e2781d3f3fb589980310d9d26db3ac2511d83cf7812ff7ae4",
+      "exp": 1785346993,
+      "iat": 1785343393,
+      "jti": "688e1f57-a457-46d8-95f2-cf6d70e1777e",
+      "devices": {
+        "GPU-0": {
+          "x-nvidia-gpu-driver-rim-schema-validated": true,
+          "iss": "https://nras.attestation.nvidia.com",
+          "x-nvidia-gpu-attestation-report-cert-chain-validated": true,
+          "eat_nonce": "f82dc98b8905202e2781d3f3fb589980310d9d26db3ac2511d83cf7812ff7ae4",
+          "x-nvidia-gpu-vbios-rim-signature-verified": true,
+          "x-nvidia-gpu-vbios-rim-fetched": true,
+          "exp": 1785346993,
+          "iat": 1785343393,
+          "ueid": "725107049584253666061952987354939301320034751666",
+          "jti": "3c056c34-bb7c-4b61-a114-f87ecc287e49",
+          "x-nvidia-gpu-attestation-report-nonce-match": true,
+          "x-nvidia-gpu-vbios-index-no-conflict": true,
+          "x-nvidia-gpu-vbios-rim-cert-validated": true,
+          "secboot": true,
+          "x-nvidia-gpu-attestation-report-parsed": true,
+          "x-nvidia-gpu-driver-rim-signature-verified": true,
+          "x-nvidia-gpu-arch-check": true,
+          "x-nvidia-attestation-warning": null,
+          "nbf": 1785343393,
+          "x-nvidia-gpu-driver-version": "595.71.05",
+          "x-nvidia-gpu-driver-rim-measurements-available": true,
+          "x-nvidia-gpu-attestation-report-signature-verified": true,
+          "hwmodel": "GB20X",
+          "dbgstat": "disabled",
+          "x-nvidia-gpu-driver-rim-fetched": true,
+          "oemid": "5703",
+          "x-nvidia-gpu-vbios-rim-schema-validated": true,
+          "measres": "success",
+          "x-nvidia-gpu-driver-rim-cert-validated": true,
+          "x-nvidia-gpu-vbios-version": "98.02.9E.00.01",
+          "x-nvidia-gpu-vbios-rim-measurements-available": true
+        }
+      }
+    }
+  },
+  "tdx_bound": true,
+  "tdx_signature": {
+    "verified": true,
+    "status": "UpToDate",
+    "advisory_ids": []
+  },
+  "checkpoint_hash_match": null
+}

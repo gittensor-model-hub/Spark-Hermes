@@ -1,0 +1,116 @@
+# Tool calling: one precise search call versus dozens of file opens.
+#
+# The corpus is 42 files and the step budget is 15, so the tempting route -- opening
+# files one at a time until the token turns up -- is arithmetically impossible rather
+# than merely discouraged. A scripted `file_read`-per-file policy dies at step 15 with
+# two thirds of the corpus unread. The right route is one recursive search, and the
+# decoys grade whether its *arguments* were right: a substring match pulls in
+# `TOK-77421`, a case-insensitive one pulls in `tok-7742`, and a missing filename filter
+# pulls in the `.md` and `.txt.bak` copies. Each is a file that must not be listed.
+task_id: tc-corpus-token-sweep
+tags: [tool_calling, search, terminal]
+prompt: |
+  The `corpus/` directory holds several dozen small ticket notes, spread across
+  subdirectories. Some of them reference the release token `TOK-7742`.
+
+  Produce `found.txt` in the workspace root listing every file that references it:
+
+    * only files whose name ends in `.txt` count -- other extensions are archived
+      copies and do not;
+    * the reference must be the token `TOK-7742` itself. Case matters, and a longer
+      token that merely contains those characters (for example `TOK-77421`) is a
+      different token and does not count;
+    * one path per line, relative to the workspace root, like `corpus/x/y.txt`.
+      Order does not matter. Nothing else in the file.
+tools: [terminal, file_read, file_write, python]
+# Deliberately no `verification_tools`: one shared budget, so every call costs. A
+# separate free allowance for reads would pay for exactly the flailing this category
+# measures, and naming only `file_read` there is worse -- an agent that re-greps to
+# check its own work would be disqualified for "verification skipped" while an agent
+# that opened one useless file would not. `self_check_rate` does not depend on this
+# field; it keys off `mutating_tools`, so a terminal edit followed by a look still
+# scores as a self-check.
+# `terminal` and `python` are listed as mutating because the expected solution writes
+# found.txt through a shell redirect, and an unlisted mutation drops the episode out of
+# the self-check denominator instead of scoring it.
+mutating_tools: [file_write, edit, python, terminal]
+# The hits and every decoy are hashed before and after. The job is to search the corpus,
+# not to edit it: deleting the near-miss files would make a sloppy search look right.
+protected_paths:
+  - corpus/gamma/note-03.txt
+  - corpus/gamma/deep/note-19.txt
+  - corpus/beta/note-31.txt
+  - corpus/beta/deep/note-07.txt
+  - corpus/beta/deep/note-12.txt
+  - corpus/gamma/note-28.txt
+  - corpus/archive/changelog.md
+  - corpus/alpha/note-05.txt.bak
+timeout_s: 240
+max_steps: 15
+checkpoint_every: 1
+setup: |
+  set -e
+  mkdir -p corpus/alpha corpus/beta/deep corpus/gamma/deep corpus/archive
+  n=1
+  while [ "$n" -le 40 ]; do
+    case $((n % 5)) in
+      0) d=corpus/alpha ;;
+      1) d=corpus/beta ;;
+      2) d=corpus/beta/deep ;;
+      3) d=corpus/gamma ;;
+      *) d=corpus/gamma/deep ;;
+    esac
+    printf 'ticket note %s\nowner: team-%s\nstatus: routine\nref: TOK-%s\n' \
+      "$n" "$((n % 4))" "$((1000 + n))" > "$d/note-$(printf '%02d' "$n").txt"
+    n=$((n + 1))
+  done
+  # The three real hits.
+  printf 'release gate TOK-7742 signed off\n' >> corpus/gamma/note-03.txt
+  printf 'blocked on TOK-7742 until friday\n' >> corpus/gamma/deep/note-19.txt
+  printf 'superseded by TOK-7742\n' >> corpus/beta/note-31.txt
+  # Decoys, one per way of getting the arguments wrong.
+  printf 'follow-up token TOK-77421 raised\n' >> corpus/beta/deep/note-07.txt
+  printf 'mirror of XTOK-7742 in staging\n' >> corpus/beta/deep/note-12.txt
+  printf 'lowercase mention of tok-7742 in chat\n' >> corpus/gamma/note-28.txt
+  printf 'changelog\n- rollout of TOK-7742\n' > corpus/archive/changelog.md
+  printf 'archived copy\nref: TOK-7742\n' > corpus/alpha/note-05.txt.bak
+verify: |
+  set -e
+  export LC_ALL=C
+  test -f found.txt
+  # Tolerant on formatting (a leading ./, stray blank lines, trailing spaces, CRLF),
+  # exact on the set of files: this task grades the search, not the whitespace.
+  got=$(awk '{ sub(/\r$/, ""); sub(/^\.\//, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if (length($0) > 0) print }' found.txt | sort -u)
+  want=$(printf '%s\n' 'corpus/beta/note-31.txt' 'corpus/gamma/deep/note-19.txt' 'corpus/gamma/note-03.txt')
+  test "$got" = "$want"
+checkpoints:
+  - checkpoint_id: tc-corpus-hits-listed
+    description: every file that really references the token is listed
+    verify: |
+      set -e
+      test -f found.txt
+      for p in corpus/gamma/note-03.txt corpus/gamma/deep/note-19.txt corpus/beta/note-31.txt; do
+        grep -Fq "$p" found.txt || exit 1
+      done
+  - checkpoint_id: tc-corpus-decoys-excluded
+    description: no near-miss token, wrong case, or non-.txt file was swept in
+    verify: |
+      set -e
+      test -f found.txt
+      # `if grep; then exit 1; fi`, never `! grep`: under `set -e` bash does not exit on
+      # a negated command, so the negated form would be a silent no-op.
+      for p in note-07.txt note-12.txt note-28.txt changelog.md note-05.txt.bak; do
+        if grep -Fq "$p" found.txt; then exit 1; fi
+      done
+  - checkpoint_id: tc-corpus-exact-set
+    description: found.txt is exactly the set of matching files, nothing more
+    verify: |
+      set -e
+      export LC_ALL=C
+      test -f found.txt
+      got=$(awk '{ sub(/\r$/, ""); sub(/^\.\//, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if (length($0) > 0) print }' found.txt | sort -u)
+      want=$(printf '%s\n' 'corpus/beta/note-31.txt' 'corpus/gamma/deep/note-19.txt' 'corpus/gamma/note-03.txt')
+      test "$got" = "$want"
+
+metadata:
+  hidden_verify_commitment: sha256:76f30ecc9f84a79316f4957de2cda46eb9a95b179553f4319bf9ef989d03660c

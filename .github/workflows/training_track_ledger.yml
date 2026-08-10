@@ -1,0 +1,97 @@
+name: Training track ledger
+
+on:
+  # Runs once a training-track PR has actually merged — separate from the
+  # pre-merge gate (training_track.yml), which only labels/closes/merges. The
+  # ledger is an immutable record of merged runs (see runs/README.md), and
+  # frontiers.json is seeded/raised from verified non-REJECT scores, so both are
+  # written after merge — not at every push. Fires on every merged PR regardless
+  # of track; eval.record_training_ledger no-ops silently when the PR body cites
+  # no HF proof-bundle repo.
+  pull_request_target:
+    types: [closed]
+    paths-ignore:
+      - "datasets/registry.jsonl"
+  # Manual re-run for a specific merged PR (e.g. to (re)crown a run whose
+  # automatic ledger job failed). Idempotent — re-recording an existing run only
+  # heals a missing frontier high.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Merged training-track PR number to (re)record"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  # Same lock as training_track.yml's gate — this workflow (fired by a *manual* merge,
+  # or workflow_dispatch) reads and writes the exact same runs/frontiers.json /
+  # runs/ledger.jsonl. Without a shared group, a manual merge here could race an
+  # in-flight auto-merge gate run: either could read the frontier before the other's
+  # crown lands, or their two `git push`es to main could collide. One queue across
+  # both workflows closes both failure modes.
+  group: training-track-frontier-lock
+  cancel-in-progress: false
+
+jobs:
+  record-ledger:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity for automated commits
+        run: |
+          git config --global user.name "gittensor-eval-bot"
+          git config --global user.email "gittensor-eval-bot@users.noreply.github.com"
+
+      - name: Resolve PR context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR="$PR_NUMBER_INPUT"
+            gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json body -q '.body // ""' > /tmp/pr_body.md
+            BASE_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.base.sha')"
+            MERGE_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.merge_commit_sha')"
+            echo "pr_url=https://github.com/$GITHUB_REPOSITORY/pull/$PR" >> "$GITHUB_OUTPUT"
+          else
+            PR="${{ github.event.pull_request.number }}"
+            jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > /tmp/pr_body.md
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            MERGE_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+            echo "pr_url=${{ github.event.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
+          fi
+          git diff --name-only "$BASE_SHA" "$MERGE_SHA" > /tmp/changed_paths.txt
+          echo "$BASE_SHA" > /tmp/merge_base_ref.txt
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install SparkDistill
+        run: uv sync --extra dev --extra proof --frozen
+
+      - name: Record and publish ledger entry
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          uv run python -m eval.record_training_ledger \
+            --pr-url "${{ steps.ctx.outputs.pr_url }}" \
+            --pr-body-file /tmp/pr_body.md \
+            --head-ref main \
+            --merge-base-ref "$(cat /tmp/merge_base_ref.txt)" \
+            --changed-paths-file /tmp/changed_paths.txt \
+            --publish

@@ -1,0 +1,34 @@
+# Recovery task: the obvious first move fails. What is scored is what happens next.
+task_id: recover-from-bad-command
+tags: [terminal_agent, recovery]
+prompt: |
+  Produce a file named `report.txt` in this workspace containing the total number of
+  lines across every `.log` file in the `logs/` directory, as a bare integer and
+  nothing else. The tool you first reach for may not be installed here; if a command
+  fails, find another way rather than reporting failure.
+tools: [terminal, file_read, file_write, python]
+timeout_s: 180
+max_steps: 25
+# Puts the stub `wc` ahead of the real one for setup, agent calls, and verification
+# alike -- the failure has to be real, not merely asserted in the prompt.
+env:
+  PATH: "./bin:$PATH"
+setup: |
+  set -e
+  mkdir -p logs bin
+  printf 'a\nb\nc\n' > logs/one.log
+  printf 'd\ne\n' > logs/two.log
+  printf 'f\n' > logs/three.log
+  # `wc` is shadowed by a stub that always fails, so the reflexive `wc -l` route is a
+  # dead end. Every other route (python, awk, grep -c) still works.
+  cat > bin/wc <<'EOF'
+  #!/bin/sh
+  echo "wc: command unavailable in this environment" >&2
+  exit 127
+  EOF
+  chmod +x bin/wc
+verify: |
+  test -f report.txt && test "$(tr -d '[:space:]' < report.txt)" = "6"
+
+metadata:
+  hidden_verify_commitment: sha256:4a5af016d92d8ff5ca3d58082c1a3af0ca5b851aac86d86a08773a55037755e5

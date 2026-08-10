@@ -1,0 +1,75 @@
+# Axolotl SFT — target: push triton_exec_pass_rate further above the frontier floor.
+#
+# Backbone is the proven eval:XL regime from PR #308 (sft-mining-bf-v3): sequence_len 8192
+# so the 59 longest, most-complex *executable* kernels (5.1% of the pin) stop being truncated
+# mid-kernel, and num_epochs 8 so the cosine schedule keeps the eval_loss-best checkpoint
+# (~epoch 2.81) at a high LR — the regime that took triton from +2.99% (4096/2ep) to
+# +41.75% (8192/3ep, #301) to +69.58% (8192/8ep, #308).
+#
+# One variable changed vs bf-v3: lora_r 64 -> 96 (lora_alpha kept at 2*r = 192). The seq8192
+# change unlocked those long executable kernels; rank 96 gives the adapter more capacity to
+# actually fit them, targeting a higher exec_pass_rate without touching the proven LR schedule.
+# Everything else is bf-v3 as-shipped: lr 5e-5, warmup 0.1, wd 0.01, dropout 0.08, grad_accum 8,
+# CCE plugin, best-checkpoint selection on eval_loss, sample_packing off (FLA packing needs
+# layer_type but TF 5.12 emits block_type).
+
+base_model: Qwen/Qwen3.5-4B
+trust_remote_code: true
+
+chat_template: qwen3_5
+roles_to_train: ["assistant"]
+
+datasets:
+  - path: data/processed/sparkproof-mining_sft.jsonl
+    type: chat_template
+    field_messages: messages
+
+dataset_prepared_path: data/prepared/qwen3.5-4b-philluiz-xl-v1
+val_set_size: 0.05
+output_dir: outputs/qwen3.5-4b-mining-philluiz-blackwell-xl-v1
+
+sequence_len: 8192
+sample_packing: false
+pad_to_sequence_len: true
+
+adapter: lora
+lora_r: 96
+lora_alpha: 192
+lora_dropout: 0.08
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+gradient_accumulation_steps: 8
+micro_batch_size: 1
+num_epochs: 8
+optimizer: adamw_torch
+lr_scheduler: cosine
+learning_rate: 5.0e-5
+warmup_ratio: 0.1
+weight_decay: 0.01
+max_grad_norm: 1.0
+seed: 42
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: sdpa
+
+evals_per_epoch: 4
+saves_per_epoch: 4
+save_total_limit: 6
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+logging_steps: 5
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin

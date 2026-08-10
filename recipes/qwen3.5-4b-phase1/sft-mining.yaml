@@ -1,0 +1,61 @@
+# Axolotl SFT — Qwen3.5-4B on canonical SparkDistill mining data.
+#
+# 1. Export HF mining mix to local jsonl:
+#      scripts/prepare_mining_sft.sh
+# 2. Train (paths are resolved relative to SparkDistill by scripts/train.sh):
+#      scripts/train.sh recipes/qwen3.5-4b-phase1/sft-mining.yaml
+#
+# scripts/train.sh also disables sample_packing on small datasets and falls back
+# to SDPA when flash-attn is not installed.
+
+base_model: Qwen/Qwen3.5-4B
+trust_remote_code: true
+
+chat_template: qwen3_5
+roles_to_train: ["assistant"]
+
+datasets:
+  - path: data/processed/sparkproof-mining_sft.jsonl
+    type: chat_template
+    field_messages: messages
+
+dataset_prepared_path: data/prepared/qwen3.5-4b-mining
+val_set_size: 0.05
+output_dir: outputs/qwen3.5-4b-mining
+
+sequence_len: 4096
+sample_packing: true
+pad_to_sequence_len: true
+
+adapter: lora
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+gradient_accumulation_steps: 2
+micro_batch_size: 1
+num_epochs: 5
+optimizer: adamw_torch
+lr_scheduler: cosine
+learning_rate: 1.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.0
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: flash_attention_2
+
+evals_per_epoch: 2
+saves_per_epoch: 2
+logging_steps: 1

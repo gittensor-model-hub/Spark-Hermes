@@ -1,0 +1,358 @@
+# Terminal agent: the documented build command is a dead end, and the recipe it would
+# have run is incomplete anyway.
+#
+# `make install` is what the README says and what any agent reaches for first. It cannot
+# work here -- `make` on PATH is a shim that exits 127 -- so the Makefile stops being a
+# button and becomes a document: the agent has to read the recipe and carry it out with
+# ordinary shell commands, including the sed substitution that turns the launcher template
+# into a runnable launcher.
+#
+# Then the second layer. The recipe itself never installs the runtime pattern file, so a
+# faithful hand-execution still produces a tool that fails on first use, with an error
+# naming the path it wanted. Copying the build's instructions is not enough; running the
+# result is.
+#
+# Note the shim makes the failure real rather than narrated, in the same way v0's
+# recover-from-bad-command shadows `wc`. If a host happens to have a real make and the
+# agent finds it by absolute path, the task does not collapse -- the missing pattern file
+# is still missing, because the Makefile is what omits it.
+#
+# The cheat this closes is the one that makes the second layer disappear: a six-line
+# shell launcher with ERROR/CRITICAL/"timed out" written into it produces exactly the
+# right counts while installing nothing and reading nothing, and "the pattern file
+# exists" is satisfied by copying it and never opening it. So the grader swaps the
+# installed pattern list for a different one and requires the counts to move with it.
+# Only a tool that reads its patterns from the prefix at run time can follow.
+task_id: ta-toolchain-make-missing
+tags: [terminal_agent, build, recovery, offline]
+prompt: |
+  `linecount-1.3.0/` is a vendored source tree for a small log-scanning tool. Its README
+  tells you how to build and install it. Nothing is installed yet, and there is no
+  network -- everything you need is in this workspace.
+
+  Finish the job:
+
+    1. Install the tool into `./prefix` at the workspace root, so that `prefix/bin/lc`
+       is an executable launcher.
+    2. `prefix/bin/lc --version` must report the version the source tree declares.
+    3. `prefix/bin/lc logs/app.log` must actually scan the file and print its
+       `matched=<n> total=<n>` line. Run it. If it fails, work out what the install left
+       behind and finish it properly, so the tool works on any input file, not just that
+       one.
+
+  Install the shipped tool -- do not reimplement it with the pattern list baked into a
+  script of your own. As the README says, `lc` reads its patterns from the install prefix
+  at run time, and the installed tool has to keep working that way: change the installed
+  pattern list and what counts as a match changes with it.
+
+  If the documented build command does not work in this environment, find another way
+  to carry out what it would have done rather than stopping there.
+
+  Read-only: `logs/app.log`, `linecount-1.3.0/share/patterns.txt`, and anything under
+  `toolchain/`.
+tools: [terminal, file_read, file_write, python]
+verification_tools: [terminal, file_read, python]
+# Matching v0's fix-failing-test: `terminal` stays out of the mutation set because it is
+# also the tool the agent re-runs `lc` with, and a self-check must not reset the clock
+# that measures self-checking. Writing the launcher by hand goes through file_write.
+mutating_tools: [file_write, edit, python]
+# The shim is the whole point of the task: deleting it to unmask a real `make` would be
+# removing the obstacle rather than working around it. app.log and the pattern file are
+# fixtures -- trimming either would change what "correct output" means.
+protected_paths:
+  - toolchain/bin/make
+  - logs/app.log
+  - linecount-1.3.0/share/patterns.txt
+# Prepended for setup, agent calls and verification alike, so the failure is real:
+# `make` resolves to the shim before any system make.
+#
+# Three relative entries, not one. A PATH entry is resolved against the *current*
+# directory, and the natural way to run the documented command is `cd linecount-1.3.0 &&
+# make install` -- at which point a lone `./toolchain/bin` stops resolving and a host
+# that happens to ship a real make silently un-shadows it. `..` and `../..` cover the
+# source tree and one level below it, which is as deep as this workspace goes.
+env:
+  PATH: "./toolchain/bin:../toolchain/bin:../../toolchain/bin:$PATH"
+timeout_s: 600
+max_steps: 45
+max_verification_steps: 40
+checkpoint_every: 1
+setup: |
+  set -e
+  mkdir -p toolchain/bin linecount-1.3.0/src/lc linecount-1.3.0/bin linecount-1.3.0/share logs
+
+  cat > toolchain/bin/make <<'EOF'
+  #!/bin/sh
+  echo "make: not installed in this image (toolchain shims only)" >&2
+  exit 127
+  EOF
+  chmod 755 toolchain/bin/make
+
+  printf '1.3.0\n' > linecount-1.3.0/VERSION
+
+  cat > linecount-1.3.0/README <<'EOF'
+  linecount 1.3.0
+
+  Build and install:
+
+      make install PREFIX=$PWD/prefix
+
+  PREFIX defaults to a `prefix` directory beside this Makefile, so pass it explicitly
+  if you want the tool installed anywhere else.
+
+  Usage:
+
+      prefix/bin/lc <file>      -> matched=<n> total=<n>
+      prefix/bin/lc --version
+
+  A line counts as matched when it contains any of the substrings in
+  share/patterns.txt, which the tool reads from its install prefix at run time.
+  EOF
+
+  cat > linecount-1.3.0/src/lc/__init__.py <<'EOF'
+  """lc -- a very small log scanner."""
+  EOF
+
+  cat > linecount-1.3.0/src/lc/cli.py <<'EOF'
+  """Count the lines of a file that match any installed pattern."""
+
+  import os
+  import sys
+
+
+  def patterns_path():
+      """Runtime data lives in the install prefix, not beside the source."""
+      prefix = os.environ.get("LC_PREFIX")
+      if not prefix:
+          sys.stderr.write("lc: LC_PREFIX is unset -- use the installed launcher\n")
+          raise SystemExit(3)
+      return os.path.join(prefix, "share", "lc", "patterns.txt")
+
+
+  def load_patterns():
+      path = patterns_path()
+      if not os.path.exists(path):
+          sys.stderr.write("lc: missing pattern file %s (comes from share/patterns.txt)\n" % path)
+          raise SystemExit(4)
+      patterns = []
+      with open(path) as handle:
+          for line in handle:
+              line = line.strip()
+              if line and not line.startswith("#"):
+                  patterns.append(line)
+      return patterns
+
+
+  def count(text, patterns):
+      matched = 0
+      total = 0
+      for line in text.splitlines():
+          total += 1
+          for pattern in patterns:
+              if pattern in line:
+                  matched += 1
+                  break
+      return matched, total
+
+
+  def main():
+      argv = sys.argv[1:]
+      if argv and argv[0] == "--version":
+          print("lc %s" % os.environ.get("LC_VERSION", "unknown"))
+          return 0
+      if len(argv) != 1:
+          sys.stderr.write("usage: lc [--version] <file>\n")
+          return 2
+      patterns = load_patterns()
+      with open(argv[0]) as handle:
+          matched, total = count(handle.read(), patterns)
+      print("matched=%d total=%d" % (matched, total))
+      return 0
+
+
+  if __name__ == "__main__":
+      raise SystemExit(main())
+  EOF
+
+  cat > linecount-1.3.0/bin/lc.in <<'EOF'
+  #!/bin/sh
+  # Launcher template. `make install` fills in @PREFIX@, @VERSION@ and @LIBDIR@; the
+  # file is not runnable until they are substituted.
+  LC_PREFIX="@PREFIX@"
+  LC_VERSION="@VERSION@"
+  export LC_PREFIX LC_VERSION
+  PYTHONPATH="@LIBDIR@${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m lc.cli "$@"
+  EOF
+
+  cat > linecount-1.3.0/share/patterns.txt <<'EOF'
+  # One substring per line. Blank lines and lines starting with '#' are ignored.
+  ERROR
+  CRITICAL
+  timed out
+  EOF
+
+  # Recipe lines need real tabs, and a tab is the one character a YAML block scalar
+  # cannot carry safely, so they are written as @T@ and substituted here.
+  tab=$(printf '\t')
+  sed "s/@T@/$tab/" > linecount-1.3.0/Makefile <<'EOF'
+  # linecount -- install with:  make install PREFIX=/absolute/path
+  #
+  # PREFIX defaults to a prefix/ directory beside this Makefile.
+
+  PREFIX ?= $(CURDIR)/prefix
+  LIBDIR := $(PREFIX)/lib
+  VERSION := $(shell cat VERSION)
+
+  .PHONY: install clean
+
+  install:
+  @T@mkdir -p $(PREFIX)/bin $(LIBDIR)/lc $(PREFIX)/share/lc
+  @T@cp src/lc/__init__.py src/lc/cli.py $(LIBDIR)/lc/
+  @T@sed -e 's|@LIBDIR@|$(LIBDIR)|g' -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(VERSION)|g' bin/lc.in > $(PREFIX)/bin/lc
+  @T@chmod 755 $(PREFIX)/bin/lc
+  @T@echo "installed lc $(VERSION) into $(PREFIX)"
+
+  clean:
+  @T@rm -rf $(PREFIX)
+  EOF
+
+  cat > logs/app.log <<'EOF'
+  2026-07-30 08:00:01 INFO  boot complete
+  2026-07-30 08:00:04 WARN  cache cold
+  2026-07-30 08:01:12 ERROR upstream refused connection
+  2026-07-30 08:02:00 INFO  retry scheduled
+  2026-07-30 08:02:31 ERROR upstream refused connection
+  2026-07-30 08:03:02 CRITICAL giving up
+  2026-07-30 08:04:00 INFO  request timed out after 30s
+  2026-07-30 08:05:00 INFO  shutdown
+  EOF
+checkpoints:
+  - checkpoint_id: launcher-installed
+    description: prefix/bin/lc is executable and its template placeholders are filled in
+    # `if grep; then exit 1; fi`, never `! grep`: under set -e a negated command never
+    # exits the shell, so the `!` spelling would be a silent no-op.
+    verify: |
+      set -e
+      test -x prefix/bin/lc
+      test -f prefix/lib/lc/cli.py
+      if grep -qE '@(LIBDIR|PREFIX|VERSION)@' prefix/bin/lc; then exit 1; fi
+  - checkpoint_id: version-flag-works
+    description: the launcher reports the version the source tree declares
+    verify: |
+      set -e
+      test "$(./prefix/bin/lc --version)" = "lc 1.3.0"
+  - checkpoint_id: runtime-patterns-installed
+    description: the pattern file the tool reads at run time is present in the prefix
+    verify: |
+      set -e
+      test -f prefix/share/lc/patterns.txt
+      grep -qx 'ERROR' prefix/share/lc/patterns.txt
+      grep -qx 'CRITICAL' prefix/share/lc/patterns.txt
+      grep -qx 'timed out' prefix/share/lc/patterns.txt
+  - checkpoint_id: counts-are-right
+    description: the installed tool scans files it has never seen and counts correctly
+    # Two inputs, one of them with nothing to match, for the same reason the final check
+    # uses two: a launcher that echoes the numbers from an earlier run passes a
+    # single-input check.
+    #
+    # This stops short of `verify`'s pattern-file swap on purpose. That check has to
+    # write into the workspace and put it back, and a sample that runs after every agent
+    # step would be doing that dozens of times inside a live episode -- one killed
+    # sample and the agent inherits the grader's pattern list. A checkpoint is a drift
+    # measurement, not the verdict, so it stays read-only and a launcher with the
+    # patterns baked in reads as met here while `verify` rejects it.
+    verify: |
+      set -e
+      scratch=$(mktemp -d)
+      trap 'rm -rf "$scratch"' EXIT
+      cat > "$scratch/fresh.log" <<'EOF'
+      2026-01-01 INFO ready
+      2026-01-01 ERROR disk full
+      2026-01-01 WARN slow
+      2026-01-01 CRITICAL halted
+      2026-01-01 INFO request timed out
+      2026-01-01 INFO done
+      EOF
+      cat > "$scratch/quiet.log" <<'EOF'
+      2026-01-02 INFO nothing to report
+      2026-01-02 INFO still nothing
+      EOF
+      test "$(./prefix/bin/lc "$scratch/fresh.log")" = "matched=3 total=6"
+      test "$(./prefix/bin/lc "$scratch/quiet.log")" = "matched=0 total=2"
+# Graded on two inputs the tool has never seen, one of which has no matches at all: a
+# launcher that prints a constant it copied out of an earlier run passes on neither.
+#
+# Expected values, computed here rather than read from the workspace. Patterns are
+# ERROR, CRITICAL and "timed out":
+#   fresh.log -> 6 lines, 3 match (ERROR, CRITICAL, "timed out")
+#   quiet.log -> 2 lines, 0 match
+verify: |
+  set -e
+  test -x prefix/bin/lc
+  test -f prefix/lib/lc/cli.py
+  if grep -qE '@(LIBDIR|PREFIX|VERSION)@' prefix/bin/lc; then exit 1; fi
+
+  version=$(./prefix/bin/lc --version)
+  if [ "$version" != "lc 1.3.0" ]; then
+      echo "lc --version printed: $version" >&2
+      exit 1
+  fi
+
+  test -f prefix/share/lc/patterns.txt
+  grep -qx 'ERROR' prefix/share/lc/patterns.txt
+  grep -qx 'CRITICAL' prefix/share/lc/patterns.txt
+  grep -qx 'timed out' prefix/share/lc/patterns.txt
+
+  scratch=$(mktemp -d)
+  trap 'rm -rf "$scratch"' EXIT
+  cat > "$scratch/fresh.log" <<'EOF'
+  2026-01-01 INFO ready
+  2026-01-01 ERROR disk full
+  2026-01-01 WARN slow
+  2026-01-01 CRITICAL halted
+  2026-01-01 INFO request timed out
+  2026-01-01 INFO done
+  EOF
+  cat > "$scratch/quiet.log" <<'EOF'
+  2026-01-02 INFO nothing to report
+  2026-01-02 INFO still nothing
+  EOF
+
+  busy=$(./prefix/bin/lc "$scratch/fresh.log")
+  if [ "$busy" != "matched=3 total=6" ]; then
+      echo "lc on a 6-line file with 3 matches printed: $busy" >&2
+      exit 1
+  fi
+
+  quiet=$(./prefix/bin/lc "$scratch/quiet.log")
+  if [ "$quiet" != "matched=0 total=2" ]; then
+      echo "lc on a 2-line file with no matches printed: $quiet" >&2
+      exit 1
+  fi
+
+  # The counts above are also produced by a hand-rolled launcher with ERROR/CRITICAL/
+  # "timed out" written into it, which installs nothing and reads nothing -- and which
+  # passes every check so far, because `prefix/share/lc/patterns.txt` only has to exist.
+  # So make the pattern file matter: swap it for a different list and require the counts
+  # to follow. Everything under `prefix/` is the agent's own output, never a protected
+  # path (the shipped `linecount-1.3.0/share/patterns.txt` is not touched), and the
+  # original bytes are put back on every exit path including a failed run.
+  #
+  # `rm -f` before the write, never a redirect onto the existing path: an install that
+  # symlinked the prefix's pattern file back at the source tree's would otherwise have
+  # the grader writing straight through the link into a protected fixture, and a verify
+  # killed before its restore would leave that fixture corrupted for good.
+  cp prefix/share/lc/patterns.txt "$scratch/patterns.orig"
+  trap 'cp -f "$scratch/patterns.orig" prefix/share/lc/patterns.txt 2>/dev/null || true; rm -rf "$scratch"' EXIT
+  rm -f prefix/share/lc/patterns.txt
+  printf '# swapped by the grader\nWARN\n' > prefix/share/lc/patterns.txt
+  swapped=$(./prefix/bin/lc "$scratch/fresh.log")
+  cp -f "$scratch/patterns.orig" prefix/share/lc/patterns.txt
+  if [ "$swapped" != "matched=1 total=6" ]; then
+      echo "lc is not reading its installed pattern file: with only WARN installed," >&2
+      echo "the 6-line file (one WARN line) gave: $swapped" >&2
+      exit 1
+  fi
+
+metadata:
+  hidden_verify_commitment: sha256:14dc93f6a094de0cf1c4feb38042a6e57c5816097ecda69c9ebb084a609bf5f6
