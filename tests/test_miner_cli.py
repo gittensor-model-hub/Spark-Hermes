@@ -11,6 +11,7 @@ second implementation that agreed today would drift, and the day it drifted "it 
 would be worse than having no check at all -- a miner would trust it.
 """
 
+import json
 import os
 
 import pytest
@@ -147,3 +148,146 @@ def test_check_does_not_claim_the_submission_helps(capsys, tmp_path):
     out = capsys.readouterr().out
     assert "admissible, not that it helps" in out
     assert "58.6%" in out
+
+
+# --- evaluate: the judgement, which is pure and therefore testable without a GPU ----------------
+#
+# `compare` is separated from the runs on purpose. The part that decides needs no model, so it can
+# be driven against the real numbers from the live paired run this module was built for.
+
+from pathlib import Path  # noqa: E402
+
+from miner.evaluate import ArmResult, EvaluateError, arm_from_log, compare, render, runner_argv  # noqa: E402
+
+
+def _arm(label, passes, tokens, calls=None, steps=None, dialect="hermes-4"):
+    from hermes.acceptance import Arm
+
+    n = len(tokens)
+    return ArmResult(
+        label=label,
+        arm=Arm(
+            passes=passes,
+            attempts=n,
+            tokens=tuple(tokens),
+            tool_calls=tuple(calls or [11] * n),
+        ),
+        steps=tuple(steps or [34] * n),
+        dialects=tuple([dialect] * n),
+    )
+
+
+def test_the_live_paired_run_is_reported_as_confidently_worse():
+    """The real numbers. A submission that read like good advice, aimed at the three
+    step_budget_exhausted challenges, and made things worse -- which is the case a miner tool has
+    to get right, because the encouraging failure is the expensive one."""
+    control = _arm("control", 1, [99_119, 85_292, 68_333])
+    candidate = _arm("candidate", 0, [110_332, 144_773, 135_302])
+    report = compare(control, candidate)
+
+    assert report.decision.accepted is False
+    assert "before efficiency is considered" in report.decision.reasons[0]
+    assert report.interval[1] < 0, "the whole interval must sit below zero"
+
+    text = render(report, task_id="tc-log-rotation-order")
+    assert "token INCREASE: 58.6%" in text
+    assert "confidently WORSE" in text
+
+
+def test_a_real_improvement_is_reported_as_not_noise():
+    control = _arm("control", 10, [100_000 + i * 500 for i in range(10)])
+    candidate = _arm("candidate", 10, [55_000 + i * 500 for i in range(10)], calls=[6] * 10)
+    report = compare(control, candidate)
+    assert report.decision.accepted is True
+    assert report.interval[0] > 0
+    assert "not noise" in render(report, task_id="t")
+
+
+def test_the_verdict_says_a_local_win_is_not_acceptance():
+    """The validator re-measures the baseline on its own hardware. A report copied into a pull
+    request without this line is a claim about hardware nobody measured."""
+    report = compare(_arm("control", 10, [100_000] * 10), _arm("candidate", 10, [50_000] * 10, calls=[5] * 10))
+    assert "evidence, not acceptance" in render(report, task_id="t")
+    assert report.to_record()["a_local_win_is_evidence_not_acceptance"] is True
+
+
+def test_unequal_arms_are_refused_because_that_is_not_a_pairing():
+    """The interval would be computed over two sample sizes, and the smaller one silently dominates
+    its width."""
+    with pytest.raises(EvaluateError, match="not paired"):
+        compare(_arm("control", 3, [1_000] * 3), _arm("candidate", 2, [900] * 2))
+
+
+def test_arms_that_ran_different_dialects_are_refused():
+    """A dialect the model does not speak produces prose answers with zero tool calls and a clean
+    protocol report -- measured. Comparing across that measures the harness, not the submission."""
+    with pytest.raises(EvaluateError, match="different wire dialects"):
+        compare(
+            _arm("control", 1, [1_000] * 3, dialect="hermes-3"),
+            _arm("candidate", 1, [900] * 3, dialect="hermes-4"),
+        )
+
+
+def test_a_zero_token_episode_is_refused_rather_than_averaged_in(tmp_path):
+    """Not a cheap run -- a run that did not happen. Averaging it in makes the arm look free, which
+    is the same absence-as-measured-zero shape that has now appeared six times in this repository."""
+    log = tmp_path / "arm.jsonl"
+    log.write_text(
+        json.dumps({"task_id": "t", "metrics": {"tokens_used": 0, "tool_calls": 0, "steps": 0}}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvaluateError, match="did not happen"):
+        arm_from_log(log, label="control")
+
+
+def test_an_empty_log_is_refused(tmp_path):
+    log = tmp_path / "arm.jsonl"
+    log.write_text("", encoding="utf-8")
+    with pytest.raises(EvaluateError, match="no episodes"):
+        arm_from_log(log, label="candidate")
+
+
+def test_the_arms_differ_only_by_the_miner_dir_flag():
+    """The pairing is the whole design. If anything else differed between the two argv lists, the
+    measurement would attribute that difference to the submission."""
+    common = dict(
+        task_id="t",
+        base_url="http://127.0.0.1:8000/v1",
+        model="m",
+        api_key_env="NONE",
+        workspace_root=Path("/tmp/ws"),
+        episodes_out=Path("/tmp/out.jsonl"),
+        repeats=10,
+        allow_unsandboxed=True,
+    )
+    control = runner_argv(**common, miner_dir=None)
+    candidate = runner_argv(**common, miner_dir=Path("/sub"))
+    assert candidate[: len(control) - 1] == control[:-1]
+    assert "--miner-dir" in candidate and "--miner-dir" not in control
+
+
+def test_no_dialect_flag_is_passed_so_the_pin_decides():
+    """Passing hermes-3 explicitly produced 2 steps, 0 tool calls and a clean protocol report on a
+    model that does not speak it. The pin records hermes-4; the runner now defaults to it."""
+    argv = runner_argv(
+        task_id="t",
+        base_url="u",
+        model="m",
+        api_key_env="NONE",
+        workspace_root=Path("/tmp/ws"),
+        episodes_out=Path("/tmp/o.jsonl"),
+        repeats=10,
+        miner_dir=None,
+        allow_unsandboxed=False,
+    )
+    assert "--dialect" not in argv
+
+
+def test_the_default_repeat_count_is_the_attempt_floor():
+    """One attempt tells you almost nothing and feels like it tells you everything."""
+    from hermes.acceptance import MIN_ATTEMPTS
+    from miner.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["evaluate", "--dir", "/nonexistent", "--help"])
+    assert MIN_ATTEMPTS == 10

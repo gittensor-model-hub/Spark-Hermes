@@ -40,9 +40,12 @@ challenges -- increased median tokens by 58.6% and took the pass rate from 1/3 t
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
+from hermes.acceptance import MIN_ATTEMPTS
 from hermes.miner_contract import ContractError, Violation
 from hermes.miner_contract import load as load_contract
 
@@ -214,15 +217,84 @@ def scaffold(root: Path, *, skill: str) -> list[Path]:
     return [soul, skill_file]
 
 
+def _evaluate(args: Any) -> int:
+    """Validate first, then run both arms, then judge with the validator's own gate."""
+    from hermesbench import runner
+    from miner.evaluate import arm_from_log, compare, render, runner_argv
+
+    if not args.task or not args.model:
+        print("miner: evaluate needs --task and --model", file=sys.stderr)
+        return 2
+
+    # Before any GPU time. A submission the validator would refuse is a submission whose
+    # measurement is worthless, and the refusal costs nothing to find.
+    code = describe(args.root)
+    if code != 0:
+        print("\nnot evaluating a submission the validator would refuse", file=sys.stderr)
+        return code
+
+    out = args.workspace_root
+    out.mkdir(parents=True, exist_ok=True)
+    arms = []
+    for label, miner_dir in (("control", None), ("candidate", args.root)):
+        log = out / f"{label}.jsonl"
+        if log.exists():
+            log.unlink()
+        print(f"\n--- {label} arm: {args.repeats} attempt(s) on {args.task} ---", flush=True)
+        rc = runner.main(
+            runner_argv(
+                task_id=args.task,
+                base_url=args.base_url,
+                model=args.model,
+                api_key_env=args.api_key_env,
+                workspace_root=out / f"ws-{label}",
+                episodes_out=log,
+                repeats=args.repeats,
+                miner_dir=miner_dir,
+                allow_unsandboxed=args.allow_unsandboxed,
+            )
+        )
+        if rc != 0:
+            print(f"miner: the {label} arm exited {rc}", file=sys.stderr)
+            return rc
+        arms.append(arm_from_log(log, label=label))
+
+    report = compare(*arms)
+    print()
+    print(render(report, task_id=args.task))
+    if args.report:
+        args.report.write_text(json.dumps(report.to_record(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"\nwrote {args.report}")
+    return 0 if report.decision.accepted else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m miner",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("action", choices=["check", "init"])
+    parser.add_argument("action", choices=["check", "init", "evaluate"])
     parser.add_argument("--dir", type=Path, required=True, dest="root", help="the submission directory")
     parser.add_argument("--skill", default="my-strategy", help="skill directory name (init only)")
+    parser.add_argument("--task", default="", help="the task id to evaluate on (evaluate only)")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
+    parser.add_argument("--model", default="", help="the served model name (evaluate only)")
+    parser.add_argument("--api-key-env", default="NONE")
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=MIN_ATTEMPTS,
+        help="paired attempts per arm. Defaults to MIN_ATTEMPTS: one attempt tells you almost "
+        "nothing and feels like it tells you everything",
+    )
+    parser.add_argument("--workspace-root", type=Path, default=Path("var/miner-eval"))
+    parser.add_argument("--report", type=Path, default=None, help="write the report as JSON")
+    parser.add_argument(
+        "--allow-unsandboxed",
+        action="store_true",
+        help="required to run model-authored shell commands; pass only inside a container, VM or disposable machine",
+    )
     parser.add_argument(
         "--base-prompt",
         type=Path,
@@ -230,6 +302,9 @@ def main(argv: list[str] | None = None) -> int:
         help="a file holding the harness base prompt, to show the composed result at its real size",
     )
     args = parser.parse_args(argv)
+
+    if args.action == "evaluate":
+        return _evaluate(args)
 
     if args.action == "init":
         try:
