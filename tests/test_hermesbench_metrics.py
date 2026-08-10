@@ -428,3 +428,54 @@ def test_protocol_clean_is_the_floor_for_a_trainable_trajectory():
     assert drifted.protocol_clean is False
     assert drifted.to_record()["malformed_turns"] == 3
     assert drifted.to_record()["protocol_clean"] is False
+
+
+# --- the dialect a run used is recorded, and defaults to the pinned one ------------------------
+#
+# Measured on the rollout host: the same task and model under `--dialect hermes-3` produced 2
+# steps, 0 tool calls, 0 malformed turns and `protocol_clean: true`. The pin records
+# `hermes_dialect: hermes-4` with its evidence -- the model's chat template emits `<think>` and
+# never `<scratch_pad>` -- and the flag defaulted to hermes-3, so a run that forgot it instructed
+# the model in a dialect it does not speak. The model complied, in prose, and every protocol
+# metric read clean. Nothing in the record could say which dialect produced it.
+
+
+def test_the_default_dialect_is_the_pinned_one():
+    """A literal default here is a silent whole-run failure: the epoch pins the model, and the
+    model's own template decides which blocks it emits."""
+    from hermes.base_model import load as load_pin
+    from hermesbench.runner import _pinned_dialect
+
+    assert _pinned_dialect() == load_pin().hermes_dialect == "hermes-4"
+
+
+def test_an_unknown_pinned_dialect_falls_back_rather_than_raising():
+    """`--help` must work in a checkout whose pin is missing or malformed, and a broken pin is
+    better reported by the run than by argument parsing."""
+    from hermesbench.runner import _pinned_dialect
+
+    assert _pinned_dialect(default="hermes-3") in {"hermes-3", "hermes-4"}
+
+
+def test_the_episode_record_says_which_dialect_produced_it():
+    """Beside `verify_digest`, for the same reason. "0 tool calls" means something entirely
+    different under a mismatched dialect, and without this field nothing can tell which."""
+    from hermesbench.metrics import EpisodeMetrics
+
+    record = EpisodeMetrics(
+        task_id="t",
+        success=False,
+        tool_calls=0,
+        failed_calls=0,
+        hit_failure=False,
+        recovered=False,
+        mutated=False,
+        self_checked=False,
+        tokens_used=1_231,
+        wall_time_s=7.0,
+        steps=2,
+        dialect="hermes-3",
+    ).to_record()
+    assert record["dialect"] == "hermes-3"
+    assert record["malformed_turns"] == 0, "the case that made this necessary: clean, and wrong"
+    assert record["protocol_clean"] is True

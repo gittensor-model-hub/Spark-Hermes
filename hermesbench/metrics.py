@@ -95,6 +95,14 @@ class EpisodeMetrics:
     # failure was. Empty means unstamped -- a log written before this field, which callers must
     # treat as unverifiable rather than as matching.
     verify_digest: str = ""
+    # Which Hermes wire dialect drove the episode.
+    #
+    # Beside `verify_digest` for the same reason: a log that does not say how it was produced
+    # gets re-read later as though it were comparable. The dialect decides which blocks the
+    # model is told to emit, and a run under the wrong one is a run of prose answers that still
+    # reports `protocol_clean: true` -- so "0 tool calls" means something entirely different
+    # depending on this field, and without it nothing can tell which.
+    dialect: str = ""
 
     @property
     def overfit(self) -> bool:
@@ -134,6 +142,7 @@ class EpisodeMetrics:
             "steps": self.steps,
             "max_steps_hit": self.max_steps_hit,
             "verify_digest": self.verify_digest,
+            "dialect": self.dialect,
         }
 
 
@@ -335,6 +344,7 @@ def episode_metrics(
     hidden_passed: bool | None = None,
     malformed_turns: int = 0,
     verify_digest: str = "",
+    dialect: str = "",
     checkpoint_timeline: Sequence[dict[str, bool]] = (),
 ) -> EpisodeMetrics:
     failed = trajectory.failed_steps
@@ -370,6 +380,7 @@ def episode_metrics(
         hidden_passed=hidden_passed,
         malformed_turns=malformed_turns,
         verify_digest=verify_digest,
+        dialect=dialect,
     )
 
 

@@ -289,6 +289,21 @@ def _sample_checkpoints(
     return sample
 
 
+def _pinned_dialect(default: str = "hermes-3") -> str:
+    """The dialect `hermes/base_model.json` pins, or `default` if it pins none.
+
+    Falls back rather than raising: `--help` must work in a checkout whose pin is missing or
+    malformed, and a broken pin is better reported by the run than by argument parsing.
+    """
+    try:
+        from hermes.base_model import load as load_pin
+
+        pinned = load_pin().hermes_dialect
+    except Exception:
+        return default
+    return pinned if pinned in DIALECTS else default
+
+
 def verify_digest(task: Task) -> str:
     """sha256 of the task's published verify script, stamped onto every episode it produces.
 
@@ -321,6 +336,10 @@ def run_episode(
     """
     workspace.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    # Off the policy, not passed in. The policy is what renders the system prompt in a dialect,
+    # so its own field is the truth about what this episode actually ran under -- a parameter
+    # could disagree with it, and the point of stamping is that the log cannot.
+    dialect_name = str(getattr(getattr(policy, "dialect", None), "name", "") or "")
 
     # Read the same way `usage` is below. The prompt is what makes an executed trajectory
     # exportable: it is the context that caused these tokens, and `_system_content` refuses
@@ -352,6 +371,7 @@ def run_episode(
                 mutating_tools=task.mutating_tools,
                 setup_failed=True,
                 verify_digest=verify_digest(task),
+                dialect=dialect_name,
             ),
             setup_failed=True,
         )
@@ -515,6 +535,7 @@ def run_episode(
             mutating_tools=task.mutating_tools,
             max_steps_hit=max_steps_hit,
             verify_digest=verify_digest(task),
+            dialect=dialect_name,
             category=task.category,
             public_passed=public_passed,
             hidden_passed=hidden_passed,
@@ -602,7 +623,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="", help="model id to drive the suite with")
     parser.add_argument("--base-url", default="", help="OpenAI-compatible endpoint")
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY", help="env var holding the endpoint's key")
-    parser.add_argument("--dialect", default="hermes-3", choices=sorted(DIALECTS), help="Hermes wire dialect")
+    # Default from the pin, not from a literal. `hermes/base_model.json` records
+    # `hermes_dialect: hermes-4` with its evidence -- the model's own chat template emits
+    # `<think>` and never `<scratch_pad>` -- and this flag defaulted to `hermes-3`, which
+    # instructs the model to use a block it does not speak.
+    #
+    # The failure is silent, which is why it survived. A run that omits this flag gets a model
+    # answering in prose: zero tool calls, zero malformed turns, `protocol_clean: true`. Measured
+    # on the rollout host, the same task and model gave 2 steps and 0 tool calls under hermes-3
+    # where the pinned dialect drives a working agent. Nothing in the metrics said the dialect was
+    # wrong, because the model complied -- with the wrong contract.
+    parser.add_argument(
+        "--dialect",
+        default=_pinned_dialect(),
+        choices=sorted(DIALECTS),
+        help="Hermes wire dialect; defaults to hermes_dialect from hermes/base_model.json",
+    )
     parser.add_argument("--repeats", type=int, default=1, help="run each task N times and report flakiness")
     parser.add_argument(
         "--task-ids",
@@ -745,6 +781,18 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     dialect = DIALECTS[args.dialect]
+    pinned = _pinned_dialect()
+    if args.dialect != pinned:
+        # Not refused. Comparing dialects is legitimate work, and the epoch pins the model rather
+        # than the harness's wire format. But it must be loud: the measured cost of getting this
+        # wrong is an entire run of prose answers that reports a clean protocol.
+        print(
+            f"hermesbench: WARNING dialect {args.dialect!r} is not the pinned {pinned!r}. The pinned "
+            "model's chat template decides which blocks it emits, and instructing another dialect "
+            "produces a model that answers in prose -- zero tool calls, zero malformed turns, and "
+            "protocol_clean true, because it complied with the wrong contract.",
+            file=sys.stderr,
+        )
     complete = openai_completion(base_url=args.base_url, model=args.model, api_key=os.environ.get(args.api_key_env, ""))
 
     def policy_factory(task: Task) -> ServedModelPolicy:
