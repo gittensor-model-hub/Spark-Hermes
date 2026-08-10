@@ -62,20 +62,42 @@ def resolve_env(
 ) -> dict[str, str] | None:
     """Overlay task env onto the current environment, expanding `$VAR` references.
 
-    Returns None when there is nothing to override, so subprocesses inherit normally.
-    Expansion happens against the live environment, which is what makes
-    `PATH: "./bin:$PATH"` prepend instead of clobbering the caller's PATH.
+    Returns None when there is nothing to override *and* this is not a verification run,
+    so subprocesses inherit normally. Expansion happens against the live environment, which
+    is what makes `PATH: "./bin:$PATH"` prepend instead of clobbering the caller's PATH.
 
-    `for_verification=True` additionally strips agent-writable PATH entries -- see
-    `sanitize_path`. The agent still meets the shadowed tool; the grader does not.
+    `for_verification=True` strips agent-writable PATH entries -- see `sanitize_path` --
+    and sets `PYTHONSAFEPATH`, which closes the same hole one layer down. `sanitize_path`
+    stops the agent shadowing a *program* the grader runs; without `PYTHONSAFEPATH` the
+    agent can shadow a *module* the grader imports.
+
+    Eleven of the shipped tasks grade with `"$PY" - <<'PYEOF'`. Python sets `sys.path[0]`
+    to `''` for a script read from stdin, which is the current directory -- and during
+    verification that is the workspace, the directory the agent writes `report.txt` into.
+    So two lines:
+
+        printf 'import sys\nsys.exit(0)\n' > pathlib.py
+
+    made a grader that must always fail exit 0, with no report written and no work done.
+    Both the published and the withheld check, on any task whose grader imports pathlib,
+    hashlib, re or json. Reproduced before this change and closed by it.
+
+    **An env is returned even with no overrides when verifying.** The early return is why
+    this could not be fixed task by task: a task declaring no `env:` got None, inherited
+    the parent environment, and would never have seen the flag however carefully each
+    grader was written.
     """
-    if not overrides:
+    if not overrides and not for_verification:
         return None
     env = dict(os.environ)
-    for key, value in overrides.items():
+    for key, value in (overrides or {}).items():
         env[key] = os.path.expandvars(value)
-    if for_verification and "PATH" in env:
-        env["PATH"] = sanitize_path(env["PATH"], workspace)
+    if for_verification:
+        # Refuse the workspace as an import root. `-I` on every grader would also work and
+        # would have to be remembered by every task ever written; this is one place.
+        env["PYTHONSAFEPATH"] = "1"
+        if "PATH" in env:
+            env["PATH"] = sanitize_path(env["PATH"], workspace)
     return env
 
 

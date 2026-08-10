@@ -250,10 +250,17 @@ def test_the_agents_env_is_left_alone(tmp_path):
     assert grader_env is not None and not grader_env["PATH"].startswith("./bin")
 
 
-def test_a_task_with_no_env_still_inherits_normally(tmp_path):
+def test_a_task_with_no_env_still_gets_a_protected_grader(tmp_path):
+    """This test used to assert None here, which encoded the hole. A task declaring no
+    `env:` inherited the parent environment, so its grader ran with the workspace on
+    sys.path -- and two lines writing pathlib.py passed both its checks with no work done.
+    The agent's own runs still inherit normally; only the grader is protected."""
     from hermesbench.verify import resolve_env
 
-    assert resolve_env({}, workspace=tmp_path, for_verification=True) is None
+    assert resolve_env({}, workspace=tmp_path) is None
+    protected = resolve_env({}, workspace=tmp_path, for_verification=True)
+    assert protected is not None
+    assert protected["PYTHONSAFEPATH"] == "1"
 
 
 def test_the_shadowed_tool_cheat_no_longer_passes(tmp_path):
