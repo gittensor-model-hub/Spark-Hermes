@@ -1,0 +1,85 @@
+{
+  "schema_version": "spark-hermes-miner-contract-v1",
+  "pinned_on": "2026-08-10",
+  "agent": {
+    "repository": "NousResearch/hermes-agent",
+    "note": "The agent is upstream and unmodified. A submission may not touch it at all; the paths below are listed so a rejection can name the file rather than say 'not allowed'."
+  },
+  "allowed": [
+    {
+      "path": "SOUL.md",
+      "why": "the profile's behavioural identity, loaded at the head of the system prompt. This is the global trajectory policy a miner is competing on."
+    },
+    {
+      "path": "skills/*/SKILL.md",
+      "why": "the task-solving strategy. Hermes loads a skill's full text when the agent decides it needs it, so this is where a miner's approach actually lands."
+    },
+    {
+      "path": "skills/*/references/*.md",
+      "why": "specialised playbooks the skill can pull in. Splitting them lets a miner optimise *when* extra knowledge is worth its tokens."
+    }
+  ],
+  "denied": [
+    {
+      "path": "skills/*/scripts/*",
+      "why": "a script that greps, tests and reports in one invocation shows on the scoreboard as ONE tool call while performing thirty operations. That makes tool-call count meaningless, and a large enough script is a second agent competing with Hermes rather than improving it."
+    },
+    {
+      "path": "mcp.json",
+      "why": "adds tools. The competition holds the tool set fixed; a miner with extra tools is solving a different task."
+    },
+    {
+      "path": ".env",
+      "why": "providers, keys and environment are part of the pinned execution, not the strategy."
+    },
+    {
+      "path": "config.yaml",
+      "why": "pinned in the managed-scope layer instead of policed here. See hermes/profile.py -- upstream's managed scope makes the pinned keys immutable rather than merely forbidden."
+    },
+    {
+      "path": "memories/*",
+      "why": "persistent state across tasks. A miner could accumulate benchmark-specific knowledge, which is the hidden-sibling defence defeated from inside."
+    },
+    {
+      "path": "sessions/*",
+      "why": "same as memories: cross-task leakage."
+    },
+    {
+      "path": "AGENTS.md",
+      "why": "project context is benchmark input. Editing it is editing the task."
+    },
+    {
+      "path": ".hermes.md",
+      "why": "as AGENTS.md."
+    },
+    {
+      "path": "run_agent.py",
+      "why": "the agent loop. Upstream."
+    },
+    {
+      "path": "model_tools.py",
+      "why": "tool execution. Upstream."
+    },
+    {
+      "path": "toolsets.py",
+      "why": "tool definitions. Upstream."
+    },
+    {
+      "path": "agent/prompt_builder.py",
+      "why": "system-prompt assembly. A miner editing this is editing the harness, not competing in it."
+    },
+    {
+      "path": "tools/*",
+      "why": "tool implementations. Upstream."
+    },
+    {
+      "path": "hermes_cli/*",
+      "why": "upstream."
+    }
+  ],
+  "extensions": [".md"],
+  "does_not_prevent": [
+    "A submission is Markdown only, but Markdown is an instruction to a model holding a terminal. Nothing here stops a SKILL.md that says 'write a helper script that greps, tests and summarises in one pass, then run it' -- which produces exactly the one-call-hides-thirty-operations effect the scripts/ denial exists to prevent. The contract governs what is SUBMITTED, not what is EXECUTED.",
+    "The consequence is not a tighter allowlist, it is that tool-call count is the weakest efficiency dimension and must not carry a submission on its own. Tokens and wall time are not fooled this way: the hidden operations still cost seconds, and the script's output still enters context."
+  ]
+}
