@@ -1,0 +1,53 @@
+{
+  "acceptance_thresholds_included": false,
+  "baseline": {
+    "attempts": 10,
+    "median_steps": 40,
+    "median_tokens": 46438,
+    "median_tool_calls": 14,
+    "median_wall_time_s": 177.215,
+    "pass_rate": 0.3,
+    "token_spread": 0.425,
+    "true_pass_rate_interval": [
+      0.1078,
+      0.6032
+    ],
+    "verified_passes": 3
+  },
+  "challenge_digest": "sha256:87f074a3f729f8edb2ba3ad5c430dcbe7555291ecadd6480838c69cd0032ab8d",
+  "epoch": {
+    "harness_digest": "baseline-2026-08-10",
+    "model_revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+  },
+  "failure_class": "step_budget_exhausted",
+  "schema_version": "spark-challenge-v1",
+  "task": {
+    "env": {},
+    "hidden_verify_commitment": "sha256:fb16477b841243b4b871f99708d9b9f4095acdaebeadae2c5adf3b3d8d23f5b9",
+    "max_steps": 25,
+    "prompt": "We are about to negotiate a rate limit with the team that runs the upstream index\nservice, and we need to tell them how much traffic one full sweep sends them.\n\nIn this workspace:\n\n  * `urls.txt` -- the twelve shard URLs a sweep covers, in order.\n  * `net/client.py` -- the retrying fetch client.\n  * `net/transport.py` -- a stand-in for the upstream service that replays a fixed\n    script of HTTP statuses (`net/script.txt`).\n  * `sweep.py` -- runs one full sweep over every URL in `urls.txt` and prints a\n    summary.\n\nThe capacity note going to the upstream team quotes the `upstream requests` figure\nfrom that summary. The SRE reviewing it says the number is not the number they think\nit is, and will not sign the note until someone establishes what the upstream service\nactually receives.\n\nWrite `measurement.txt` in the workspace root, as `key=value` lines:\n\n    total_requests=<requests the upstream service receives during one full sweep>\n    shard_02=<how many of those were for https://index.internal/shard/02>\n\nA \"request\" is one call that reaches the upstream stand-in. One full sweep means what\n`sweep.py` does: every URL in `urls.txt`, in order, against a single transport.\n\nTreat the shipped code and fixtures as read-only: do not edit `sweep.py`, anything\nunder `net/`, or `urls.txt`. Copy them if you want to instrument something.\n",
+    "setup": "set -e\nmkdir -p net logs\n# Refuse to build a workspace we cannot grade.\nPY=\"$(command -v python3 || command -v python)\"\n\n: > net/__init__.py\n\ncat > net/transport.py <<'PYFILE'\n\"\"\"A scripted stand-in for the upstream index service.\n\nEvery outbound request is appended to `logs/upstream.log`, one line per request, in\nthe order it was issued.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport pathlib\n\nROOT = pathlib.Path(__file__).resolve().parent.parent\nLOG_PATH = ROOT / \"logs\" / \"upstream.log\"\n\n\nclass Response:\n    def __init__(self, status: int) -> None:\n        self.status = status\n\n    @property\n    def ok(self) -> bool:\n        return self.status == 200\n\n    @property\n    def retry_after(self) -> bool:\n        return self.status == 429\n\n\nclass ScriptedTransport:\n    \"\"\"Replays a fixed sequence of upstream statuses, cycling when it runs out.\"\"\"\n\n    def __init__(self, script) -> None:\n        self._script = list(script)\n        self._cursor = 0\n\n    def get(self, url: str) -> Response:\n        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)\n        with LOG_PATH.open(\"a\", encoding=\"utf-8\") as handle:\n            handle.write(url + \"\\n\")\n        status = self._script[self._cursor % len(self._script)]\n        self._cursor += 1\n        return Response(status)\nPYFILE\n\ncat > net/client.py <<'PYFILE'\n\"\"\"Retrying client for the upstream index service.\"\"\"\n\nfrom __future__ import annotations\n\nMAX_ATTEMPTS = 5\nINNER_RETRIES = 3\n\n\nclass Transient(Exception):\n    def __init__(self, retry_after: bool = False) -> None:\n        super().__init__(\"transient upstream failure\")\n        self.retry_after = retry_after\n\n\nclass Result:\n    def __init__(self, response, attempts: int) -> None:\n        self.response = response\n        self.attempts = attempts\n\n\ndef _send(url, transport):\n    \"\"\"Ride out a burst of 5xx, but hand anything else back to the caller.\"\"\"\n    for _ in range(INNER_RETRIES):\n        response = transport.get(url)\n        if response.ok:\n            return response\n        if response.status >= 500:\n            continue\n        raise Transient(retry_after=response.retry_after)\n    raise Transient()\n\n\ndef _probe(url, transport):\n    \"\"\"Confirm the shard is answering again after it asked us to back off.\"\"\"\n    return transport.get(url).ok\n\n\ndef fetch(url, transport):\n    \"\"\"Fetch `url`, giving up after MAX_ATTEMPTS attempts.\"\"\"\n    attempts = 0\n    for _ in range(MAX_ATTEMPTS):\n        attempts += 1\n        try:\n            return Result(_send(url, transport), attempts)\n        except Transient as exc:\n            if exc.retry_after:\n                _probe(url, transport)\n    return Result(None, attempts)\nPYFILE\n\ncat > sweep.py <<'PYFILE'\n\"\"\"Sweep every shard once and report what it cost.\"\"\"\n\nfrom __future__ import annotations\n\nimport pathlib\nimport sys\n\nROOT = pathlib.Path(__file__).resolve().parent\nsys.path.insert(0, str(ROOT))\n\nfrom net import client, transport  # noqa: E402\n\n\ndef main() -> None:\n    transport.LOG_PATH.parent.mkdir(parents=True, exist_ok=True)\n    transport.LOG_PATH.write_text(\"\", encoding=\"utf-8\")\n\n    script = [int(tok) for tok in (ROOT / \"net\" / \"script.txt\").read_text().split()]\n    urls = [u.strip() for u in (ROOT / \"urls.txt\").read_text().splitlines() if u.strip()]\n    upstream = transport.ScriptedTransport(script)\n\n    requests = 0\n    fetched = 0\n    for url in urls:\n        result = client.fetch(url, upstream)\n        requests += result.attempts\n        if result.response is not None:\n            fetched += 1\n\n    print(f\"urls swept: {len(urls)}\")\n    print(f\"fetched ok: {fetched}\")\n    print(f\"upstream requests: {requests}\")\n\n\nif __name__ == \"__main__\":\n    main()\nPYFILE\n\n# Purely arithmetic, never `random`: the grader pins counts derived from this exact\n# script, so it must come out identical on every machine and Python version.\n\"$PY\" - <<'PYEOF'\ncodes = []\nfor k in range(41):\n    if k % 13 == 0:\n        codes.append(200)\n    elif k % 4 == 0:\n        codes.append(503)\n    elif k % 6 == 1:\n        codes.append(429)\n    elif k % 9 == 2:\n        codes.append(404)\n    else:\n        codes.append(502)\n\nwith open(\"net/script.txt\", \"w\", encoding=\"utf-8\", newline=\"\\n\") as fh:\n    fh.write(\"\\n\".join(str(c) for c in codes) + \"\\n\")\n\nurls = [f\"https://index.internal/shard/{i:02d}\" for i in range(1, 13)]\nwith open(\"urls.txt\", \"w\", encoding=\"utf-8\", newline=\"\\n\") as fh:\n    fh.write(\"\\n\".join(urls) + \"\\n\")\nPYEOF\n",
+    "task_id": "sv-retry-request-budget",
+    "timeout_s": 300,
+    "verify": "set -e\nPY=\"$(command -v python3 || command -v python)\"\n\"$PY\" - <<'PYEOF'\nimport pathlib\nimport re\nimport sys\n\n# Measured by running the sweep this task's setup builds and counting the lines the\n# transport wrote to logs/upstream.log. `sweep.py` prints 45 for the same run, and\n# MAX_ATTEMPTS * len(urls) is 60; both are wrong. Recompute if setup changes.\nEXPECTED = {\"total_requests\": 122, \"shard_02\": 13}\n\npath = pathlib.Path(\"measurement.txt\")\nif not path.is_file():\n    sys.exit(\"measurement.txt was never written\")\n\nfields = {}\nfor raw in path.read_text(encoding=\"utf-8\", errors=\"replace\").splitlines():\n    line = raw.strip()\n    if not line or line.startswith(\"#\") or \"=\" not in line:\n        continue\n    key, _, value = line.partition(\"=\")\n    fields.setdefault(key.strip().lower(), value.strip())\n\nproblems = []\nfor key, want in EXPECTED.items():\n    got = fields.get(key)\n    if got is None:\n        problems.append(f\"{key}: not reported\")\n        continue\n    # Tolerant on presentation (\"122\", \"122 requests\", \"1,22\" is not a thing here),\n    # exact on the number: this grades whether the traffic was counted, not typeset.\n    match = re.search(r\"-?\\d[\\d,_]*\", got)\n    if match is None:\n        problems.append(f\"{key}: {got!r} contains no number\")\n        continue\n    number = int(match.group(0).replace(\",\", \"\").replace(\"_\", \"\"))\n    if number != want:\n        problems.append(f\"{key}: reported {number}, the upstream saw {want}\")\n\nif problems:\n    sys.exit(\"; \".join(problems))\nPYEOF\n"
+  },
+  "task_id": "sv-retry-request-budget",
+  "why_no_thresholds": "the run that produces challenges is the run that measures the token spread, so a threshold baked in here would freeze a guess at the moment the data to replace it arrives. hermes.acceptance reads the spread from baseline.token_spread instead.",
+  "withheld": {
+    "body_included": false,
+    "dropped_task_keys": [
+      "checkpoint_every",
+      "checkpoints",
+      "hidden_verify",
+      "max_verification_steps",
+      "metadata",
+      "mutating_tools",
+      "protected_paths",
+      "shortcuts",
+      "tags",
+      "tools",
+      "verification_tools"
+    ],
+    "hidden_verify_commitment": "sha256:fb16477b841243b4b871f99708d9b9f4095acdaebeadae2c5adf3b3d8d23f5b9"
+  }
+}

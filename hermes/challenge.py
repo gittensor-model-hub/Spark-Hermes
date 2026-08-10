@@ -35,7 +35,12 @@ records the observed resource envelope and the gate reads the spread from it.
 
 from __future__ import annotations
 
+import hashlib
+import sys
+from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from statistics import median
 from typing import Any
 
@@ -397,6 +402,276 @@ __all__ = [
     "Baseline",
     "Challenge",
     "ChallengeError",
+    "CHALLENGES_DIR",
     "classify",
+    "from_episode_log",
+    "unverifiable_tasks",
     "open_challenge",
 ]
+
+# --- opening challenges from a real baseline log ----------------------------------------------
+
+CHALLENGES_DIR = Path("datasets/challenges")
+
+
+def from_episode_log(
+    rows: Iterable[dict[str, Any]],
+    *,
+    epoch: dict[str, Any],
+    task_pins: dict[str, dict[str, Any]] | None = None,
+    envelope_multiple: float = 2.0,
+    min_attempts: int = 5,
+) -> tuple[list[Challenge], list[tuple[str, str]]]:
+    """Group a baseline's episodes by task and open what qualifies. Returns (opened, refused).
+
+    Consumes exactly what `hermesbench.runner --episodes-out` writes -- one
+    `EpisodeMetrics.to_record()` per line -- so the log a baseline already produces is the input
+    here rather than a second format somebody has to export. That was the missing join: the
+    baseline wrote metrics, this module could package them, and nothing carried one to the other.
+
+    Refusals are returned rather than logged away. A task that did not become a challenge is the
+    more common outcome and the reason matters -- "the baseline handles this" and "the baseline is
+    flaky here" call for different work, and a caller that only sees the successes cannot tell
+    which happened.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("task_id") or "")].append(row)
+
+    opened: list[Challenge] = []
+    refused: list[tuple[str, str]] = []
+    for task_id, rows in sorted(grouped.items()):
+        attempts = tuple(
+            Attempt(
+                public_passed=bool(r.get("public_passed")),
+                hidden_passed=r.get("hidden_passed"),
+                tokens=int(r.get("tokens_used") or 0),
+                tool_calls=int(r.get("tool_calls") or 0),
+                wall_time_s=float(r.get("wall_time_s") or 0.0),
+                steps=int(r.get("steps") or 0),
+                max_steps_hit=bool(r.get("max_steps_hit")),
+                setup_failed=bool(r.get("setup_failed")),
+                malformed_turns=int(r.get("malformed_turns") or 0),
+            )
+            for r in rows
+        )
+        baseline = Baseline(task_id=task_id, attempts=attempts)
+        try:
+            opened.append(
+                open_challenge(
+                    baseline,
+                    epoch=epoch,
+                    task_pins=(task_pins or {}).get(task_id),
+                    envelope_tokens=baseline.median_tokens,
+                    min_attempts=min_attempts,
+                )
+            )
+        except ChallengeError as exc:
+            refused.append((task_id, str(exc).split(": ", 1)[-1]))
+    return opened, refused
+
+
+def unverifiable_tasks(
+    rows: Iterable[dict[str, Any]],
+    *,
+    current: dict[str, str],
+    as_of: dict[str, str] | None = None,
+    trust_unstamped: bool = False,
+) -> dict[str, str]:
+    """Tasks whose log cannot be shown to describe the grader in the tree now. task_id -> reason.
+
+    This is the check that would have caught the problem at its source. `verify_digest` is
+    stamped onto every episode by the runner; when the verify script has changed since, the log
+    describes a grader that no longer exists and its pass rate says nothing about this suite.
+
+    Per task rather than per run, because one repaired verifier should not invalidate eighteen
+    good baselines.
+
+    An unstamped log -- every log written before the field existed, including the first real
+    baseline -- cannot be checked directly, and `as_of` recovers the missing stamp from git. With
+    neither a stamp nor a recovered one, the task is unverifiable rather than assumed to match:
+    absence of a mismatch is not evidence of agreement, and defaulting the other way is exactly
+    how a stale log gets published.
+    """
+    as_of = as_of or {}
+    problems: dict[str, str] = {}
+    for row in rows:
+        task_id = str(row.get("task_id") or "")
+        stamped = str(row.get("verify_digest") or "") or as_of.get(task_id, "")
+        if not stamped:
+            if not trust_unstamped:
+                problems[task_id] = (
+                    "its episodes carry no verify_digest, so nothing says which grader produced them. "
+                    "Re-run the baseline, pass --baseline-ref to recover the stamp from git, or "
+                    "--trust-unstamped if you have checked by hand that the verifier has not changed"
+                )
+        elif stamped != current.get(task_id, stamped):
+            problems[task_id] = (
+                f"the log was produced by a different grader: episodes stamp {stamped[:23]}... and the "
+                f"suite now has {str(current.get(task_id))[:23]}.... The recorded pass rate describes a "
+                "verifier that no longer exists; re-run the baseline for this task"
+            )
+    return problems
+
+
+def _verify_digests_at(ref: str) -> dict[str, str]:
+    """Digest every task's published verify script as it stood at a git ref.
+
+    Reads the task YAML out of the old tree rather than importing it: importing a suite from
+    another revision means running that revision's code, and the point here is to inspect a
+    tree, not to trust it.
+
+    Returns an empty mapping if git cannot answer -- a missing ref or a checkout without the
+    history. Empty means "no stamp recovered", which leaves the unstamped-log refusal in force
+    rather than silently passing everything.
+    """
+    import subprocess
+
+    import yaml
+
+    try:
+        listing = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", ref, "hermesbench/tasks/"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {}
+
+    digests: dict[str, str] = {}
+    for path in listing:
+        if not path.endswith((".yaml", ".yml")):
+            continue
+        try:
+            blob = subprocess.run(["git", "show", f"{ref}:{path}"], capture_output=True, text=True, check=True).stdout
+            spec = yaml.safe_load(blob) or {}
+        except (subprocess.CalledProcessError, yaml.YAMLError):
+            continue
+        task_id = str(spec.get("task_id") or Path(path).stem)
+        digests[task_id] = "sha256:" + hashlib.sha256(str(spec.get("verify") or "").encode("utf-8")).hexdigest()
+    return digests
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import dataclasses
+    import json
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--episodes", type=Path, required=True, help="JSONL from `runner --episodes-out`")
+    parser.add_argument("--out", type=Path, default=CHALLENGES_DIR, help="where to write challenge packets")
+    parser.add_argument("--model-revision", required=True, help="the pinned model revision this baseline ran")
+    parser.add_argument("--harness-digest", required=True, help="the harness digest this baseline ran")
+    parser.add_argument("--min-attempts", type=int, default=5)
+    parser.add_argument(
+        "--baseline-ref",
+        default="",
+        help="git ref of the tree this log was produced from; recovers the missing verify_digest for an "
+        "unstamped log by reading the task YAML out of that tree",
+    )
+    parser.add_argument(
+        "--trust-unstamped",
+        action="store_true",
+        help="publish from a log with no verify_digest (pre-dating the field); you are asserting by hand "
+        "that the verifiers have not changed since it was written",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="report what would open, write nothing")
+    args = parser.parse_args(argv)
+
+    from hermesbench.runner import verify_digest as verify_digest_of
+    from hermesbench.sink import read_episodes
+    from hermesbench.suitecheck import missing_commands
+    from hermesbench.tasks import load_suite
+
+    rows = list(read_episodes(args.episodes))
+    if not rows:
+        print(f"hermes.challenge: no episodes in {args.episodes}", file=sys.stderr)
+        return 2
+
+    # The task definition comes from the suite rather than from the log. Two reasons, and they
+    # are different reasons.
+    #
+    # The commitment, because an episode record does not carry one, and a challenge published
+    # without it cannot say which withheld check will grade it -- the field `overfit_rate`
+    # ultimately rests on.
+    #
+    # The prompt, setup and verify script, because a packet without them is not a work order.
+    # `PUBLISHABLE_TASK_KEYS` is an allowlist of 14 keys and the first version of this passed 2,
+    # producing a well-formed packet a miner could not have worked from. The allowlist is the
+    # thing deciding what is publishable; a caller that hand-picks a subset is second-guessing
+    # it, and the deny-by-default direction means the safe move is to hand over the whole record
+    # and let `Challenge.to_record` drop what it must -- which it then reports in
+    # `dropped_task_keys`, by name.
+    pins = {}
+    for t in load_suite("all"):
+        record = {f.name: getattr(t, f.name) for f in dataclasses.fields(t)}
+        record["hidden_verify_commitment"] = t.hidden_verify_commitment
+        pins[t.task_id] = record
+    # Prove the grader can run before publishing a challenge on the fact that it did not pass.
+    #
+    # This is not a hypothetical. The first real baseline log opened six challenges, and two --
+    # `fix-failing-test` and `verify-speedup-claim` -- were tasks whose verifiers invoked a bare
+    # `python`, which the harness does not guarantee. The agent finished, declared itself done,
+    # and the grader failed it anyway; both scored 10/10 once the interpreter was resolved.
+    # Publishing those would have sent miners to fix a verifier for two full rounds.
+    #
+    # The check is `suitecheck.missing_commands` rather than anything inferred from the metrics,
+    # and the difference matters. The tempting signal was that neither task ever exhausted its
+    # step budget while the four genuine challenges exhausted theirs 9 or 10 times out of 10 --
+    # true of this run, and wrong as a rule: a model that writes a bad patch and stops is the
+    # single most common real capability gap there is, and a step-budget heuristic refuses
+    # exactly that. Asking whether the verifier's commands exist answers the actual question.
+    #
+    # It cannot catch every ungradeable verifier -- a grader can be present and still unable to
+    # pass -- so it is a precondition, not a proof. An episode record carries no harness digest,
+    # which is the gap underneath all of this: a log and the epoch it is published under can
+    # disagree in silence.
+    ungradeable: dict[str, str] = {}
+    for task in load_suite("all"):
+        absent = sorted({*missing_commands(task.verify), *missing_commands(task.hidden_verify or "")})
+        if absent:
+            ungradeable[task.task_id] = (
+                f"its verifier invokes {absent}, which do not exist here, so it can never pass on this "
+                "machine and every attempt scores 0 for a reason the model never caused"
+            )
+
+    gradeable_rows = [r for r in rows if r.get("task_id") not in ungradeable]
+    epoch = {"model_revision": args.model_revision, "harness_digest": args.harness_digest}
+    as_of = _verify_digests_at(args.baseline_ref) if args.baseline_ref else {}
+    ungradeable.update(
+        unverifiable_tasks(
+            gradeable_rows,
+            current={t.task_id: verify_digest_of(t) for t in load_suite("all")},
+            as_of=as_of,
+            trust_unstamped=args.trust_unstamped,
+        )
+    )
+
+    gradeable = [r for r in gradeable_rows if r.get("task_id") not in ungradeable]
+    opened, refused = from_episode_log(rows=gradeable, epoch=epoch, task_pins=pins, min_attempts=args.min_attempts)
+    refused = sorted([*refused, *ungradeable.items()])
+
+    print(f"{len(rows)} episodes over {len({r.get('task_id') for r in rows})} task(s)")
+    for challenge in opened:
+        b = challenge.baseline
+        print(
+            f"  OPEN    {challenge.task_id:<32} {challenge.failure_class:<22} "
+            f"pass {b.passes}/{len(b.attempts)}  spread {b.token_spread:.1%}"
+        )
+    for task_id, why in refused:
+        print(f"  refused {task_id:<32} {why[:96]}")
+
+    if args.dry_run:
+        print("\ndry run: nothing written")
+        return 0
+    args.out.mkdir(parents=True, exist_ok=True)
+    for challenge in opened:
+        path = args.out / f"{challenge.task_id}.json"
+        path.write_text(json.dumps(challenge.to_record(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"wrote {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -82,6 +82,19 @@ class EpisodeMetrics:
     # *cheaper*: a well-formed call and a planning block both cost tokens. An efficiency
     # score with no conformance term rewards drifting off-protocol.
     malformed_turns: int = 0
+    # sha256 of the task's published verify script, stamped at run time.
+    #
+    # An episode says whether the grader passed and, until this field existed, nothing said
+    # WHICH grader. That gap cost two rounds: `fix-failing-test` and `verify-speedup-claim`
+    # invoked a bare `python`, failed all ten attempts for a reason the model never caused, and
+    # were fixed in a later commit -- leaving a log that reads as a 0/10 capability gap against
+    # a grader that now scores 10/10. `hermes.challenge` opened challenges on both.
+    #
+    # The published script only, so no salt is needed and nothing withheld is digested. That
+    # limits what this detects to changes in the public verifier, which is where the observed
+    # failure was. Empty means unstamped -- a log written before this field, which callers must
+    # treat as unverifiable rather than as matching.
+    verify_digest: str = ""
 
     @property
     def overfit(self) -> bool:
@@ -120,6 +133,7 @@ class EpisodeMetrics:
             "wall_time_s": round(self.wall_time_s, 3),
             "steps": self.steps,
             "max_steps_hit": self.max_steps_hit,
+            "verify_digest": self.verify_digest,
         }
 
 
@@ -320,6 +334,7 @@ def episode_metrics(
     public_passed: bool = False,
     hidden_passed: bool | None = None,
     malformed_turns: int = 0,
+    verify_digest: str = "",
     checkpoint_timeline: Sequence[dict[str, bool]] = (),
 ) -> EpisodeMetrics:
     failed = trajectory.failed_steps
@@ -354,6 +369,7 @@ def episode_metrics(
         public_passed=public_passed,
         hidden_passed=hidden_passed,
         malformed_turns=malformed_turns,
+        verify_digest=verify_digest,
     )
 
 

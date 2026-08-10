@@ -17,6 +17,7 @@ throwaway machine. The flag provides no isolation of its own -- it exists so tha
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -288,6 +289,20 @@ def _sample_checkpoints(
     return sample
 
 
+def verify_digest(task: Task) -> str:
+    """sha256 of the task's published verify script, stamped onto every episode it produces.
+
+    So a log can say which grader produced it. Two commits after the first live baseline, two
+    verifiers were changed because they invoked a bare `python` the harness does not guarantee;
+    the episodes they had already written still read as a 0/10 capability gap against graders
+    that now pass 10/10, and nothing in the record could tell the difference.
+
+    Published script only -- the withheld one would need the salt, and the observed failure was
+    in the public half.
+    """
+    return "sha256:" + hashlib.sha256((task.verify or "").encode("utf-8")).hexdigest()
+
+
 def run_episode(
     task: Task,
     policy: AgentPolicy,
@@ -336,6 +351,7 @@ def run_episode(
                 wall_time_s=time.monotonic() - started,
                 mutating_tools=task.mutating_tools,
                 setup_failed=True,
+                verify_digest=verify_digest(task),
             ),
             setup_failed=True,
         )
@@ -498,6 +514,7 @@ def run_episode(
             wall_time_s=elapsed,
             mutating_tools=task.mutating_tools,
             max_steps_hit=max_steps_hit,
+            verify_digest=verify_digest(task),
             category=task.category,
             public_passed=public_passed,
             hidden_passed=hidden_passed,
