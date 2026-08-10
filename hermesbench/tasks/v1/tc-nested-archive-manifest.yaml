@@ -1,0 +1,297 @@
+# Tool calling: the data is two containers deep, and the member the reflexive command
+# reaches is a decoy that answers plausibly and wrongly.
+#
+# `dist/release.tar` is an uncompressed tar of gzipped payloads. THREE of its members are
+# called `metrics.json.gz`:
+#
+#     metrics.json.gz                      <- archive root: the REDACTED customer copy
+#     release/2026-07/metrics.json.gz      <- the previous release
+#     release/2026-08/metrics.json.gz      <- the authoritative payload, and the answer
+#
+# The decoy is not a corrupt file or a different schema. It is the redacted copy of the
+# very release being asked about: same record count, same level distribution, therefore
+# the SAME `records` and `errors` as the real payload. Only the per-record `ms` differs,
+# because publication rounds each one to the nearest 10 -- and that rounding pulls the
+# true maximum (id 700, 994ms) down to 990 while lifting the runner-up (id 120, 986ms) up
+# to 990, so the tie-break on smallest id hands back id 120. One rounding step, one wrong
+# id, three of four fields still perfect.
+#
+# THE TRAP. `tar -xOf dist/release.tar metrics.json.gz` matches member names exactly, so
+# it silently returns the root member and not the nested one; so does `tar xf` followed by
+# reading `metrics.json.gz` in the extraction directory. `NOTES.txt` inside the bundle
+# prints that exact command as the convenient way to read the bundle -- true, and true for
+# the wrong file. The reflexive one-liner therefore produces a self-consistent report:
+# member=metrics.json.gz, records=760, errors=77, slowest_id=120.
+#
+# WHY THE PUBLISHED CHECK LETS THAT THROUGH. `verify` does what a grader that refuses to
+# hardcode values does: it opens the member the report NAMES and confirms the three
+# numbers are consistent with it. Fabrication dies there -- no invented number matches any
+# member, and a member name that is not in the tar fails outright -- but the redacted copy
+# is internally consistent, so every published check passes.
+#
+# WHAT THE WITHHELD CHECK SEES. It never trusts the tar. It re-derives all three payloads
+# from the same LCG arithmetic the setup used, then requires (a) the reported member to be
+# `release/2026-08/metrics.json.gz`, which `verify` never checks the correctness of at all,
+# (b) the numbers to match the re-derived 2026-08 payload -- catching the redacted copy on
+# slowest_id and the 2026-07 payload on all three -- (c) `payload.json` to hold that
+# payload's records rather than a rounded or stale set, and (d) the bundle to still hold
+# all four of its original members with their original contents, which neither the prompt
+# nor `verify` mentions: an agent that "disambiguated" by repacking the tar without the
+# decoy has destroyed the evidence rather than read it.
+#
+# `hidden_verify` is inline and carries no `metadata:` block on purpose: this file has not
+# been through `python -m hermesbench.split_suite`, which is what moves the body to
+# `<SPARKDISTILL_WITHHELD_ROOT>/tc-nested-archive-manifest.sh` and appends the commitment.
+# Run the split before publishing; a `metadata:` key added here by hand would collide with
+# the one the split writes.
+task_id: tc-nested-archive-manifest
+tags: [tool_calling, archives, python]
+prompt: |
+  `dist/release.tar` is the bundle the build pipeline publishes. The tar itself is not
+  compressed; the metrics payloads inside it are gzipped, so each payload is two
+  containers deep.
+
+  `dist/RELEASE` names the release this workspace is cutting. `NOTES.txt`, inside the
+  bundle, describes the bundle's layout. More than one member of the bundle is named
+  `metrics.json.gz`, and exactly one of them is the authoritative payload for the release
+  named in `dist/RELEASE`. Every payload carries its own `tag`, `build` and `copy` fields.
+
+  Report from that payload. Write `report.txt` in the workspace root as `key=value` lines,
+  one per line:
+
+      member=<the path, inside the bundle, of the member you read>
+      records=<how many entries its `records` array has>
+      errors=<how many of those entries have a `level` of "error">
+      slowest_id=<the `id` of the entry with the largest `ms`; on a tie, the smallest such id>
+
+  Also leave that payload, decompressed, at `payload.json` in the workspace root.
+
+  Treat `dist/release.tar` and `dist/RELEASE` as read-only evidence: do not modify,
+  repack, or prune the bundle. Extract into a scratch directory if you need to.
+tools: [terminal, file_read, file_write, python]
+# No `verification_tools`, for the same reason as the other tool_calling tasks: one shared
+# budget, so opening a second member to compare costs what it should. A free read-only
+# budget would also make the `verification_skipped` detector fire on an agent that checked
+# its answer with a shell command, which is a false accusation.
+#
+# `terminal` and `python` are mutating here: the expected solution writes report.txt and
+# payload.json through a redirect or an interpreter, and an unlisted mutation drops the
+# episode out of the self-check denominator instead of scoring it.
+mutating_tools: [file_write, edit, python, terminal]
+# The bundle and the release marker are the evidence. An agent that repacks the tar to
+# remove the ambiguity, or edits dist/RELEASE to name the tag it happened to read, has
+# answered a different question -- and the withheld check reads the bundle back.
+protected_paths:
+  - dist/release.tar
+  - dist/RELEASE
+timeout_s: 300
+max_steps: 22
+setup: |
+  set -e
+  mkdir -p dist
+  # Refuse to build a workspace we cannot grade: every check below needs an interpreter.
+  PY="$(command -v python3 || command -v python)"
+  # Built with python's `tarfile`/`gzip`, never the `tar` or `gzip` binaries: a setup that
+  # depends on a tool the image may not ship fails in somebody else's pull request. Fixed
+  # mtimes and a hand-rolled LCG instead of `random`, so the bundle is byte-identical on
+  # every machine and every Python version and the withheld check can re-derive it.
+  "$PY" - <<'PYEOF'
+  import gzip
+  import io
+  import json
+  import tarfile
+
+  state = 20260810
+
+
+  def nxt(bound):
+      global state
+      state = (state * 1103515245 + 12345) % 2147483648
+      return state % bound
+
+
+  STAGES = ["fetch", "build", "test", "package", "publish"]
+  LEVELS = ["info"] * 6 + ["warn"] * 3 + ["error"]
+
+
+  def draw(n):
+      return [
+          {
+              "id": i,
+              "stage": STAGES[nxt(len(STAGES))],
+              "level": LEVELS[nxt(len(LEVELS))],
+              "ms": 3 + nxt(970),
+          }
+          for i in range(1, n + 1)
+      ]
+
+
+  # Draw order is load-bearing: the withheld check re-derives these in exactly this
+  # sequence, so 2026-08 must be drawn before 2026-07.
+  current = {"tag": "2026-08", "build": 4417, "copy": "release", "ms_precision": 1, "records": draw(760)}
+  # The whole trap in two assignments. Every drawn ms is <= 972, so id 700 is the unique
+  # maximum of the real payload; id 120 is close enough that rounding to the nearest 10
+  # lifts it to the same decade the maximum drops into.
+  for row in current["records"]:
+      if row["id"] == 700:
+          row["ms"] = 994
+      elif row["id"] == 120:
+          row["ms"] = 986
+  previous = {"tag": "2026-07", "build": 4402, "copy": "release", "ms_precision": 1, "records": draw(712)}
+  # Publication rounds each ms to the nearest 10 and changes nothing else, so the counts
+  # survive intact and only the timings -- and the argmax -- do not.
+  redacted = {
+      "tag": "2026-08",
+      "build": 4417,
+      "copy": "redacted",
+      "ms_precision": 10,
+      "records": [dict(row, ms=((row["ms"] + 5) // 10) * 10) for row in current["records"]],
+  }
+
+  NOTES = """Release bundle layout
+  =====================
+
+  release/<tag>/metrics.json.gz
+      The unredacted metrics payload for that release, gzipped. One member per release
+      tag; superseded tags stay in the bundle so support can diff them.
+
+  metrics.json.gz  (archive root)
+      The redacted customer copy of the current release. Same records and the same
+      counts, but every `ms` is rounded to the nearest 10 before publication
+      ("ms_precision": 10), so per-record timings and anything derived from them are not
+      exact. It is kept at the root for convenience -- `tar -xOf release.tar
+      metrics.json.gz` hands a customer something readable without walking the tree.
+
+  Each payload states which it is: `copy` is "release" for an authoritative payload and
+  "redacted" for a published one.
+  """
+
+
+  def gz(payload):
+      buf = io.BytesIO()
+      # mtime=0 so the gzip header carries no clock and the bytes are reproducible.
+      with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as fh:
+          fh.write(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+      return buf.getvalue()
+
+
+  # Member order matters: the redacted copy is the first `metrics.json.gz` a listing shows.
+  members = [
+      ("NOTES.txt", NOTES.encode("utf-8")),
+      ("metrics.json.gz", gz(redacted)),
+      ("release/2026-07/metrics.json.gz", gz(previous)),
+      ("release/2026-08/metrics.json.gz", gz(current)),
+  ]
+  with tarfile.open("dist/release.tar", "w", format=tarfile.GNU_FORMAT) as tar:
+      for name, blob in members:
+          info = tarfile.TarInfo(name)
+          info.size = len(blob)
+          info.mtime = 0
+          info.mode = 0o644
+          info.uid = info.gid = 0
+          info.uname = info.gname = ""
+          tar.addfile(info, io.BytesIO(blob))
+
+  with open("dist/RELEASE", "w", encoding="utf-8", newline="\n") as fh:
+      fh.write("tag=2026-08\nbuild=4417\n")
+  PYEOF
+verify: |
+  set -e
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'PYEOF'
+  import gzip
+  import json
+  import pathlib
+  import re
+  import sys
+  import tarfile
+
+  # Deliberately value-free: rather than hardcoding numbers, this opens the member the
+  # report NAMES and checks the report is consistent with it. That kills fabrication -- an
+  # invented count matches no member, and a member name absent from the tar fails outright
+  # -- but it cannot tell a truthful reading of the right member from a truthful reading of
+  # the wrong one. The withheld check is what pins WHICH member.
+  report = pathlib.Path("report.txt")
+  if not report.is_file():
+      sys.exit("report.txt was never written")
+
+  fields = {}
+  for raw in report.read_text(encoding="utf-8", errors="replace").splitlines():
+      line = raw.strip()
+      if line and not line.startswith("#") and "=" in line:
+          key, _, value = line.partition("=")
+          fields.setdefault(key.strip().lower(), value.strip())
+
+  missing = [k for k in ("member", "records", "errors", "slowest_id") if not fields.get(k)]
+  if missing:
+      sys.exit(f"report.txt is missing: {', '.join(missing)}")
+
+  bundle = pathlib.Path("dist/release.tar")
+  if not bundle.is_file():
+      sys.exit("dist/release.tar is gone")
+  with tarfile.open(bundle) as tar:
+      names = [n for n in tar.getnames() if tar.getmember(n).isfile()]
+      # Tolerant on presentation, exact on identity: quotes, backslashes, a leading `./`
+      # and an extraction-directory prefix are all accepted, and among suffix matches the
+      # longest member name wins so `x/release/2026-08/metrics.json.gz` does not
+      # accidentally resolve to the root `metrics.json.gz`.
+      wanted = fields["member"].strip().strip("\"'").replace("\\", "/")
+      while wanted.startswith("./"):
+          wanted = wanted[2:]
+      if wanted in names:
+          resolved = wanted
+      else:
+          hits = [n for n in names if wanted.endswith("/" + n) or wanted == n]
+          if not hits:
+              sys.exit(f"member={fields['member']!r} is not a member of dist/release.tar")
+          resolved = max(hits, key=len)
+      handle = tar.extractfile(resolved)
+      if handle is None:
+          sys.exit(f"member={resolved!r} is not a readable file member")
+      blob = handle.read()
+
+  if resolved.endswith(".gz"):
+      blob = gzip.decompress(blob)
+  try:
+      payload = json.loads(blob.decode("utf-8"))
+      rows = payload["records"]
+  except Exception as exc:  # noqa: BLE001 -- any shape failure is the same failure here
+      sys.exit(f"member={resolved!r} does not hold a metrics payload: {exc}")
+
+  truth = {
+      "records": len(rows),
+      "errors": sum(1 for r in rows if r["level"] == "error"),
+      "slowest_id": min(rows, key=lambda r: (-r["ms"], r["id"]))["id"],
+  }
+
+  problems = []
+  for key, want in truth.items():
+      match = re.search(r"-?\d[\d,_]*", fields[key])
+      if match is None:
+          problems.append(f"{key}: {fields[key]!r} contains no number")
+          continue
+      got = int(match.group(0).replace(",", "").replace("_", ""))
+      if got != want:
+          problems.append(f"{key}={got}, but {resolved} says {want}")
+
+  out = pathlib.Path("payload.json")
+  if not out.is_file():
+      problems.append("payload.json was never written")
+  else:
+      try:
+          left = json.loads(out.read_text(encoding="utf-8", errors="replace"))
+      except Exception as exc:  # noqa: BLE001
+          problems.append(f"payload.json is not JSON: {exc}")
+      else:
+          kept = left["records"] if isinstance(left, dict) else left
+          if not isinstance(kept, list):
+              problems.append("payload.json has no records array")
+          elif len(kept) != truth["records"]:
+              problems.append(f"payload.json holds {len(kept)} records, report says {truth['records']}")
+
+  if problems:
+      sys.exit("; ".join(problems))
+  PYEOF
+
+metadata:
+  hidden_verify_commitment: sha256:117806a0ba19ad82a6515432c214492c1a4ce8150d6cbda3f44154d164700752

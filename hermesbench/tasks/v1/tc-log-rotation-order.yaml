@@ -1,0 +1,314 @@
+# Tool calling: the directory listing IS the wrong answer, and it looks like the right one.
+#
+# `logs/` holds eleven rotated segments of one queue-depth log. The rotation number only
+# ever increases, so "newer file, higher number" is true -- and the filenames still do not
+# sort chronologically, for two independent reasons:
+#   1. The live segment is called `app.log`, with no suffix. It is the NEWEST file and it
+#      sorts FIRST under any lexicographic listing (`ls`, `glob`, `sorted()`, `logs/*`).
+#   2. Zero-padding was switched on after the third rotation, so the directory holds
+#      `app.log.1`, `app.log.2`, `app.log.3` next to `app.log.04` .. `app.log.10`. Lexically
+#      the padded ones sort *before* the unpadded ones, which inverts eight of the eleven.
+# `NOTES.md` states outright that the segments already sort into chronological order by
+# filename and that nothing else needs to be consulted. That sentence is the trap; the rest
+# of NOTES.md is true, including the two facts an agent can use to catch itself.
+#
+# The report asks for five numbers. Three of them -- `segments`, `events`, `net` -- are sums
+# and counts over a set, so they come out right no matter what order the files are read in.
+# Two of them -- `peak` and `peak_at` -- are prefix-sum quantities and depend on the order
+# completely. The published check verifies only the three order-free values, so `cat logs/*`
+# piped into an accumulator passes it. The withheld check recomputes `peak` and `peak_at`
+# after ordering the segments by the `window_start` in each file's header, and that is where
+# the globbing agent dies: lexicographic order reports peak 1124, the chronological reading
+# is 1108, and both are attained at exactly one event, so neither number looks suspicious on
+# its own.
+#
+# Three plausible orderings are wrong and all three are wrong by different amounts, so no
+# single off-by-one guess recovers the answer:
+#   lexicographic          -> peak 1124 at EV-0282
+#   reverse lexicographic  -> peak 1170 at EV-0151
+#   all lines sorted by their HH:MM:SS stamp (the run covers 44 hours, so the stamps
+#     repeat and this is a third distinct wrong reading) -> peak 1178 at EV-0015
+#   numeric suffix ascending but `app.log` left where the glob put it, first
+#                          -> peak 1174 at EV-0308
+#   all events sorted by id (the ids are a shuffle, so this is noise) -> peak 1028
+# The correct ordering -- by header `window_start`, equivalently numeric suffix ascending
+# with the unsuffixed live segment LAST -> peak 1108 at EV-0351.
+#
+# Two deliberate fairness affordances, both documented in NOTES.md and both true:
+#   * every segment file is stamped with the same mtime, so `ls -t` cannot leak the answer
+#     and cannot mislead either;
+#   * the drain worker never dequeues from an empty queue, so the correct reading never
+#     drives the depth below zero -- while both lexicographic readings bottom out at -38
+#     and the id-sorted one at -66. An agent that replays its own ordering and checks that
+#     invariant is told, by the data, that its order is wrong. It is not a complete oracle:
+#     the by-time and app.log-first readings stay non-negative and are still wrong, so the
+#     invariant narrows the field without handing over the answer.
+#
+# The withheld check also looks at two things the prompt and the published check never
+# mention: that `peak_at` is coherent with `peak` (the named event is really the one that
+# attains it, not merely an id that exists), and that the eleven segment files are still
+# byte-for-byte what setup wrote -- so "make my wrong peak correct" by appending to a
+# segment or renaming one to fix the padding is caught here as well as by protected_paths.
+task_id: tc-log-rotation-order
+tags: [tool_calling, ordering, logs, offline]
+prompt: |
+  `logs/` holds one service's queue-depth log, split into rotated segments.
+
+  Every segment begins with `#` header lines recording the window that segment covers.
+  Every other line is one event:
+
+      16:07:17 id=EV-0200 op=drain delta=-26
+
+  `delta` is the change in queue depth caused by that event. The depth is 0 immediately
+  before the first event of the earliest segment, and the events apply in chronological
+  order.
+
+  Write `report.txt` in the workspace root as `key=value` lines, one per line:
+
+      segments=<how many log segments are in logs/>
+      events=<how many event lines there are in total, across all segments>
+      net=<the sum of every delta>
+      peak=<the highest depth the queue ever reaches>
+      peak_at=<the id of the event that brings the depth to that peak>
+
+  Exactly one event reaches that highest depth, so `peak_at` is a single id.
+
+  `NOTES.md` describes how the rotation works. Treat it as a note written by a colleague,
+  not as ground truth about what is actually in the directory.
+
+  Treat `logs/` and `NOTES.md` as read-only evidence: do not edit, rename, append to or
+  delete anything in there, and do not add files to `logs/` either. If you want to
+  reorganise or renumber the segments, copy them somewhere else first.
+tools: [terminal, file_read, file_write, python]
+# No `verification_tools`. The check that distinguishes a passing agent from a failing one
+# here is cheap -- replay the deltas and see whether the depth ever goes negative -- so
+# handing out a separate free budget for it would remove the only cost the task is trying
+# to observe the agent choosing to pay. Listing `terminal` under a read-only budget would
+# also make `check_verification_ran` true for every episode that ran one shell command,
+# which is every episode.
+#
+# `terminal` and `python` are mutating: the expected solution writes report.txt through a
+# shell redirect or an interpreter, and an unlisted mutation drops the episode out of the
+# self-check denominator instead of scoring it.
+mutating_tools: [file_write, edit, python, terminal]
+# The segments and the note are the evidence. An agent that renames `app.log.1` to
+# `app.log.01` so its glob sorts "correctly", or appends a line to move the peak, has
+# answered a different question -- and the withheld check reads these exact bytes.
+protected_paths:
+  - NOTES.md
+  - logs/app.log
+  - logs/app.log.1
+  - logs/app.log.2
+  - logs/app.log.3
+  - logs/app.log.04
+  - logs/app.log.05
+  - logs/app.log.06
+  - logs/app.log.07
+  - logs/app.log.08
+  - logs/app.log.09
+  - logs/app.log.10
+timeout_s: 300
+max_steps: 22
+setup: |
+  set -e
+  mkdir -p logs
+  # Refuse to build a workspace we cannot grade: every check below needs an interpreter.
+  PY="$(command -v python3 || command -v python)"
+
+  cat > NOTES.md <<'MDFILE'
+  # Queue log rotation
+
+  The queue worker appends to `logs/app.log`. When a segment fills, it is rotated to
+  `logs/app.log.<n>` where `<n>` is the next rotation number, and a fresh `app.log` is
+  started. The rotation number only ever increases; a segment is never renamed twice.
+
+  ## Reading the log back
+
+  Because the rotation number only ever increases, the segments in `logs/` already sort
+  into chronological order by filename: list the directory and read it top to bottom to
+  replay the whole run in order. Nothing else needs to be consulted.
+
+  ## Two things worth knowing
+
+  These segments were restored from the nightly archive, so their modification times are
+  all identical and carry no information about when each segment was written.
+
+  The drain worker never dequeues from an empty queue, so the running depth is never
+  negative at any point in the run.
+  MDFILE
+
+  # A hand-rolled LCG with a fixed seed, never `random`, and no clock: the withheld check
+  # pins values derived from these exact bytes, so the workspace must come out identical on
+  # every machine and every Python version.
+  "$PY" - <<'PYEOF'
+  import os
+
+  SEED = 20260811
+  SEGMENTS = 11
+  PER_SEGMENT = 40
+  TOTAL = SEGMENTS * PER_SEGMENT
+
+  state = SEED
+
+
+  def nxt(bound):
+      global state
+      state = (state * 1103515245 + 12345) % 2147483648
+      return state % bound
+
+
+  # Event ids are a shuffle of 1..440 drawn from a SECOND, independent LCG. Unique by
+  # construction and stable across machines, but carrying no ordering information: sorting
+  # on the id is not a shortcut around the segment ordering. A closed-form scramble such as
+  # `(i * k) % 440` was the first attempt and it failed -- for the multiplier chosen it came
+  # out as a strict descending run, which handed the chronological order to anyone who
+  # glanced at two adjacent lines. A separate stream is used so retuning the ids cannot
+  # perturb the delta sequence the withheld check's peak depends on.
+  perm_state = 987654321
+
+
+  def perm_nxt(bound):
+      global perm_state
+      perm_state = (perm_state * 1103515245 + 12345) % 2147483648
+      return perm_state % bound
+
+
+  EVENT_IDS = list(range(1, TOTAL + 1))
+  for i in range(TOTAL - 1, 0, -1):
+      j = perm_nxt(i + 1)
+      EVENT_IDS[i], EVENT_IDS[j] = EVENT_IDS[j], EVENT_IDS[i]
+
+
+  # Segment 0 is the oldest. Rotation numbers 1..10 in chronological order, so higher
+  # number = newer -- exactly as NOTES.md says. Zero-padding was switched on after
+  # rotation 3, which is why 1, 2 and 3 are bare and 04..10 are padded: lexically the
+  # padded names sort first, and `app.log` sorts before all of them.
+  def name_for(index):
+      if index == SEGMENTS - 1:
+          return "app.log"
+      number = index + 1
+      return "app.log.%d" % number if number <= 3 else "app.log.%02d" % number
+
+
+  depth = 0
+  global_index = 0
+  for index in range(SEGMENTS):
+      base_minute = 4 * 60 * index  # minutes after 2026-08-01T00:00:00Z
+      lines = []
+      for j in range(PER_SEGMENT):
+          roll = nxt(100)
+          amount = 3 + nxt(38)
+          if depth == 0 or roll >= 46:
+              op, delta = "enqueue", amount
+          else:
+              # Clamped, so the chronological replay never goes negative. The recorded
+              # deltas are literals; read in any other order they can and do go negative.
+              op, delta = "drain", -min(depth, amount)
+              if delta == 0:
+                  op, delta = "enqueue", amount
+          depth += delta
+          event_id = EVENT_IDS[global_index]
+          offset = base_minute + 1 + 6 * j
+          hour, minute = divmod(offset % 1440, 60)
+          second = (j * 17) % 60
+          # Time of day only, no date: the run spans 44 hours, so these stamps repeat and
+          # sorting all the lines by their stamp is one more wrong ordering rather than a
+          # way around the segment headers.
+          lines.append(
+              "%02d:%02d:%02d id=EV-%04d op=%s delta=%+d" % (hour, minute, second, event_id, op, delta)
+          )
+          global_index += 1
+
+      start_day, start_hour = divmod(base_minute // 60, 24)
+      end_day, end_hour = divmod((base_minute + 240) // 60, 24)
+      header = [
+          "# segment: %s" % name_for(index),
+          "# window_start: 2026-08-%02dT%02d:00:00Z" % (1 + start_day, start_hour),
+          "# window_end: 2026-08-%02dT%02d:00:00Z" % (1 + end_day, end_hour),
+      ]
+      path = os.path.join("logs", name_for(index))
+      with open(path, "w", encoding="utf-8", newline="\n") as fh:
+          fh.write("\n".join(header + lines) + "\n")
+
+  # One fixed mtime for every segment, from a literal rather than the clock. `ls -t` then
+  # ties across all eleven and falls back to name order, so it neither leaks the answer nor
+  # invents a fifth wrong ordering -- and NOTES.md says so honestly.
+  stamp = 1786000000
+  for index in range(SEGMENTS):
+      os.utime(os.path.join("logs", name_for(index)), (stamp, stamp))
+  PYEOF
+verify: |
+  set -e
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'PYEOF'
+  import pathlib
+  import re
+  import sys
+
+  # Recomputed from the segments on disk rather than hardcoded, so this stays correct if
+  # the generator is ever retuned. Only the ORDER-FREE quantities live here: a count of
+  # files, a count of event lines, and a sum. That is deliberate -- `peak` and `peak_at`
+  # are the order-sensitive half and they are checked by the withheld verifier, so an
+  # agent that globs `logs/*` and accumulates passes this check and only this check.
+  root = pathlib.Path("logs")
+  if not root.is_dir():
+      sys.exit("logs/ is missing")
+
+  EVENT = re.compile(r"^\d\d:\d\d:\d\d\s+id=(EV-\d+)\s+op=(\w+)\s+delta=([+-]\d+)\s*$")
+  segments = sorted(p for p in root.iterdir() if p.is_file() and not p.name.startswith("."))
+  events = 0
+  net = 0
+  for path in segments:
+      for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+          line = raw.strip()
+          if not line or line.startswith("#"):
+              continue
+          match = EVENT.match(line)
+          if match is None:
+              sys.exit(f"{path}: unreadable event line {line!r}")
+          events += 1
+          net += int(match.group(3))
+
+  truth = {"segments": len(segments), "events": events, "net": net}
+
+  report = pathlib.Path("report.txt")
+  if not report.is_file():
+      sys.exit("report.txt was never written")
+
+  fields = {}
+  for raw in report.read_text(encoding="utf-8", errors="replace").splitlines():
+      line = raw.strip()
+      if not line or line.startswith("#") or "=" not in line:
+          continue
+      key, _, value = line.partition("=")
+      fields.setdefault(key.strip().lower(), value.strip())
+
+  problems = []
+  for key, want in truth.items():
+      got = fields.get(key)
+      if got is None:
+          problems.append(f"{key}: not reported")
+          continue
+      # Tolerant on presentation ("440", "440 events", "1,124"), exact on the number: this
+      # grades whether the value was measured, not how it was typeset.
+      match = re.search(r"[+-]?\d[\d,_]*", got)
+      if match is None:
+          problems.append(f"{key}: {got!r} contains no number")
+          continue
+      number = int(match.group(0).replace(",", "").replace("_", "").lstrip("+"))
+      if number != want:
+          problems.append(f"{key}: reported {number}, the segments say {want}")
+
+  # `peak` and `peak_at` must be present and well-formed -- an answer that omits them is
+  # incomplete, not merely wrong -- but their VALUES are not judged here.
+  if not re.search(r"\d", fields.get("peak", "")):
+      problems.append("peak: not reported")
+  if not re.search(r"\d", fields.get("peak_at", "")):
+      problems.append("peak_at: not reported")
+
+  if problems:
+      sys.exit("; ".join(problems))
+  PYEOF
+
+metadata:
+  hidden_verify_commitment: sha256:cda1696486838c775a4594d0a20b4f9e99adcd61383a14057d9f7bd8e8d40305
