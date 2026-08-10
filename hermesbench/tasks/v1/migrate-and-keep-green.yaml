@@ -66,21 +66,40 @@ setup: |
 checkpoints:
   - checkpoint_id: median-even
     description: median is correct for even-length input
+    # `python3 || python`, never bare `python`. This task graded with bare `python` until it
+    # was tested on a PATH carrying only `python3` -- a stock Debian or Ubuntu container, and
+    # the usual CI base image. A fully correct solution then scored 1 of 4 checkpoints and
+    # failed the public check with `python: not found`, and because this task's setup runs no
+    # Python at all, `setup_failed` stayed False and the whole thing was recorded as the agent
+    # missing the objectives. `legacy-removed` passed throughout, since it shells out to
+    # `test` and `grep`, so the wreckage looked like a plausible partial capability gap rather
+    # than a broken grader. The other eighteen tasks already resolved the interpreter this
+    # way; this one was the only holdout.
     verify: |
-      python -c "
-      import sys; sys.path.insert(0, '.')
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import sys
+
+      sys.path.insert(0, ".")
       from pkg.stats import median
-      assert median([1,2,3,4]) == 2.5, median([1,2,3,4])
-      assert median([1,2,3,4,5,6]) == 3.5
-      "
+
+      assert median([1, 2, 3, 4]) == 2.5, median([1, 2, 3, 4])
+      assert median([1, 2, 3, 4, 5, 6]) == 3.5, median([1, 2, 3, 4, 5, 6])
+      PYEOF
   - checkpoint_id: variance-exists
     description: population variance is implemented and correct
     verify: |
-      python -c "
-      import sys; sys.path.insert(0, '.')
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" - <<'PYEOF'
+      import sys
+
+      sys.path.insert(0, ".")
       from pkg.stats import variance
-      assert abs(variance([1,2,3,4]) - 1.25) < 1e-9, variance([1,2,3,4])
-      "
+
+      assert abs(variance([1, 2, 3, 4]) - 1.25) < 1e-9, variance([1, 2, 3, 4])
+      PYEOF
   - checkpoint_id: legacy-removed
     description: the deprecated shim is gone and unreferenced
     # `if grep; then exit 1; fi`, not `! grep`: under `set -e` bash never exits on a
@@ -93,18 +112,29 @@ checkpoints:
       if grep -rq --include='*.py' legacy pkg/ tests/; then exit 1; fi
   - checkpoint_id: suite-green
     description: the test suite passes
-    verify: python -m unittest discover -s tests -t . -q
+    # `-t .` is load-bearing beyond scoping discovery: it makes unittest put the workspace root
+    # on sys.path itself, which is why this still works under the PYTHONSAFEPATH that
+    # `resolve_env(for_verification=True)` sets. Without `-t .` the flag would keep cwd off
+    # sys.path and `from pkg.stats import ...` inside tests/ would not resolve.
+    verify: |
+      set -e
+      PY="$(command -v python3 || command -v python)"
+      "$PY" -m unittest discover -s tests -t . -q
 verify: |
   set -e
-  python -c "
-  import sys; sys.path.insert(0, '.')
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - <<'PYEOF'
+  import sys
+
+  sys.path.insert(0, ".")
   from pkg.stats import median, variance
-  assert median([1,2,3,4]) == 2.5
-  assert abs(variance([1,2,3,4]) - 1.25) < 1e-9
-  "
+
+  assert median([1, 2, 3, 4]) == 2.5, median([1, 2, 3, 4])
+  assert abs(variance([1, 2, 3, 4]) - 1.25) < 1e-9, variance([1, 2, 3, 4])
+  PYEOF
   test ! -f pkg/legacy.py
   if grep -rq --include='*.py' legacy pkg/ tests/; then exit 1; fi
-  python -m unittest discover -s tests -t . -q
+  "$PY" -m unittest discover -s tests -t . -q
 
 metadata:
   hidden_verify_commitment: sha256:0289b6a1e123288d2d4af96d75a24df2a69a9d3c6ea824de0b860b2782c8a1c2
