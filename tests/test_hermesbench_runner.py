@@ -678,3 +678,65 @@ def test_flakiness_is_reported_per_task(tmp_path):
     assert by_id["doomed"].passes == 0
     # Neither is flaky: both agreed with themselves. Flakiness is disagreement, not failure.
     assert repeated.flaky_tasks == ()
+
+
+# --- sharding a baseline across processes -----------------------------------------------------
+
+
+def test_task_ids_selects_a_shard(capsys):
+    """A repeated baseline is the only thing that measures the run-to-run spread, and it is
+    the most expensive run here -- 19 tasks x 10 repeats was ~9 hours sequentially. Episodes
+    are already independent, so the only thing blocking parallel shards was naming a task."""
+    from hermesbench.runner import main
+
+    assert (
+        main(
+            [
+                "--suite",
+                "all",
+                "--workspace-root",
+                "/tmp/shard-ls",
+                "--list",
+                "--task-ids",
+                "fix-failing-test,migrate-and-keep-green",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "fix-failing-test" in out
+    assert "migrate-and-keep-green" in out
+    assert "lh-i18n-catalog-parity" not in out
+
+
+def test_an_unknown_task_id_is_refused_rather_than_skipped(capsys):
+    """A typo would otherwise shrink one shard silently, and the merged baseline would be
+    short some attempts with nothing to show it."""
+    from hermesbench.runner import main
+
+    assert (
+        main(
+            [
+                "--suite",
+                "all",
+                "--workspace-root",
+                "/tmp/shard-ls",
+                "--list",
+                "--task-ids",
+                "fix-failing-test,fix-failing-tests",
+            ]
+        )
+        == 2
+    )
+    assert "no such task(s)" in capsys.readouterr().err
+
+
+def test_shards_partition_the_suite_with_no_task_lost_or_duplicated():
+    """The property that makes merging shard results a baseline rather than a sample."""
+    from hermesbench.tasks import load_suite
+
+    ids = [t.task_id for t in load_suite("all")]
+    shards = [ids[i::4] for i in range(4)]
+    flat = [i for s in shards for i in s]
+    assert sorted(flat) == sorted(ids)
+    assert len(flat) == len(set(flat)) == 19

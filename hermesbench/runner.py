@@ -571,6 +571,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dialect", default="hermes-3", choices=sorted(DIALECTS), help="Hermes wire dialect")
     parser.add_argument("--repeats", type=int, default=1, help="run each task N times and report flakiness")
     parser.add_argument(
+        "--task-ids",
+        default="",
+        help="comma-separated task ids, so one baseline can be sharded across processes",
+    )
+    parser.add_argument(
         "--allow-unsandboxed",
         action="store_true",
         help=(
@@ -582,6 +587,37 @@ def main(argv: list[str] | None = None) -> int:
 
     tags = tuple(t.strip() for t in args.tags.split(",") if t.strip())
     tasks = load_suite(args.suite, tags=tags)
+
+    # Shard a baseline across processes. A repeated baseline is the only thing that measures
+    # the run-to-run spread `hermes.acceptance` refuses to judge a margin without, and it is
+    # the most expensive thing anyone runs here: 19 tasks x 10 repeats, sequentially, was
+    # measured at roughly three minutes per episode against a served 27B on one card, so about
+    # nine hours. Episodes are already independent by construction -- every attempt gets its
+    # own workspace -- so the only thing preventing them running side by side was that a task
+    # could not be named on the command line. `--tags` cannot substitute: tags are shared
+    # across tasks, so no tag selection partitions the suite.
+    #
+    # Running shards concurrently changes wall time and nothing else that is scored. Tokens
+    # and tool calls are per-episode counts, unaffected by what else the server is doing --
+    # which is the same reason `dominates()` refuses to gate on latency at all.
+    if args.task_ids:
+        wanted = tuple(t.strip() for t in args.task_ids.split(",") if t.strip())
+        known = {t.task_id for t in tasks}
+        missing = [w for w in wanted if w not in known]
+        if missing:
+            # Refused rather than skipped. A typo would otherwise shrink one shard silently,
+            # and the merged baseline would be short some attempts with nothing to show it --
+            # which is precisely the kind of missing evidence the acceptance gates exist to
+            # refuse, arriving in a form they cannot see.
+            print(
+                f"hermesbench: no such task(s) in suite {args.suite!r}: {', '.join(missing)}.\n"
+                "A misspelled id would otherwise drop that task from this shard, and the merged "
+                "baseline would be quietly missing attempts.",
+                file=sys.stderr,
+            )
+            return 2
+        order = {task_id: i for i, task_id in enumerate(wanted)}
+        tasks = sorted((t for t in tasks if t.task_id in order), key=lambda t: order[t.task_id])
 
     # Checked before anything is paid for. `build_manifest` refuses to fingerprint a task
     # with a withheld check and no salt, and discovering that after a suite has run means
