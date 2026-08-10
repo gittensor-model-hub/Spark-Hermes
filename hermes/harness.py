@@ -32,6 +32,7 @@ whole question a reader has.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -79,6 +80,51 @@ def salted_digest(text: str, salt: str) -> str:
             "its content, which is the thing being withheld"
         )
     return digest_text(f"{salt}\x00{text}")
+
+
+def derive_task_salt(master: str, task_id: str) -> str:
+    """Per-task salt, derived from one master secret.
+
+    ## Why a single shared salt cannot be revealed
+
+    The point of publishing a commitment is that it can be *opened* later: once a task is
+    spent, releasing its withheld check and its salt lets anyone confirm the check really
+    existed, unchanged, before anybody submitted. That is what makes a competition auditable
+    after the fact.
+
+    Under one salt shared across the corpus, that opening is unsafe in a way that is easy to
+    miss. Revealing the salt for a spent task reveals *the* salt -- so every commitment still
+    sealed becomes brute-forceable, for exactly the reason `salted_digest` refuses a bare
+    digest: a withheld check is a short shell command drawn from a small space, usually a near
+    neighbour of the `verify` published beside it. The commitment stops being a commitment and
+    turns back into a check-your-guess oracle, which is the failure `redact_for_release`
+    already describes and which the shared salt reintroduces at the moment of the first reveal.
+
+    So each task gets its own salt, and it is *derived* rather than stored. HMAC is a PRF
+    keyed on the master, so `salt_i` tells an attacker nothing about `salt_j`: individual
+    reveals are safe, and unspent commitments stay sealed no matter how many spent ones have
+    been opened.
+
+    ## Derived, not generated
+
+    The alternative -- an independent random salt per task, filed next to each check -- has
+    the same security property and much worse operational risk: N secrets to store, back up
+    and never lose, where losing one silently makes that task unopenable forever. Derivation
+    keeps exactly one secret to protect, which is also the only thing anybody has to back up.
+
+    The `task_id` is bound in with a length prefix rather than concatenated, so no two
+    distinct ids can produce the same input. Plain concatenation would let a crafted pair of
+    ids collide and share a salt, which is the one property this function exists to prevent.
+    """
+    if len(master) < 16:
+        raise HarnessError(
+            "a withheld-check master salt needs at least 16 characters; every per-task salt is "
+            "derived from it, so its strength is the strength of every commitment at once"
+        )
+    if not task_id:
+        raise HarnessError("cannot derive a per-task salt without a task id")
+    message = f"{len(task_id)}:{task_id}".encode()
+    return hmac.new(master.encode(), message, hashlib.sha256).hexdigest()
 
 
 @dataclass(frozen=True)

@@ -64,4 +64,4 @@ verify: |
   EOF
 
 metadata:
-  hidden_verify_commitment: sha256:4bf1997aa9d8f60b777ea3fe83fb8d328648330340450c49fc60d0098ed18880
+  hidden_verify_commitment: sha256:5761ac5ad503bcde6df964d186cbc92049a81dbd2db23fa6b302f9c7f7af6ebb

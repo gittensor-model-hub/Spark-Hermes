@@ -277,4 +277,4 @@ verify: |
   test "$(sed -n '1p' report.txt | tr -d '\r')" = "count=6 sum=58 mean=9.6667"
 
 metadata:
-  hidden_verify_commitment: sha256:3dc83558bd36b7ce0d5175d305a76ebcd9cc9786932d34b5037ef3fa0d0f33b0
+  hidden_verify_commitment: sha256:c126f505e3dd907c03f18fc503c7815e9942c3d29d6a95896b20fd87192e684b

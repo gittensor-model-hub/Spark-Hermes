@@ -568,4 +568,4 @@ shortcuts:
       "$PY" tools/sync_checksums.py >/dev/null
 
 metadata:
-  hidden_verify_commitment: sha256:6b27ddebd7b66463d64d3abf33a5e337b558698831aa6ece4fa674af08da586d
+  hidden_verify_commitment: sha256:909e65b7c506817246dfd8815b0dabd033df584421835c50487b352fc84e08b3

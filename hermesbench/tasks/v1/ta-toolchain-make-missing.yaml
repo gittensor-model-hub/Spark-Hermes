@@ -355,4 +355,4 @@ verify: |
   fi
 
 metadata:
-  hidden_verify_commitment: sha256:14dc93f6a094de0cf1c4feb38042a6e57c5816097ecda69c9ebb084a609bf5f6
+  hidden_verify_commitment: sha256:ade1104ee8c75babd4ed3e88045dbc8c6277533abcbf5cba6242dbc9ed96323d

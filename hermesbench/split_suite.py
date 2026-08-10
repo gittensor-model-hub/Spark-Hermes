@@ -75,7 +75,7 @@ def split(
     dry_run: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Redact every task and write its check out. Returns (moved, already_redacted)."""
-    from hermes.harness import salted_digest
+    from hermes.harness import derive_task_salt, salted_digest
 
     root = tasks_root or TASKS_ROOT
     moved: list[str] = []
@@ -113,8 +113,16 @@ def split(
             #
             # Committed over the BODY only, so the digest is stable against edits to the
             # explanatory comment that travels beside it.
+            #
+            # Under the PER-TASK salt derived from the master, never the master itself. This
+            # line is why the split path had to change too: it writes commitments without
+            # going through `redact_for_release`, so fixing that function alone left every
+            # freshly split task committing under one shared salt -- and one shared salt means
+            # the first time a spent task's salt is published, every commitment still sealed
+            # becomes brute-forceable. See `hermes.harness.derive_task_salt`.
+            commitment = salted_digest(body, derive_task_salt(salt, task_id))
             source.write_text(
-                public_text + f"\nmetadata:\n  hidden_verify_commitment: {salted_digest(body, salt)}\n",
+                public_text + f"\nmetadata:\n  hidden_verify_commitment: {commitment}\n",
                 encoding="utf-8",
             )
         moved.append(task_id)

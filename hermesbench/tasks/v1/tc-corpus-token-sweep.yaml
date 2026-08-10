@@ -113,4 +113,4 @@ checkpoints:
       test "$got" = "$want"
 
 metadata:
-  hidden_verify_commitment: sha256:76f30ecc9f84a79316f4957de2cda46eb9a95b179553f4319bf9ef989d03660c
+  hidden_verify_commitment: sha256:6ff37269714c1df22037a4daaaef719b38da0457de569d76c2562100cab8d0ec

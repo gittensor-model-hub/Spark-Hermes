@@ -224,6 +224,12 @@ def redact_for_release(record: dict, *, salt: str = "") -> dict:
     so a bare digest is a verification oracle rather than a commitment: it turns "guess the
     withheld test" from unfalsifiable into a check-your-guess loop. Salted, the digest
     proves two runs used the same check; only revealing the salt later proves *which*.
+
+    **`salt` is the master secret, not the salt actually used.** The commitment is taken
+    under `derive_task_salt(salt, task_id)`, so each task commits under its own salt. That is
+    what makes the reveal step safe: releasing a spent task's salt opens that task and leaves
+    every still-sealed commitment sealed. Under one shared salt the first reveal would return
+    every remaining commitment to the brute-forceable state this docstring describes.
     """
     public = {k: v for k, v in record.items() if k != "hidden_verify"}
     hidden = record.get("hidden_verify") or ""
@@ -231,9 +237,16 @@ def redact_for_release(record: dict, *, salt: str = "") -> dict:
     metadata = dict(metadata) if isinstance(metadata, dict) else {}
     metadata["has_hidden_tests"] = bool(hidden)
     if hidden and salt:
-        from hermes.harness import salted_digest
+        from hermes.harness import derive_task_salt, salted_digest
 
-        metadata["hidden_verify_commitment"] = salted_digest(hidden, salt)
+        task_id = str(record.get("task_id") or "")
+        if not task_id:
+            raise ValueError(
+                "cannot publish a commitment for a task with no task_id: the per-task salt is "
+                "derived from it, and falling back to the master salt would make every task "
+                "commit under the same one"
+            )
+        metadata["hidden_verify_commitment"] = salted_digest(hidden, derive_task_salt(salt, task_id))
     public["metadata"] = metadata
     return public
 

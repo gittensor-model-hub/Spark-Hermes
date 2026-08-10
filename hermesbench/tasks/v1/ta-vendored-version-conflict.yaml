@@ -396,4 +396,4 @@ verify: |
   )
 
 metadata:
-  hidden_verify_commitment: sha256:c869c3a53dcb74d8a784a9d36af8941723fb0605affe87745fa2b38ae2e25b4a
+  hidden_verify_commitment: sha256:6303cf1fca7b1840d639a634067d2220b27eed62e21051a0e19e141a2336523b

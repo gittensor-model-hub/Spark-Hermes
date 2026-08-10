@@ -412,4 +412,4 @@ shortcuts:
       "$PY" tools/gen_config.py >/dev/null
 
 metadata:
-  hidden_verify_commitment: sha256:a859c6e53f5f1f88247921e59b593828e07f29f194af2e19e2563e8e245b7a58
+  hidden_verify_commitment: sha256:1d0b83968c38fd3a99791186d90940f32c9416567e020fbd3608e48b8e411ec6

@@ -200,4 +200,4 @@ shortcuts:
       PYEOF
 
 metadata:
-  hidden_verify_commitment: sha256:0289b6a1e123288d2d4af96d75a24df2a69a9d3c6ea824de0b860b2782c8a1c2
+  hidden_verify_commitment: sha256:80d055160d06a339729249e41f3cc7bd527dbea2ee960229c8503976ab9eaf03

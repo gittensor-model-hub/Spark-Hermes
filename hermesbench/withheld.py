@@ -105,9 +105,11 @@ def overlay(tasks: Iterable[Task], *, root: Path | None = None, salt: str = "") 
                     "withheld check cannot be verified against it. Attaching it unchecked would let "
                     "the private tree drift from what was published."
                 )
-            from hermes.harness import salted_digest
+            from hermes.harness import derive_task_salt, salted_digest
 
-            if salted_digest(body, salt) != commitment:
+            # The per-task salt derived from the master, never the master itself. Opening one
+            # spent task must not unseal every task still sealed -- see `derive_task_salt`.
+            if salted_digest(body, derive_task_salt(salt, task.task_id)) != commitment:
                 raise WithheldError(
                     f"{task.task_id}: the withheld check at {path} does not match the commitment "
                     "published with the task. Either the private tree changed or the task did; "

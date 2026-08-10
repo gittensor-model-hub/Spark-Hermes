@@ -31,4 +31,4 @@ verify: |
   test -f report.txt && test "$(tr -d '[:space:]' < report.txt)" = "6"
 
 metadata:
-  hidden_verify_commitment: sha256:4a5af016d92d8ff5ca3d58082c1a3af0ca5b851aac86d86a08773a55037755e5
+  hidden_verify_commitment: sha256:aae80f73d7755e556e2b4bee3f9badaee0e83eb1c5e0a3ada146c8ef48d66919

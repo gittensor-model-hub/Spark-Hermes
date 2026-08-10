@@ -383,4 +383,4 @@ verify: |
   PYEOF
 
 metadata:
-  hidden_verify_commitment: sha256:941574bcebba6f41b6d50922590a928913e5252fd43ea4a600114882726fffe0
+  hidden_verify_commitment: sha256:ecd23e35558c0260b8f35eec6a694e81c274c114f855b85e31c82557df19bb52

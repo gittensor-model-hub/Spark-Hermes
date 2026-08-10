@@ -229,4 +229,4 @@ checkpoints:
       PYEOF
 
 metadata:
-  hidden_verify_commitment: sha256:022fb45b4c57d33961c381ed3d45007a04cea2622ae167b397c37003958a25b1
+  hidden_verify_commitment: sha256:6c24491a55ce4bb8daa494cd6adc1ac072f2166d4c7ab8d7182991119f65aa55

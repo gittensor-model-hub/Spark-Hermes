@@ -153,16 +153,26 @@ def test_a_missing_private_directory_is_refused_rather_than_ignored(tmp_path):
         overlay(load_suite("v0", root=root), root=tmp_path / "nope", salt=SALT)
 
 
-def test_the_commitment_is_salted(tmp_path):
+def test_the_commitment_is_salted_under_a_per_task_salt(tmp_path):
     """A bare digest of a short shell command is a check-your-guess oracle. Two salts over
-    the same check must not collide."""
+    the same check must not collide.
+
+    The salt is also per-task, derived from the master rather than being it. `split` writes
+    commitments on its own path instead of going through `redact_for_release`, so this pins
+    that path to the derivation too: committing under the bare master would mean publishing
+    one spent task's salt unseals every task still sealed."""
+    from hermes.harness import derive_task_salt
+
     body = "test -f done.txt\n"
     a = salted_digest(body, SALT)
     b = salted_digest(body, "a-completely-different-salt-value")
     assert a != b
+
     root = _suite(tmp_path)
     split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
-    assert yaml.safe_load((root / "v0" / "t1.yaml").read_text())["metadata"]["hidden_verify_commitment"] == a
+    published = yaml.safe_load((root / "v0" / "t1.yaml").read_text())["metadata"]["hidden_verify_commitment"]
+    assert published == salted_digest(body, derive_task_salt(SALT, "t1"))
+    assert published != a, "committed under the bare master, so every task would share one salt"
 
 
 # --- redaction must not gut the task ------------------------------------------------------
