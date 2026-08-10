@@ -75,6 +75,20 @@ class Usage:
     cached_input_tokens: int = 0
     cache_write_tokens: int = 0
     output_tokens: int = 0
+    # Did the provider say anything about caching at all?
+    #
+    # Measured on the rollout host: vLLM served the pinned model with `--enable-prefix-caching`
+    # and its own gauge reported a 57.9% prefix cache hit rate, while every response carried
+    # `prompt_tokens_details: None`. So `cached_tokens` parsed to 0, `cache_hit_rate` came out
+    # 0.0%, and the episode records read as though caching had been measured and found useless.
+    #
+    # The cost arithmetic was already right and stays unchanged -- an absent discount is priced
+    # at the full input rate, which is the conservative direction and deliberate. What was wrong
+    # was the reported *measurement*: "the provider reported no cache hits" and "the provider
+    # reported nothing" are different findings, and only the first is evidence about caching.
+    # Since input is ~95% of the token bill, someone reading 0.0% could reasonably conclude
+    # prefix caching does not help here, which is the opposite of what the server observed.
+    cache_reported: bool = True
 
     def __post_init__(self) -> None:
         for name in ("input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens"):
@@ -98,8 +112,14 @@ class Usage:
         return self.total_input + self.output_tokens
 
     @property
-    def cache_hit_rate(self) -> float:
-        """Share of input that was served from cache. 0.0 when there was no input."""
+    def cache_hit_rate(self) -> float | None:
+        """Share of input served from cache. `None` when the provider reported no cache fields.
+
+        `None` rather than 0.0, because a rate of zero is a claim about caching and this is the
+        absence of one. See `cache_reported`.
+        """
+        if not self.cache_reported:
+            return None
         return self.cached_input_tokens / self.total_input if self.total_input else 0.0
 
     def __add__(self, other: Usage) -> Usage:
@@ -108,6 +128,10 @@ class Usage:
             cached_input_tokens=self.cached_input_tokens + other.cached_input_tokens,
             cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
+            # One silent turn taints the sum. A run is only a cache measurement if every turn
+            # in it was one; summing an unreported turn into a reported total would produce a
+            # rate over a denominator that includes prompts nobody measured.
+            cache_reported=self.cache_reported and other.cache_reported,
         )
 
     def to_record(self) -> dict[str, Any]:
@@ -117,7 +141,11 @@ class Usage:
             "cache_write_tokens": self.cache_write_tokens,
             "output_tokens": self.output_tokens,
             "total": self.total,
-            "cache_hit_rate": round(self.cache_hit_rate, 4),
+            # None when the provider said nothing about caching, so a reader cannot mistake
+            # silence for a measured zero. `cache_reported` travels beside it because a bare
+            # null in a metrics record is ambiguous on its own.
+            "cache_hit_rate": None if self.cache_hit_rate is None else round(self.cache_hit_rate, 4),
+            "cache_reported": self.cache_reported,
         }
 
 
@@ -136,7 +164,9 @@ def usage_from_provider(raw: dict[str, Any], *, shape: str) -> Usage:
     if raw is not None and not isinstance(raw, dict):
         raise CostError(f"usage object must be a mapping, got {type(raw).__name__}")
     if not raw:
-        return Usage()
+        # An absent usage object is the strongest form of "the provider said nothing", so it must
+        # not report a 0.0% cache rate either.
+        return Usage(cache_reported=False)
     if not raw.keys() & SHAPE_KEYS[shape]:
         # Without this, a usage object read under the wrong shape parses to all zeros and a
         # real model costs 0.0 -- which then wins `select_winner`'s cost tie-break against
@@ -158,7 +188,12 @@ def usage_from_provider(raw: dict[str, Any], *, shape: str) -> Usage:
 
     # OpenAI-compatible: `prompt_tokens` is the whole prompt, cached tokens included.
     prompt = int(raw.get("prompt_tokens", 0))
-    details = raw.get("prompt_tokens_details") or {}
+    raw_details = raw.get("prompt_tokens_details")
+    details = raw_details or {}
+    # A provider that omits the block entirely has told us nothing about caching. One that sends
+    # `{"cached_tokens": 0}` has told us there were no hits. Collapsing them is how a 57.9%
+    # server-side hit rate gets recorded as a measured 0.0%.
+    reported = isinstance(raw_details, dict) and "cached_tokens" in raw_details
     cached = int(details.get("cached_tokens", 0) or 0)
     # Some OpenAI-compatible gateways report cache writes here too. Like cached reads they
     # are part of the prompt, so they are subtracted rather than added; absent, this is a
@@ -174,6 +209,7 @@ def usage_from_provider(raw: dict[str, Any], *, shape: str) -> Usage:
         cached_input_tokens=cached,
         cache_write_tokens=written,
         output_tokens=int(raw.get("completion_tokens", 0)),
+        cache_reported=reported,
     )
 
 

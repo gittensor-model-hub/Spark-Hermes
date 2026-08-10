@@ -331,3 +331,67 @@ def test_repricing_a_model_in_place_is_refused():
     book = _book()
     with pytest.raises(CostError, match="two rate cards sharing one revision"):
         book.add(Price(model="cheap", input=0.01, output=0.01))
+
+
+# --- a provider that never mentioned caching is not a provider reporting no hits ---------------
+#
+# Measured on the rollout host: vLLM served the pinned model with --enable-prefix-caching and its
+# own gauge reported a 57.9% prefix cache hit rate, while every response carried
+# `prompt_tokens_details: None`. So `cached_tokens` parsed to 0 and every episode recorded
+# `cache_hit_rate: 0.0` -- which reads as "caching was measured and did nothing". Input is ~95%
+# of the token bill, so that is the most expensive possible thing to be wrong about.
+
+
+def test_a_provider_that_omits_the_details_block_reports_no_rate_at_all():
+    """None, not 0.0. A rate of zero is a claim about caching; this is the absence of one."""
+    usage = usage_from_provider({"prompt_tokens": 1521, "completion_tokens": 8}, shape=OPENAI)
+    assert usage.cache_reported is False
+    assert usage.cache_hit_rate is None
+    assert usage.to_record()["cache_hit_rate"] is None
+    assert usage.to_record()["cache_reported"] is False
+
+
+def test_an_explicit_zero_is_a_measurement_and_is_kept_as_one():
+    """The other side of the distinction. This provider did the work and found no hits."""
+    usage = usage_from_provider(
+        {"prompt_tokens": 100, "completion_tokens": 8, "prompt_tokens_details": {"cached_tokens": 0}},
+        shape=OPENAI,
+    )
+    assert usage.cache_reported is True
+    assert usage.cache_hit_rate == 0.0
+
+
+def test_the_cost_arithmetic_is_unchanged_by_an_unreported_cache():
+    """Deliberately unchanged: an absent discount is priced at the full input rate. Defaulting to
+    free would credit a discount nobody gave, which is the failure `Price.cached_input` exists to
+    avoid. Only the reported measurement was wrong, never the bill."""
+    usage = usage_from_provider({"prompt_tokens": 1521, "completion_tokens": 8}, shape=OPENAI)
+    assert usage.input_tokens == 1521
+    assert usage.cached_input_tokens == 0
+    assert usage.total_input == 1521
+
+
+def test_one_silent_turn_taints_the_sum():
+    """A run is a cache measurement only if every turn in it was one. Summing an unreported turn
+    into a reported total gives a rate over a denominator including prompts nobody measured."""
+    reported = usage_from_provider(
+        {"prompt_tokens": 100, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 50}},
+        shape=OPENAI,
+    )
+    silent = usage_from_provider({"prompt_tokens": 100, "completion_tokens": 1}, shape=OPENAI)
+    assert reported.cache_hit_rate == 0.5
+    assert (reported + silent).cache_reported is False
+    assert (reported + silent).cache_hit_rate is None
+    assert (reported + reported).cache_hit_rate == 0.5
+
+
+def test_an_absent_usage_object_is_the_strongest_form_of_saying_nothing():
+    assert usage_from_provider({}, shape=OPENAI).cache_hit_rate is None
+
+
+def test_the_anthropic_shape_always_reports_because_its_fields_are_not_optional():
+    """`cache_read_input_tokens` is part of the shape rather than an add-on, so a zero there is a
+    measurement and must not be downgraded to silence."""
+    usage = usage_from_provider({"input_tokens": 100, "output_tokens": 5}, shape=ANTHROPIC)
+    assert usage.cache_reported is True
+    assert usage.cache_hit_rate == 0.0
