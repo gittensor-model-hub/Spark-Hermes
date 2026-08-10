@@ -12,9 +12,30 @@
 #     invalidated by every subsequent catalog edit. It is the archetypal drift objective:
 #     easy to tick off early, silently false by the end.
 #
-# There is no ordering that avoids revisiting earlier work; the only way through is to
-# re-check. An agent that treats the list as a queue will finish with two or three
-# objectives it had already satisfied showing red.
+# 105 of the 120 orderings of these five objectives finish with at least one objective that
+# was green when it was done and red at the end, so the drift mechanism is real. The ordering
+# BELOW is deliberately one of those 105, and that is the part worth writing down:
+#
+# an earlier revision listed the objectives so that the prompt's own order was one of the 15
+# clean ones. Sorting came after the append that unsorts the file, and the checksum objective
+# was listed last -- exactly where a queue-following agent would have put it anyway. Measured:
+# a single forward pass, each objective done competently once and never revisited, passed all
+# five checkpoints and the public check. The trap was documented, plausible, and inert against
+# the single most likely strategy: the same defect `tc-log-rotation-order` shipped with, where
+# a NOTES.md hint made 86% of orderings graded-correct.
+#
+# So the list now states the sorted/parity requirement before the append that breaks it, and
+# the checksum objective second rather than last. Verified against that same forward pass:
+# `lhi-catalogs-parallel` and `lhi-checksums-current` both finish red, having been green when
+# they were done, and the public check fails. Adding one re-check of those two objectives at
+# the end -- and changing nothing else -- makes all five pass. The difference between pass and
+# fail is re-checking rather than knowledge, which is what this category is for.
+#
+# Nothing about what is graded changed: every checkpoint and both checks read end state only,
+# so the withheld commitment is unaffected.
+#
+# The prompt still warns, in its own words, that finished work must still hold at the end. The
+# task is not a trick -- it is that reading the warning is not the same as acting on it.
 task_id: lh-i18n-catalog-parity
 tags: [long_horizon, swe, i18n, data-consistency]
 prompt: |
@@ -22,18 +43,18 @@ prompt: |
   `locales/`. Do all five of the following, and make sure that everything you have
   already finished is still true when you stop:
 
-    1. The navigation must gain a logout entry, last, rendered through the catalogs like
-       every other nav entry: `Log out` in English, `Deconnexion` in French.
-    2. The catalogs still carry keys that nothing in `app/` renders any more. Remove
-       every unused key from both catalogs -- and only those.
-    3. `locales/en.json` and `locales/fr.json` must end up holding exactly the same set
+    1. `locales/en.json` and `locales/fr.json` must end up holding exactly the same set
        of keys, each file sorted by key, with no empty values and no French entry left
        sitting on the English text.
-    4. Every string the UI renders must resolve in both locales, through the catalogs: an
+    2. `locales/checksums.json` must describe the catalogs as they stand when you stop,
+       in the format it already uses.
+    3. The navigation must gain a logout entry, last, rendered through the catalogs like
+       every other nav entry: `Log out` in English, `Deconnexion` in French.
+    4. The catalogs still carry keys that nothing in `app/` renders any more. Remove
+       every unused key from both catalogs -- and only those.
+    5. Every string the UI renders must resolve in both locales, through the catalogs: an
        unknown key must still raise rather than falling back to something. Translations
        that are already there keep their current wording.
-    5. `locales/checksums.json` must describe the catalogs as they stand when you stop,
-       in the format it already uses.
 
   Work in whatever order you like, and re-check your earlier work as you go.
 tools: [terminal, file_read, file_write, python]
