@@ -87,20 +87,55 @@ def test_multimodal_is_recorded_because_it_is_easy_to_miss():
     assert pin.raw["text_config"]["head_dim"] == 256
 
 
-def test_kv_bytes_match_the_recorded_architecture():
-    """2 x layers x kv_heads x head_dim, so a budget can be checked without a network call."""
+def test_kv_bytes_count_only_the_full_attention_layers():
+    """This model is hybrid, so its KV cache lives in 16 of 64 layers, not all of them.
+
+    The previous version of this test asserted
+    `2 * num_hidden_layers * kv_heads * head_dim` and passed -- which is exactly how the
+    wrong figure shipped. The formula and the pin agreed with each other, and neither
+    described the model. `layer_types` in the published config is 48 `linear_attention` +
+    16 `full_attention`; the linear layers hold a fixed per-sequence recurrent state rather
+    than a per-token cache.
+
+    Getting it wrong is not cosmetic. `kv_bytes()` sizes a VRAM budget against a card, and
+    counting all 64 layers overstates the per-token cost by 4x, which rules out hardware that
+    in fact runs this model comfortably. Measured against a live vLLM server on an RTX PRO
+    6000 Blackwell: 33.36 GiB of KV pool held 507,539 tokens.
+    """
     pin = load()
     t = pin.raw["text_config"]
-    expected = 2 * t["num_hidden_layers"] * t["num_key_value_heads"] * t["head_dim"]
+    full = t["layer_types_counts"]["full_attention"]
+    linear = t["layer_types_counts"]["linear_attention"]
+
+    assert full + linear == t["num_hidden_layers"]
+    assert full == t["num_hidden_layers"] // t["full_attention_interval"]
+
+    expected = 2 * full * t["num_key_value_heads"] * t["head_dim"]
     assert pin.kv_bytes_per_token["bf16"] == expected * 2
     assert pin.kv_bytes_per_token["fp8"] == expected
+
+    # Name the figure the all-layers formula would produce, so an edit that reintroduces it
+    # fails here rather than silently quadrupling every budget again.
+    all_layers = 2 * t["num_hidden_layers"] * t["num_key_value_heads"] * t["head_dim"] * 2
+    assert pin.kv_bytes_per_token["bf16"] != all_layers
+
+
+def test_the_measured_kv_figure_is_recorded_but_is_not_what_budgets_multiply():
+    """The measurement includes per-sequence recurrent state, which does not scale with
+    context -- so multiplying it by a context length would be the wrong kind of wrong."""
+    pin = load()
+    measured = pin.raw["kv_bytes_measured"]
+    assert measured["gpu_kv_cache_tokens"] > 0
+    assert pin.kv_bytes_per_token["bf16"] < measured["implied_bytes_per_token"]
+    assert "does not scale with context length" in measured["note"]
 
 
 def test_kv_bytes_for_a_peak_context():
     pin = load()
-    # 200K tokens of fp8 KV is ~26 GB, which is what makes a 200K peak context feasible
-    # at Q4 and impossible at BF16 on one 96 GB card.
-    assert round(pin.kv_bytes(200_000, dtype="fp8") / 1e9) == 26
+    # 200K tokens of fp8 KV over the 16 full-attention layers is ~6.6 GB, so a 200K peak
+    # context is comfortable on one 96 GB card alongside 51 GB of bf16 weights. Under the
+    # old all-layers figure this read 26 GB and looked marginal.
+    assert round(pin.kv_bytes(200_000, dtype="fp8") / 1e9, 1) == 6.6
 
 
 def test_an_unknown_dtype_is_refused_rather_than_assumed():

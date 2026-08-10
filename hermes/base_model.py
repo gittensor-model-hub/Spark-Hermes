@@ -27,10 +27,24 @@ parameters, the text hyperparameters live under `text_config`, and any memory es
 that reads the top level of `config.json` silently gets `None` for every field.
 
 `kv_bytes_per_token` is derived from those hyperparameters and stored so a budget can be
-checked without a network call: 2 x 64 layers x 4 KV heads x 256 head_dim. A budget that
-says `input_tokens: 200000` without saying whether that is cumulative or peak context
-cannot be checked against a card at all -- the two readings differ by more than an order
-of magnitude.
+checked without a network call. **Over the full-attention layers only** -- which is the part
+that was wrong here until a live server contradicted it. This model is hybrid: `layer_types`
+is 48 `linear_attention` + 16 `full_attention`, so only 16 of the 64 layers keep a per-token
+KV cache and the other 48 hold a fixed per-sequence recurrent state. The figure was
+originally derived as `2 x 64 layers x 4 KV heads x 256 head_dim` -- every layer -- which
+overstated the per-token cost by 4x.
+
+That is more than a footnote because `kv_bytes` sizes a VRAM budget against a card, so a 4x
+overstatement rules out hardware that runs this model comfortably: at fp8 and a 200K peak
+context the honest number is ~6.6 GB, not ~26 GB. The test asserting the old formula passed
+the entire time, because it and the pin agreed with each other and neither described the
+model -- the failure mode a derived-and-stored constant invites. The pin now also records
+what a real server reported, and says why that measured figure is *not* the one to multiply
+by a context length: it includes per-sequence state that does not scale with context.
+
+A budget that says `input_tokens: 200000` without saying whether that is cumulative or peak
+context cannot be checked against a card at all -- the two readings differ by more than an
+order of magnitude.
 """
 
 from __future__ import annotations

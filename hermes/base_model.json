@@ -6,7 +6,9 @@
   "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
   "pinned_on": "2026-08-10",
   "model_type": "qwen3_5",
-  "architectures": ["Qwen3_5ForConditionalGeneration"],
+  "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+  ],
   "chat_template": "qwen3_5",
   "hermes_dialect": "hermes-4",
   "hermes_dialect_evidence": "the repository's own tokenizer_config chat template emits <tool_call>, <tools>, <tool_response> and <think>, and does not emit <scratch_pad>",
@@ -19,11 +21,29 @@
     "head_dim": 256,
     "hidden_size": 5120,
     "vocab_size": 248320,
-    "max_position_embeddings": 262144
+    "max_position_embeddings": 262144,
+    "full_attention_interval": 4,
+    "layer_types_counts": {
+      "full_attention": 16,
+      "linear_attention": 48
+    },
+    "linear_key_head_dim": 128,
+    "linear_value_head_dim": 128,
+    "linear_num_key_heads": 16,
+    "linear_num_value_heads": 48,
+    "linear_conv_kernel_dim": 4
   },
   "kv_bytes_per_token": {
-    "bf16": 262144,
-    "fp8": 131072
+    "bf16": 65536,
+    "fp8": 32768
   },
-  "safetensors_shards": 15
+  "safetensors_shards": 15,
+  "kv_bytes_per_token_note": "Over the 16 FULL-ATTENTION layers only. This model is hybrid: layer_types is 48 linear_attention + 16 full_attention, so 48 of 64 layers keep a fixed per-sequence recurrent state instead of a per-token KV cache. The previous value here, 262144, used 2*64*4*256*2 -- every layer -- and overstated the per-token cost by 4x. That matters because kv_bytes() sizes a VRAM budget against a card, and a 4x overstatement rules out hardware that in fact runs this model comfortably.",
+  "kv_bytes_measured": {
+    "source": "vLLM 0.26.0 on RTX PRO 6000 Blackwell Server Edition, 2026-08-10",
+    "available_kv_cache_gib": 33.36,
+    "gpu_kv_cache_tokens": 507539,
+    "implied_bytes_per_token": 70576,
+    "note": "Measured total is slightly above the 65536 derived here because vLLM's KV pool accounting also carries the linear-attention layers' per-sequence state. That state does not scale with context length, so it belongs in a per-sequence budget rather than a per-token one -- which is why the derived figure, not this one, is what kv_bytes() multiplies by a context length."
+  }
 }
