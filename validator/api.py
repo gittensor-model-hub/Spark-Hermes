@@ -35,6 +35,8 @@ in `/round/current`, so nothing is concealed by saying so.
 from __future__ import annotations
 
 import inspect
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -50,10 +52,16 @@ from hermes.round import (
     screen_public_payload,
 )
 
-# Rounds this process is serving, keyed by round_id. In memory because `hermes.round` is pure
-# logic with no storage of its own, and because the store a real deployment wants -- a file, a
-# database, a git-tracked JSON directory -- is a deployment decision rather than an API one.
-# Swapping it is one assignment; baking a database in here would not be.
+# Rounds this process is serving, keyed by round_id.
+#
+# Still a dict, and now filled from `validator.store` at startup by `load_from_store()`. It was
+# filled by nothing, so a live server answered 404 to every round and a restart during grading
+# lost the grading -- the endpoints were all correct and there was no path by which they could
+# ever have had anything to serve.
+#
+# In-process on purpose. The store is the durable copy; this is a read cache in front of it, and
+# keeping the cache explicit is what lets `reload()` exist as one line rather than as a
+# refactor.
 ROUNDS: dict[str, RoundWindow] = {}
 
 # Opened commitments, keyed by round_id, published by whatever settles the round.
@@ -118,7 +126,46 @@ def _round_or_404(round_id: str) -> RoundWindow:
     return found
 
 
+def load_from_store(store: Any = None) -> tuple[int, list[tuple[str, str]]]:
+    """Fill `ROUNDS` from the durable store. Returns (loaded, failures).
+
+    Failures are returned rather than raised, and that choice matters here more than in most
+    loaders: this runs at startup, so raising would mean one unparseable snapshot takes the whole
+    validator down and every *healthy* round with it. A round that cannot be read is reported and
+    skipped, which is recoverable; an outage is not.
+
+    Reveals are deliberately not loaded. The API cannot derive a per-task salt -- the master lives
+    where grading happens -- so a reveal is posted here by whatever settles the round, and reading
+    one off disk at startup would give this process a signed-looking value it never checked.
+    """
+    from validator.store import RoundStore
+
+    store = store or RoundStore()
+    loaded, failed = store.load_all()
+    ROUNDS.update(loaded)
+    return len(loaded), failed
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Fill `ROUNDS` from the store before the first request is served.
+
+    A lifespan rather than `@app.on_event("startup")`, which Starlette deprecates. Loading lazily
+    on first request would be worse than either: the first caller would pay for the load and, if
+    it failed, would see a 404 that reads as "no round has been opened" -- the one message that
+    must not be ambiguous here.
+    """
+    count, failed = load_from_store()
+    print(f"validator.api: loaded {count} round(s) from the store")
+    for round_id, why in failed:
+        # Loud, because a round that silently failed to load is indistinguishable from a round
+        # that was never opened, and the second is a normal state.
+        print(f"validator.api: WARNING round {round_id!r} could not be loaded: {why}")
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Spark-Hermes validator",
     summary="RoundWindow state and audit records. Submissions arrive as GitHub pull requests.",
 )
@@ -268,4 +315,4 @@ def unscreened_handlers() -> list[str]:
     return offenders
 
 
-__all__ = ["REVEALS", "ROUNDS", "app", "route_handlers", "unscreened_handlers"]
+__all__ = ["REVEALS", "ROUNDS", "app", "load_from_store", "route_handlers", "unscreened_handlers"]

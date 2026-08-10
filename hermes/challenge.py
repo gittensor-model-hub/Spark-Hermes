@@ -35,6 +35,7 @@ records the observed resource envelope and the gate reads the spread from it.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import sys
 from collections import defaultdict
@@ -278,6 +279,57 @@ class Challenge:
     def digest(self) -> str:
         """Content address. Excludes nothing, so two identical packets are one challenge."""
         return digest_mapping(self.to_record(with_digest=False))
+
+    def snapshot(self) -> dict[str, Any]:
+        """Complete private state, for a validator's own store. Never publish this.
+
+        Separate from `to_record` because that record is deliberately lossy: it publishes the
+        baseline as aggregate statistics and strips every task key outside
+        `PUBLISHABLE_TASK_KEYS`. A challenge rebuilt from it would have no individual attempts,
+        so `token_spread` and `reduction_interval` -- the whole noise argument in
+        `hermes.acceptance` -- would silently have nothing to work from.
+
+        Persisting through the publishable record is the mistake that looks like it worked: the
+        reload succeeds, and what it drops is exactly what the publishable record exists to drop.
+        """
+        return {
+            "snapshot_version": "spark-challenge-private-v1",
+            "task_id": self.task_id,
+            "failure_class": self.failure_class,
+            "epoch": dict(self.epoch),
+            "task_pins": dict(self.task_pins),
+            "baseline": {
+                "task_id": self.baseline.task_id,
+                "attempts": [dataclasses.asdict(a) for a in self.baseline.attempts],
+            },
+        }
+
+    @classmethod
+    def from_snapshot(cls, record: dict[str, Any]) -> Challenge:
+        """Rebuild from `snapshot`. Refuses a published record, which cannot carry the state."""
+        baseline = record.get("baseline") or {}
+        # A list, not merely present. The published record has an `attempts` key too and it holds
+        # a *count* -- so the obvious `"attempts" not in baseline` check passes on exactly the
+        # input it exists to reject, and the failure lands later as `'int' object is not iterable`.
+        # Checked by feeding a real `to_record()` to this and watching the wrong error arrive.
+        if not isinstance(baseline.get("attempts"), list):
+            raise ChallengeError(
+                "this is a published Challenge.to_record(), not a snapshot: its baseline carries "
+                "aggregate statistics and no individual attempts. Rebuilding from it would produce "
+                "a challenge whose baseline has nothing in it, and every spread computed from that "
+                "would be zero -- which reads as a perfectly repeatable task rather than as missing "
+                "data."
+            )
+        return cls(
+            task_id=str(record["task_id"]),
+            failure_class=str(record["failure_class"]),
+            baseline=Baseline(
+                task_id=str(baseline.get("task_id") or record["task_id"]),
+                attempts=tuple(Attempt(**a) for a in baseline["attempts"]),
+            ),
+            epoch=dict(record.get("epoch") or {}),
+            task_pins=dict(record.get("task_pins") or {}),
+        )
 
     def to_record(self, *, with_digest: bool = True) -> dict[str, Any]:
         record: dict[str, Any] = {

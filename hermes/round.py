@@ -92,6 +92,7 @@ mid-grading reads `RoundWindow.verdicts`, which returns in-process objects and n
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass, field, fields
 from functools import lru_cache
@@ -1156,6 +1157,81 @@ class RoundWindow:
         }
         return screen_public_payload(record, allowed=PUBLIC_VIEW_FIELDS, where=f"round {self.round_id}")
 
+    def snapshot(self) -> dict[str, Any]:
+        """Complete private state, for a validator's own store. Never serve this.
+
+        `to_record` cannot be used for persistence and the reason is the whole point of this
+        method: it withholds `verdicts` until GRADED. Round-tripping through it would drop every
+        verdict recorded before grading finished, the reload would report success, and the round
+        would come back up having silently lost the grading work -- publishing "verdicts_recorded:
+        0" as though none had been made.
+
+        So the store gets its own record, and `screen_public_payload` refuses this one on sight
+        because it carries a `verdicts` key. That refusal is the safety property: the private
+        snapshot cannot be served through the same door as the public view even by mistake.
+        """
+        return {
+            "snapshot_version": "spark-round-private-v1",
+            "round_id": self.round_id,
+            "challenge": self.challenge.snapshot(),
+            "opened_at": self.opened_at,
+            "deadline": self.deadline,
+            "state": self.state,
+            "clock": self._clock,
+            "submissions": [dataclasses.asdict(s) for s in self._submissions.values()],
+            "replacements": dict(self._replacements),
+            "receipts": [dataclasses.asdict(r) for r in self._receipts],
+            "verdicts": [dataclasses.asdict(v) for v in self._verdicts.values()],
+            "frozen": dataclasses.asdict(self._frozen) if self._frozen else None,
+            "token": dataclasses.asdict(self._token) if self._token else None,
+            "graded_at": self._graded_at,
+            "settled_at": self._settled_at,
+        }
+
+    @classmethod
+    def from_snapshot(cls, record: dict[str, Any], *, assignment: Any = None, contract: Any = None) -> RoundWindow:
+        """Rebuild from `snapshot`. Refuses a published ledger, which cannot carry the verdicts.
+
+        `assignment` and `contract` are passed back in rather than serialised. They are live
+        objects owned by the caller -- `hermes.seed.Round` is rebuilt from its own published
+        announcement, which is the record the gate reads from the base ref -- and a copy pickled
+        in here could disagree with the announcement miners were working against.
+        """
+        if record.get("snapshot_version") != "spark-round-private-v1":
+            raise RoundError(
+                f"not a round snapshot: snapshot_version is {record.get('snapshot_version')!r}. A "
+                "published ledger withholds verdicts until GRADED, so rebuilding from one would "
+                "come back up having silently lost every verdict recorded before grading finished."
+            )
+        window = cls(
+            challenge=Challenge.from_snapshot(record["challenge"]),
+            round_id=str(record["round_id"]),
+            opened_at=float(record["opened_at"]),
+            deadline=float(record["deadline"]),
+            contract=contract,
+            assignment=assignment,
+        )
+        window.state = str(record["state"])
+        window._clock = float(record.get("clock") or record["opened_at"])
+        for entry in record.get("submissions") or ():
+            built = Submission(**entry)
+            window._submissions[built.miner] = built
+        window._replacements = {str(k): int(v) for k, v in (record.get("replacements") or {}).items()}
+        window._receipts = [Receipt(**r) for r in record.get("receipts") or ()]
+        window._frozen = FrozenAt(**record["frozen"]) if record.get("frozen") else None
+        window._token = FreezeToken(**record["token"]) if record.get("token") else None
+        # The token is rebuilt before the verdicts and handed to each of them, rather than
+        # reconstructed from the nested copy `dataclasses.asdict` left behind. `Verdict` refuses
+        # to exist without the `FreezeToken` its round minted -- which is what stops a verdict
+        # being fabricated for an open round -- so a dict there fails loudly, and a *second*
+        # equal-but-separate token would pass while quietly breaking that identity.
+        for entry in record.get("verdicts") or ():
+            built_v = Verdict(**{**entry, "token": window._token})
+            window._verdicts[built_v.miner] = built_v
+        window._graded_at = record.get("graded_at")
+        window._settled_at = record.get("settled_at")
+        return window
+
     def public_view(self) -> dict[str, Any]:
         """Everything a miner may see, at the current state.
 
@@ -1231,6 +1307,7 @@ def open_round(
     opened_at: float,
     deadline: float,
     contract: Any = None,
+    assignment: Any = None,
 ) -> RoundWindow:
     """Publish a round over one challenge. Refuses a window nobody can submit to.
 
@@ -1251,6 +1328,12 @@ def open_round(
         opened_at=opened_at,
         deadline=deadline,
         contract=contract,
+        # Part of publishing a round, not something bolted on afterwards. Without this
+        # parameter every window built through the documented constructor was permanently
+        # unscoped -- `scope_enforced` would report False and the only way to change it was to
+        # assign to the field from outside, which is exactly the operator discipline the class
+        # docstring says not to rely on.
+        assignment=assignment,
     )
 
 

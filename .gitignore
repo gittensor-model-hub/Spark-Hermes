@@ -57,3 +57,9 @@ tritonbench/LLM_generated/
 # Local scratch: status notes, working files, anything not meant to ship. Ignored rather
 # than committed so a working note never has to be written as if it were documentation.
 .local/
+
+# Validator round store. Load-bearing, not housekeeping: `RoundWindow.snapshot()` carries every
+# verdict, including ones recorded while a round was still FROZEN, and publishing those turns the
+# withheld verifier into a check-your-guess oracle. `validator.store.store_is_private` asks git
+# whether this entry is still here and refuses to construct a store if it is not.
+var/
