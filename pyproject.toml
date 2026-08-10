@@ -27,6 +27,13 @@ dev = [
 # proof-bundle publishing. Needs a real NVIDIA CC-capable GPU/driver stack to
 # actually attest (e.g. a Blackwell RTX PRO 6000 Server Edition CC node) —
 # not required for the rest of the repo, so kept as an extra like Axolotl.
+# The validator's HTTP surface. Optional so importing hermes/ or running the bench never
+# pulls in a web stack: the only thing here that listens on a socket is validator/api.py.
+validator = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+]
+
 proof = [
     "nv-attestation-sdk==2.7.3",
     "huggingface_hub>=1.27.0",
@@ -48,7 +55,7 @@ build-backend = "hatchling.build"
 override-dependencies = ["pytest==9.1.1", "numpy<2.5"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["teacher", "eval", "proof", "hermes", "hermesbench"]
+packages = ["teacher", "eval", "proof", "hermes", "hermesbench", "validator"]
 
 [tool.ruff]
 line-length = 120
@@ -69,7 +76,7 @@ quote-style = "double"
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["teacher", "eval", "proof", "hermes", "hermesbench"]
+include = ["teacher", "eval", "proof", "hermes", "hermesbench", "validator"]
 # Optional training/miner-side entrypoints that import the uninstalled GPU/training
 # stack (torch, flash_attn, axolotl, cut_cross_entropy); not import-resolvable in CI.
 ignore = ["eval/train_prep.py", "eval/export_gsm8k_regression_sample.py"]
