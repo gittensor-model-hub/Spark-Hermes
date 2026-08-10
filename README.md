@@ -1,14 +1,20 @@
 ![Spark-Hermes banner](docs/images/banner.png)
 
+<sub>Two things in the artwork above do not match the system and are being redrawn. The rollout
+host is an **RTX PRO 6000 Blackwell Server Edition (96 GB)**, not a GeForce RTX 5090 32 GB. And
+"lower latency" is not a thing a miner is scored on — wall time is reported and never gates the
+crown, for the reason given under [Pareto frontier](#pareto-frontier).</sub>
+
 # SPARK-HERMES
 
 ### Verified agent intelligence, continuously improved by SN74 Gittensor
 
 **Target:** `Spark-Hermes-3.8-27B`
-**Development baseline:** pinned `Qwen3.6-27B`
+**Development baseline:** pinned `Qwen3.6-27B` @ `6a9e13bd`, served bf16
 **Runtime:** Hermes 4
 **Competition:** verified rollout optimization
-**Execution:** Intel TDX + NVIDIA Confidential Computing
+**Execution:** NVIDIA Confidential Computing enabled; Intel TDX quote verification implemented,
+no approved guest measurement pinned yet
 
 > **Same model. Better rollout. Verified improvement. Better next model.**
 
@@ -76,47 +82,46 @@ For each challenge, the model and execution environment are fixed.
 
 ### Fixed by the epoch
 
+What the code pins is [`PINNED_CONFIG_KEYS`](hermes/profile.py):
+
 ```text
-model artifact + digest
-tokenizer
-quantization
-inference runtime
-Hermes commit
-system prompt + tool schemas
-initial task workspace
-hardware class
-verification contract
-token / tool / time budgets
-replay seeds
+model                     terminal.timeout
+provider                  toolsets
+agent.reasoning_effort    tool_output
+terminal.backend          compression
+                          context.engine
 ```
+
+alongside the model digest, the tokenizer, the Hermes commit, the system prompt and tool
+schemas, the initial workspace, the verification contract, the budgets and the replay seeds.
 
 ### Miner-controlled engineering space
 
 ```text
-system / SOUL prompt
-skill selection
-planning policy
-context management
-tool-use policy
-recovery policy
-verification policy
-stopping policy
-sampling policy
+system / SOUL prompt      recovery policy
+skill selection           verification policy
+planning policy           stopping policy
+context management        tool-use policy
 ```
 
 Miners do **not** win by changing model weights. They win by making the same model behave
 better.
 
+**Sampling is not pinned, and was described in two contradictory ways.** This list used to end
+with "sampling policy" as miner-controlled while the section below claimed the epoch fixes
+"generation settings". Both cannot hold, and neither matches the code: the pinned list fixes
+`agent.reasoning_effort` and says nothing about temperature or top-p. Read it as unpinned — a
+pin that is only described is not a pin, and a miner tuning temperature today is inside the
+rules as written.
+
 ---
 
-## One canonical quantized model
+## One canonical model epoch
 
 Every miner runs the same content-addressed deployment artifact for a model epoch.
 
 ```text
 open base / Spark-Hermes checkpoint
-        ↓
-canonical quantization
         ↓
 canonical inference runtime
         ↓
@@ -125,10 +130,15 @@ model epoch digest
 same bytes on every miner
 ```
 
-"Same model" means identical weights, tokenizer, quantization, runtime configuration,
-Hermes protocol and generation settings—not merely the same model name.
+"Same model" means identical weights, tokenizer, runtime configuration and Hermes protocol —
+not merely the same model name.
 
-Different quantization or kernel work belongs in a separate inference-optimization track.
+**Nothing is quantized.** This section was titled "One canonical quantized model" and put a
+quantization step in that chain. [`hermes/base_model.json`](hermes/base_model.json) pins
+`Qwen/Qwen3.6-27B` at revision `6a9e13bd` with no quantization field, and the measured baseline
+served it in bf16 — which is why the KV figure in that file is `kv_bytes_measured` rather than
+one computed from an assumed precision. Quantization and kernel work would belong in a separate
+inference-optimization track; no such track exists.
 
 ---
 
@@ -247,25 +257,33 @@ As Spark-Hermes improves, the challenge generator must continuously find harder 
 
 ---
 
-## Hidden siblings prevent hard-coding
+## A withheld check prevents hard-coding
 
-Each visible challenge belongs to a task family:
+**Hidden sibling tasks do not exist.** This section described each visible challenge as the
+head of a family of hidden variants — A, B, C — varying repositories, filenames, constants and
+error order. No task in the corpus declares a sibling or a family; grep for either and the only
+hit is a line in [`hermes/miner_contract.json`](hermes/miner_contract.json) citing "the
+hidden-sibling defence" as though it were already in place. The mechanism further down this
+file has always listed sibling verification as a *planned* boundary, and this section
+contradicted it.
+
+What exists, on all 19 tasks, is a **withheld check on the same task**:
 
 ```text
-visible challenge
-+
-hidden sibling A
-+
-hidden sibling B
-+
-hidden sibling C
+visible task
+├── published verifier      the miner can read it, so it can be optimised against
+└── withheld verifier       committed by salted digest, held privately
 ```
 
-Hidden siblings vary repositories, filenames, symbols, constants, inputs, error order,
-tool availability or decoy failures while preserving the underlying capability.
+Both run on every attempt. A strategy that passes the published check and fails the withheld
+one is counted in `overfit_rate` — it learned the benchmark rather than the job. That is a
+narrower defence than a task family: it catches a strategy fitted to the *published assertions*,
+and it does not catch one fitted to this repository's filenames and constants. Sibling tasks
+would catch that, which is why they are still on the roadmap.
 
-A strategy must improve the hidden family—not only the visible task—to receive full reward
-or global strategy promotion.
+Each task's salt is derived per task, `HMAC(master, task_id)`, so publishing one task's salt
+after its round settles says nothing about any other. Under a single shared salt the first
+audit would unseal every unspent task in the corpus.
 
 ---
 
@@ -302,15 +320,28 @@ candidate: pass
 Both pass, but the candidate improves:
 
 ```text
-input tokens ↓
-output tokens ↓
-model turns ↓
+model turns ↓            the axis a strategy actually moves
+input tokens ↓           follows from turns; see below
 weighted tool cost ↓
-wall time ↓
 repeated actions ↓
+output tokens ↓          5.1% of the bill
 ```
 
 while maintaining equal or stronger verification.
+
+**Input and output tokens are not two comparable axes.** Measured over the 190-episode baseline:
+
+```text
+input   9,271,813   94.9%      re-sent context
+output    493,190    5.1%
+cache hit rate          0.00%  prefix caching was off
+```
+
+Input dominates by nearly twenty to one, and almost all of it is the same conversation re-sent
+on every turn with no prefix cache behind it. So a strategy does not reduce input tokens by
+writing less — it reduces them by taking fewer turns, and input follows. Listing the two side
+by side invites a miner to optimise the 5% and read the 95% as separately winnable. Wall time
+is deliberately absent from this list; the section below says why.
 
 ### Verification cannot regress
 
@@ -328,25 +359,34 @@ There is no universal exchange rate between one token, one tool call and one sec
 After correctness gates, candidates are compared as a vector:
 
 ```text
-verified success
-hidden generalization
-tokens
-model turns
-weighted tool use
-normalized wall time
-repeated actions
+gates the crown          verified success
+                         overfit rate (published pass, withheld fail)
+                         tokens
+                         model turns
+                         weighted tool use
+                         repeated actions
+
+reported, never gates    wall time
 ```
 
 Non-dominated candidates remain on the challenge's Pareto frontier. A pre-registered SN74
 reward policy distributes emissions across that verified frontier.
 
-Wall time is normalized on the same miner node:
+### Wall time is reported and never gates the crown
 
-```text
-normalized_time = candidate_time / baseline_time
-```
+This section claimed wall time was a frontier axis, normalized as
+`normalized_time = candidate_time / baseline_time`, "so hardware variance does not masquerade as
+strategy quality". [`hermes.acceptance.dominates`](hermes/acceptance.py) does the opposite, and
+deliberately:
 
-so hardware variance does not masquerade as strategy quality.
+> Tokens and tool calls are exact and recomputable from the trace. Wall time is not, and a
+> king-of-the-hill bar that only ever rises would lock in whichever run got favourable
+> scheduling — permanently, because no later run could legitimately beat it.
+
+Dividing by a baseline on the same node removes the node's *average* speed. It does not remove
+run-to-run variance, and the crown is a ratchet: once a lucky measurement sets the bar, no
+honest strategy can clear it and the bar never decays. A ratio does not fix a metric that is not
+recomputable from the trace, so latency is reported beside the crown and gates nothing.
 
 ---
 
@@ -551,17 +591,20 @@ training recipes
 Next production boundary:
 
 ```text
-baseline failure mining
-challenge packaging
-canonical quantized model epoch
 miner StrategySpec
 TDX + GPU CC generation proof
+approved guest measurement pinned
 paired baseline/candidate execution
-hidden sibling verification
+hidden sibling tasks
 improvement scoring
 strategy frontier
 continuous model retraining
+separate inference-optimization track (quantization, kernels)
 ```
+
+Baseline failure mining and challenge packaging have moved out of this list: the first four
+challenges are in [`datasets/challenges/`](datasets/challenges), opened by
+`python -m hermes.challenge` from the baseline's own episode log.
 
 Planned rollout-evolution components are not claimed as live until their production path is
 merged and exercised.
@@ -574,12 +617,33 @@ a public checkout -- a legitimate state, and `suitecheck` reports what it cannot
 rather than reporting a clean zero. A verifier a model can read is one it can be optimised
 against, which is the whole reason `overfit_rate` means anything.
 
-Two limits worth stating rather than discovering later. The task suite is 16 tasks, which
-gives roughly 9% power to detect a 20-point paired improvement under the exact McNemar test
-in [`hermesbench/repeats.py`](hermesbench/repeats.py) — task supply, not attestation, is the
-binding constraint on every number above. And no approved guest measurement is pinned yet,
-so a TDX quote proves a genuine confidential VM ran and committed to this bundle, not that
-it ran an image we approved.
+Two limits worth stating rather than discovering later.
+
+**Challenge supply is the binding constraint, and it is tighter than task supply.** The suite is
+19 tasks, not the 16 this file used to claim (16 in `v1`, 3 in `v0`). Simulated power to detect a
+20-point paired improvement under the exact McNemar test in
+[`hermesbench/repeats.py`](hermesbench/repeats.py):
+
+```text
+tasks    power
+    4      0.0%     <- challenges actually open
+   19     15.3%     <- the whole suite
+   30     57.2%
+   60     99.0%
+```
+
+But a task only becomes a challenge if the baseline reliably fails it, and of the 19 exactly
+**4** qualified — the rest the baseline either handles or passes too often to be worth a round.
+So the number that governs every claim above is 4, where the test has no power at all. Growing
+the suite is necessary and not sufficient; the yield from suite to challenge was 21%.
+
+**Attestation is verified but not yet policed.** [`eval/verify.py`](eval/verify.py) checks NRAS
+tokens and extracts TDX `REPORTDATA` from the quote itself rather than trusting the
+miner-editable JSON field, and [`eval/rollout_track.py`](eval/rollout_track.py) refuses a
+submission whose digests disagree with the attested manifest. What is missing is the policy: no
+approved guest measurement is pinned, so a quote proves a genuine confidential VM ran and
+committed to this bundle, not that it ran an image we approved. The GPU side has CC enabled but
+`nvtrust`/NRAS has not been exercised end to end on the rollout host.
 
 ---
 
