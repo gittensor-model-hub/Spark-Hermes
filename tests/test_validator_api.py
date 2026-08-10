@@ -46,8 +46,10 @@ def _round(round_id="r-1", deadline=1_000.0):
 @pytest.fixture
 def client():
     api.ROUNDS.clear()
+    api.REVEALS.clear()
     yield TestClient(api.app)
     api.ROUNDS.clear()
+    api.REVEALS.clear()
 
 
 # --- the endpoints actually work ---------------------------------------------------------------
@@ -158,3 +160,55 @@ def test_the_guard_would_catch_an_unscreened_handler():
         assert api.unscreened_handlers() == ["leaky_handler"]
     finally:
         api.route_handlers = original
+
+
+# --- the reveal success path, which the first version of this file never exercised -------------
+
+
+def test_a_settled_round_serves_the_published_reveal(client):
+    """The gap that let a real bug through. The refusal path was tested and the success path was
+    not, so `Round.reveal(master_salt)` being called with no argument went unnoticed until
+    pyright flagged it -- a runtime crash on the one endpoint an auditor depends on."""
+    r = _round()
+    api.ROUNDS["r-1"] = r
+    r.freeze(now=1_001.0)
+    r.grade(now=1_002.0)
+    r.settle(now=1_003.0)
+    # Published the way the private side would: by calling Round.reveal with the master, which
+    # is the step this process cannot perform. A hand-built dict was the first version of this
+    # test, and the guard rejected it -- because it named the field `salt`, which is in
+    # WITHHELD_KEYS. The real record says `per_task_salt`, and that naming is load-bearing
+    # rather than stylistic: `salt` would be refused by the same check that protects every
+    # other endpoint.
+    api.REVEALS["r-1"] = r.reveal("a-test-master-salt-long-enough").to_record()
+
+    response = client.get("/v1/round/r-1/reveal")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["per_task_salt"]
+    assert body["opens_only_this_task"] is True
+
+
+def test_a_settled_round_with_no_published_reveal_is_a_409_not_a_crash(client):
+    """The API cannot derive a salt: the master lives where grading happens, not here. So a
+    settled round whose reveal has not been posted says so rather than 500-ing or, worse,
+    reaching for a secret this process should never hold."""
+    r = _round()
+    api.ROUNDS["r-1"] = r
+    r.freeze(now=1_001.0)
+    r.grade(now=1_002.0)
+    r.settle(now=1_003.0)
+    response = client.get("/v1/round/r-1/reveal")
+    assert response.status_code == 409
+    assert "no opened commitment has been published" in response.json()["detail"]
+
+
+def test_the_api_never_holds_the_master_salt():
+    """Structural, not aspirational. `Round.reveal` takes the master and derives the per-task
+    salt; calling it here would put the secret that seals every unspent task in the corpus
+    inside the process answering untrusted requests."""
+    import inspect
+
+    source = inspect.getsource(api)
+    assert ".reveal(" not in source
+    assert "master_salt" not in source.replace("master salt", "").replace("the master", "")

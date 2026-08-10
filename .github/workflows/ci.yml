@@ -28,10 +28,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+        # --extra validator so pyright can resolve validator/ imports (fastapi), the same
+        # reason as proof below: an unresolvable import is a type error, and excluding the
+        # package instead would stop type-checking the one process that serves requests.
         # --extra proof so pyright can resolve proof/ imports (pyjwt, dcap-qvl,
         # nv-attestation-sdk). SparkProof itself is not installed here, so the tests
         # that need it skip by design (see tests/conftest.py) — no secret exposure.
-        run: uv sync --extra dev --extra proof --frozen
+        run: uv sync --extra dev --extra proof --extra validator --frozen
 
       - name: Ruff lint
         run: uv run ruff check .

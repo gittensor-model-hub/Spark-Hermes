@@ -56,6 +56,18 @@ from hermes.round import (
 # Swapping it is one assignment; baking a database in here would not be.
 ROUNDS: dict[str, Round] = {}
 
+# Opened commitments, keyed by round_id, published by whatever settles the round.
+#
+# The API does NOT hold the master salt, and this dict is why. `Round.reveal` takes the master
+# and derives the per-task salt from it, so calling it here would put the secret that seals
+# every unspent task in the corpus inside the process that answers untrusted requests. Pyright
+# caught the first version doing exactly that -- it flagged the missing argument, and the honest
+# fix was not to pass the secret in but to stop needing it.
+#
+# So the private side derives the reveal at settle time, where the master already lives, and
+# publishes the record here. This process serves a value it could not have computed.
+REVEALS: dict[str, dict[str, Any]] = {}
+
 
 def _screened(payload: dict[str, Any], *, allowed: frozenset[str], where: str) -> dict[str, Any]:
     """Full screening: allowlist, no withheld body, no verdict-shaped key.
@@ -212,9 +224,19 @@ def reveal(round_id: str) -> dict[str, Any]:
                 "while the round is still live."
             ),
         )
-    opened = found.reveal()
-    record = opened.to_record()
-    return _screened_body(record, where=f"GET /v1/round/{round_id}/reveal")
+    record = REVEALS.get(round_id)
+    if record is None:
+        # SETTLED but nothing published. Not a 404: the round exists and is in the right state,
+        # so this is the private side not having posted the opened commitment yet.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"round {round_id} has settled but no opened commitment has been published. The "
+                "salt is derived where the master secret lives, not here, so this process cannot "
+                "produce one on demand."
+            ),
+        )
+    return _screened_body(dict(record), where=f"GET /v1/round/{round_id}/reveal")
 
 
 def route_handlers() -> list[Any]:
@@ -246,4 +268,4 @@ def unscreened_handlers() -> list[str]:
     return offenders
 
 
-__all__ = ["ROUNDS", "app", "route_handlers", "unscreened_handlers"]
+__all__ = ["REVEALS", "ROUNDS", "app", "route_handlers", "unscreened_handlers"]
