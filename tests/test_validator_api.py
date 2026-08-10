@@ -3,7 +3,7 @@
 Every test here goes through the app rather than calling `hermes.round` directly, because the
 property being defended is what a *miner* can read over the wire. A round object that withholds
 verdicts correctly is no use if the server serialises them anyway, and that gap is exactly
-where the first version of this module was broken: it re-screened `Round.public_view()` against
+where the first version of this module was broken: it re-screened `RoundWindow.public_view()` against
 `PUBLIC_VIEW_FIELDS`, which describes the metadata block and not the view, so `challenge` read
 as an unexpected field and every call would have 500'd.
 """
@@ -167,14 +167,14 @@ def test_the_guard_would_catch_an_unscreened_handler():
 
 def test_a_settled_round_serves_the_published_reveal(client):
     """The gap that let a real bug through. The refusal path was tested and the success path was
-    not, so `Round.reveal(master_salt)` being called with no argument went unnoticed until
+    not, so `RoundWindow.reveal(master_salt)` being called with no argument went unnoticed until
     pyright flagged it -- a runtime crash on the one endpoint an auditor depends on."""
     r = _round()
     api.ROUNDS["r-1"] = r
     r.freeze(now=1_001.0)
     r.grade(now=1_002.0)
     r.settle(now=1_003.0)
-    # Published the way the private side would: by calling Round.reveal with the master, which
+    # Published the way the private side would: by calling RoundWindow.reveal with the master, which
     # is the step this process cannot perform. A hand-built dict was the first version of this
     # test, and the guard rejected it -- because it named the field `salt`, which is in
     # WITHHELD_KEYS. The real record says `per_task_salt`, and that naming is load-bearing
@@ -204,7 +204,7 @@ def test_a_settled_round_with_no_published_reveal_is_a_409_not_a_crash(client):
 
 
 def test_the_api_never_holds_the_master_salt():
-    """Structural, not aspirational. `Round.reveal` takes the master and derives the per-task
+    """Structural, not aspirational. `RoundWindow.reveal` takes the master and derives the per-task
     salt; calling it here would put the secret that seals every unspent task in the corpus
     inside the process answering untrusted requests."""
     import inspect

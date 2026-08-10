@@ -1,4 +1,28 @@
-"""The round: publish a challenge, take submissions, freeze at the deadline.
+"""The round window: publish a challenge, take submissions, freeze at the deadline.
+
+## Two modules say "round", and they are different axes
+
+`hermes.seed` also has a round, and for a while both classes were called `Round` with neither
+referencing the other -- so `from hermes.round import Round` and `from hermes.seed import Round`
+were indistinguishable at a call site, and only one of them was wired into the live submission
+gate. The class here is now `RoundWindow`, which is the word this module's own prose already
+used, and the two axes are:
+
+    hermes.seed.Round   ASSIGNMENT: who works on what. States committed -> open -> closed,
+                        describing when the seed is VISIBLE. Deterministic per-miner
+                        assignment by rendezvous hashing from a commit-revealed seed, so a
+                        miner submitting work it was not assigned is rejectable by anyone
+                        holding the announcement. Used by `eval.rollout_track`.
+
+    RoundWindow (here)  LIFECYCLE: intake, freeze, grading, settlement. States open -> frozen
+                        -> graded -> settled, describing what the validator will ACCEPT and
+                        PUBLISH. Enforces that no correctness information escapes before the
+                        freeze.
+
+They compose rather than compete: a real round has both an assignment and a window. This class
+does not yet hold a `seed.Round`, so nothing here checks that a submitting miner was assigned
+the task -- `eval.rollout_track.check_scope` does that separately. Wiring the two together is
+worth doing and is not done.
 
 `hermes.challenge` decides what is worth competing on and `hermes.acceptance` decides who
 won. Between them sat the part nobody had written: the *window*. Open it, take uploads while
@@ -36,7 +60,7 @@ That rule is a property of the types here, not a note in a docstring:
   * `Receipt` -- the only thing `submit` returns -- has no field that could hold a verdict,
     and `_check_receipt_fields` raises at **import** if somebody adds one.
   * `Verdict` cannot be constructed without a `FreezeToken`, and the only code in the process
-    that mints a token is `Round.freeze`. Nothing reachable from an open round can make one,
+    that mints a token is `RoundWindow.freeze`. Nothing reachable from an open round can make one,
     so during an open round there is no verdict object in existence to leak.
   * Every serialisable payload the module can emit is screened. `screen_public_payload` is an
     allowlist for the same reason `PUBLISHABLE_TASK_KEYS` is one, with a denylist of
@@ -63,7 +87,7 @@ confuse the two numbers.
 a verdict before the round is `GRADED`, including the ledger, and that is deliberate. Making
 only the miner-facing payload safe leaves the ledger safe-by-operator-discipline -- and this
 module exists because operator discipline is what fails. A grader that needs raw verdicts
-mid-grading reads `Round.verdicts`, which returns in-process objects and never a dict.
+mid-grading reads `RoundWindow.verdicts`, which returns in-process objects and never a dict.
 """
 
 from __future__ import annotations
@@ -153,7 +177,7 @@ RECEIPT_FIELDS = frozenset(
 )
 
 # Keys the round's own metadata may publish. `challenge` and `verdicts` are assembled outside
-# this screen and documented at the assembly site -- see `Round.public_view`.
+# this screen and documented at the assembly site -- see `RoundWindow.public_view`.
 PUBLIC_VIEW_FIELDS = frozenset(
     {
         "schema_version",
@@ -344,7 +368,7 @@ class Receipt:
     because there is nowhere to put it.
 
     `revision` and `standing_digest` describe the submission that *counts*, which is not
-    always the one just uploaded -- see `Round.submit` on why a malformed upload must not
+    always the one just uploaded -- see `RoundWindow.submit` on why a malformed upload must not
     displace a good one. A `revision` of 0 with an empty `standing_digest` means nothing of
     this miner's stands: the upload was rejected and there was no earlier one to fall back to.
     """
@@ -429,9 +453,9 @@ def default_contract() -> Any:
 class FreezeToken:
     """Proof that a round actually froze, and the only key that unlocks `Verdict`.
 
-    A capability rather than a data record. `Verdict.__init__` demands one and `Round.freeze`
+    A capability rather than a data record. `Verdict.__init__` demands one and `RoundWindow.freeze`
     is the only function that mints one, so there is no path from an open round to a verdict
-    object -- not a discouraged path, an absent one. `Round.record_verdict` compares tokens by
+    object -- not a discouraged path, an absent one. `RoundWindow.record_verdict` compares tokens by
     identity, so a token reconstructed with the right field values is still not the token this
     round minted.
     """
@@ -486,7 +510,7 @@ class Verdict:
     computable the instant the submission lands -- the validator holds the withheld check --
     so nothing about the *data* stops a grader being called from inside a request handler. What
     stops it is that the result has nowhere to live: constructing this requires a `FreezeToken`
-    and only `Round.freeze` mints one.
+    and only `RoundWindow.freeze` mints one.
 
     `passed` is the withheld verdict. `decision` is left to `hermes.acceptance`, which owns the
     bar; a round records what happened and does not re-derive who won.
@@ -509,7 +533,7 @@ class Verdict:
             raise RoundError("a verdict about no miner scores nobody and inflates the denominator")
 
     def to_record(self) -> dict[str, Any]:
-        """Verdict-shaped by design. Reachable only through a GRADED round -- see `Round.to_record`."""
+        """Verdict-shaped by design. Reachable only through a GRADED round -- see `RoundWindow.to_record`."""
         return {
             "miner": self.miner,
             "submission_digest": self.submission_digest,
@@ -572,7 +596,7 @@ class Reveal:
 
         A salt in the payload a miner polls every few seconds is one refactor away from being
         published by a round that has not settled. Handing it back only from an explicit
-        `Round.reveal(master)` call keeps the one payload that legitimately carries a secret
+        `RoundWindow.reveal(master)` call keeps the one payload that legitimately carries a secret
         out of the one that is fetched constantly.
         """
         return {
@@ -594,7 +618,7 @@ class Reveal:
 
 
 @dataclass
-class Round:
+class RoundWindow:
     """One competition window over one challenge.
 
     Construct through `open_round`, which refuses the arguments that produce a window nobody
@@ -1144,7 +1168,7 @@ def open_round(
     opened_at: float,
     deadline: float,
     contract: Any = None,
-) -> Round:
+) -> RoundWindow:
     """Publish a round over one challenge. Refuses a window nobody can submit to.
 
     Mirrors `hermes.challenge.open_challenge` deliberately: the refusals live at the moment of
@@ -1158,7 +1182,7 @@ def open_round(
             f"{round_id}: deadline {deadline} is not after the open time {opened_at}, so every submission "
             "would be LATE. A round nobody can enter still consumes an epoch of the challenge."
         )
-    return Round(
+    return RoundWindow(
         challenge=challenge,
         round_id=round_id.strip(),
         opened_at=opened_at,
@@ -1178,9 +1202,9 @@ class Registry:
     checked from inside one, and to write a record a stranger can read.
     """
 
-    rounds: dict[str, Round] = field(default_factory=dict)
+    rounds: dict[str, RoundWindow] = field(default_factory=dict)
 
-    def add(self, round_: Round) -> Round:
+    def add(self, round_: RoundWindow) -> RoundWindow:
         """Register a round. Refuses a duplicate id and a second open round on one task.
 
         The task rule is the one that matters. Two open rounds over the same challenge means
@@ -1211,7 +1235,7 @@ class Registry:
         opened_at: float,
         deadline: float,
         contract: Any = None,
-    ) -> Round:
+    ) -> RoundWindow:
         """`open_round` plus registration, which is the ordinary path."""
         return self.add(
             open_round(
@@ -1223,18 +1247,18 @@ class Registry:
             )
         )
 
-    def get(self, round_id: str) -> Round:
+    def get(self, round_id: str) -> RoundWindow:
         try:
             return self.rounds[round_id]
         except KeyError:
             raise RoundError(f"no round {round_id!r} is registered") from None
 
-    def open_for_task(self, task_id: str) -> Round | None:
+    def open_for_task(self, task_id: str) -> RoundWindow | None:
         """The open round over this task, if there is one."""
         return next((r for r in self.rounds.values() if r.task_id == task_id and r.state == OPEN), None)
 
     def snapshot(self) -> dict[str, Any]:
-        """Every round as a record. Safe to publish at any state -- see `Round.to_record`."""
+        """Every round as a record. Safe to publish at any state -- see `RoundWindow.to_record`."""
         return {
             "schema_version": SCHEMA_VERSION,
             "rounds": [self.rounds[k].to_record() for k in sorted(self.rounds)],
@@ -1256,7 +1280,7 @@ class Registry:
     def read_snapshot(path: Any) -> dict[str, Any]:
         """Read a snapshot back for inspection. Deliberately does not rehydrate live rounds.
 
-        A `Round` read from disk would be a state machine whose history is a claim in a file,
+        A `RoundWindow` read from disk would be a state machine whose history is a claim in a file,
         and the first use of it is the dangerous one: a validator that crashed mid-round
         reloads, gets a writable `OPEN` round back, and reopens a window that had already
         closed -- admitting submissions from miners who watched the freeze happen. Resuming a
@@ -1289,7 +1313,7 @@ __all__ = [
     "Receipt",
     "Registry",
     "Reveal",
-    "Round",
+    "RoundWindow",
     "RoundError",
     "RoundStateError",
     "ScoreLeakError",

@@ -44,7 +44,7 @@ from hermes.round import (
     PUBLIC_VIEW_FIELDS,
     RECEIPT_FIELDS,
     SETTLED,
-    Round,
+    RoundWindow,
     ScoreLeakError,
     refuse_withheld_body,
     screen_public_payload,
@@ -54,11 +54,11 @@ from hermes.round import (
 # logic with no storage of its own, and because the store a real deployment wants -- a file, a
 # database, a git-tracked JSON directory -- is a deployment decision rather than an API one.
 # Swapping it is one assignment; baking a database in here would not be.
-ROUNDS: dict[str, Round] = {}
+ROUNDS: dict[str, RoundWindow] = {}
 
 # Opened commitments, keyed by round_id, published by whatever settles the round.
 #
-# The API does NOT hold the master salt, and this dict is why. `Round.reveal` takes the master
+# The API does NOT hold the master salt, and this dict is why. `RoundWindow.reveal` takes the master
 # and derives the per-task salt from it, so calling it here would put the secret that seals
 # every unspent task in the corpus inside the process that answers untrusted requests. Pyright
 # caught the first version doing exactly that -- it flagged the missing argument, and the honest
@@ -89,7 +89,7 @@ def _screened_body(payload: dict[str, Any], *, where: str) -> dict[str, Any]:
     """Withheld-body refusal only, for payloads `hermes.round` has already screened.
 
     The distinction is not a weakening, and getting it wrong is how this file would have
-    shipped broken. `Round.public_view` and `Round.to_record` build their own payloads and screen
+    shipped broken. `RoundWindow.public_view` and `RoundWindow.to_record` build their own payloads and screen
     the parts that need it -- `public_view` refuses a withheld body in the challenge packet and
     withholds `verdicts` entirely until GRADED; `to_record` screens its ledger extras against
     `LEDGER_FIELDS` and each receipt against `RECEIPT_FIELDS`.
@@ -111,7 +111,7 @@ def _screened_body(payload: dict[str, Any], *, where: str) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"refused to publish: {exc}") from exc
 
 
-def _round_or_404(round_id: str) -> Round:
+def _round_or_404(round_id: str) -> RoundWindow:
     found = ROUNDS.get(round_id)
     if found is None:
         raise HTTPException(status_code=404, detail=f"no round {round_id!r} on this validator")
@@ -120,7 +120,7 @@ def _round_or_404(round_id: str) -> Round:
 
 app = FastAPI(
     title="Spark-Hermes validator",
-    summary="Round state and audit records. Submissions arrive as GitHub pull requests.",
+    summary="RoundWindow state and audit records. Submissions arrive as GitHub pull requests.",
 )
 
 

@@ -23,9 +23,9 @@ from hermes.round import (
     FreezeToken,
     Receipt,
     Registry,
-    Round,
     RoundError,
     RoundStateError,
+    RoundWindow,
     ScoreLeakError,
     Verdict,
     open_round,
@@ -668,4 +668,53 @@ def test_the_snapshot_does_not_hand_back_a_writable_round(tmp_path):
     reg.open_round(_challenge("t-a"), round_id="r-1", opened_at=1000.0, deadline=2000.0)
     loaded = Registry.read_snapshot(reg.save(tmp_path / "snapshot.json"))
     assert isinstance(loaded, dict)
-    assert not any(isinstance(v, Round) for v in loaded["rounds"])
+    assert not any(isinstance(v, RoundWindow) for v in loaded["rounds"])
+
+
+# --- one Round per axis -----------------------------------------------------------------------
+
+
+def test_only_one_module_in_hermes_exports_a_class_named_round():
+    """Both modules had a class called `Round` and neither referenced the other, so
+    `from hermes.round import Round` and `from hermes.seed import Round` were
+    indistinguishable at a call site -- while only `seed.Round` was wired into the live
+    submission gate. A reader had no way to tell which was authoritative.
+
+    They are different axes and both are needed: seed decides WHO WORKS ON WHAT (states track
+    seed visibility), the window decides WHAT THE VALIDATOR ACCEPTS AND PUBLISHES. The window
+    is now `RoundWindow`, which is the word its own module docstring already used.
+    """
+    import importlib
+    import inspect
+    import pkgutil
+
+    import hermes
+
+    exporters = []
+    for module in pkgutil.iter_modules(hermes.__path__):
+        try:
+            mod = importlib.import_module(f"hermes.{module.name}")
+        except Exception:
+            continue  # an optional dependency, not this test's business
+        found = getattr(mod, "Round", None)
+        if inspect.isclass(found) and found.__module__ == mod.__name__:
+            exporters.append(mod.__name__)
+
+    assert exporters == ["hermes.seed"], (
+        f"more than one module in hermes/ defines a class named Round: {exporters}. "
+        "Two same-named round classes with no reference between them is how a call site ends up "
+        "using the one that is not wired to the gate."
+    )
+
+
+def test_each_round_module_points_at_the_other():
+    """The rename removes the collision; the cross-reference is what stops someone
+    reintroducing it because they did not know the other axis existed."""
+    from pathlib import Path
+
+    round_src = Path("hermes/round.py").read_text(encoding="utf-8")
+    seed_src = Path("hermes/seed.py").read_text(encoding="utf-8")
+    assert "hermes.seed.Round" in round_src
+    assert "hermes.round.RoundWindow" in seed_src
+    # And it states plainly what is NOT wired, so the gap is not mistaken for done.
+    assert "is not done" in round_src

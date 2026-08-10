@@ -1,5 +1,11 @@
 """Validator seeding: deciding who works on what, so two miners do not do one task twice.
 
+`Round` here is the ASSIGNMENT axis: its states -- committed, open, closed -- describe when the
+seed is visible and therefore when the assignment is computable. The submission window is a
+different thing and lives in `hermes.round.RoundWindow`, whose states describe what the
+validator will accept and publish. Both were once called `Round`; see that module for why the
+distinction matters and what still is not wired between them.
+
 A network of miners generating rollouts has an obvious failure that costs nothing to
 create and everything to detect later: two miners pick the same task, run the same three
 teachers, and submit two datasets whose rows are near-duplicates. The corpus looks twice
