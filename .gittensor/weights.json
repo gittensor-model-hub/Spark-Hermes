@@ -3,7 +3,7 @@
   "model": "quality-only",
   "scoring": "Each merged PR scores fixed_base_score (1.0) x its quality tier label. Training-track eval:* tiers pay 2x the dataset:* tier at the same letter (XS/S/M/L/XL). BASELINE (first verified checkpoint on a new student/phase) pays 2.0. A verified quality improvement is scored the same wherever it lands (teacher / recipes / eval) - there is no per-subsystem emission budget.",
   "label_multipliers": {
-    "_comment": "Live values in gittensor master_repositories.json (gittensor-model-hub/SparkDistill-Hermes). Payout = fixed_base_score (1.0) x multiplier x time_decay.",
+    "_comment": "Live values in gittensor master_repositories.json (gittensor-model-hub/Spark-Hermes). Payout = fixed_base_score (1.0) x multiplier x time_decay.",
     "eval:XL": 8.0,
     "eval:L": 5.0,
     "eval:M": 3.0,

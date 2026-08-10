@@ -1,7 +1,12 @@
 # TritonBench: Qwen3.5 base models vs. our fine-tuned 4B
 
+> Numbered PR and issue references below are historical and point at the pre-rename
+> repository, which is now a private archive (`Spark-Hermes-3.8-27B`). They are kept as
+> plain text rather than links: the public repository's numbering is unrelated, so
+> linking them would produce citations that resolve to the wrong thing.
+
 **Audience:** anyone asking whether SparkDistill's training-track fine-tuning is worth it against just running a bigger stock model.
-**Scope:** an ad-hoc, non-training-track TritonBench comparison of two off-the-shelf Qwen3.5 checkpoints against our fine-tuned 4B recipe already recorded on `main` (PR [#301](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/301)).
+**Scope:** an ad-hoc, non-training-track TritonBench comparison of two off-the-shelf Qwen3.5 checkpoints against our fine-tuned 4B recipe already recorded on `main` (PR #301).
 **Date:** 2026-07-29.
 
 ---
@@ -117,7 +122,7 @@ Nothing from this comparison is written to `runs/` — that directory is reserve
 
 ## Related work landed this session
 
-- [#305](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/305) — training-track auto-merge `contents: write` fix
-- [#307](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/307) — attestation freshness guard
-- [#315](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/315) — fixed the two `eval.triton_bench` / pinned-vLLM startup bugs this comparison's base-4B row exercises ([#303](https://github.com/gittensor-model-hub/SparkDistill-Hermes/issues/303))
-- [#316](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/316) — ledger recording for auto-merged PRs
+- #305 — training-track auto-merge `contents: write` fix
+- #307 — attestation freshness guard
+- #315 — fixed the two `eval.triton_bench` / pinned-vLLM startup bugs this comparison's base-4B row exercises (#303)
+- #316 — ledger recording for auto-merged PRs

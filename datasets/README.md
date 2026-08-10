@@ -60,7 +60,7 @@ export SPARKPROOF_TSM_REPORT_PATH=/sys/kernel/config/tsm/report/sparkproof
 ```
 
 `gpu_attestation.json` then includes `tdx` with `quote_b64` and `report_data` bound to
-the dataset nonce. Bundles merged **before** [#122](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/122)
+the dataset nonce. Bundles merged **before** #122
 lack a `tdx` key and remain grandfathered; republish with TDX for strongest trust.
 
 ## What the validator does
@@ -199,6 +199,12 @@ build private mixes for competition PRs — train on the canonical snapshot abov
 ## Verified smoke test (2026-07-11)
 
 End-to-end run on a Blackwell RTX PRO 6000 CC VM (`ssh -p 20004 ubuntu@<host>`):
+
+> **Maintainer-only flow.** The vendored TritonBench tree this path depends on was never part
+> of the public `Spark-Hermes` repository. It lives in the pre-rename archive
+> (`Spark-Hermes-3.8-27B`, private) at `archive/tritonbench`, so the commands below are
+> reproducible only with access to that archive. Directory names are kept as written because
+> they match the maintainer checkout layout.
 
 ```bash
 # SparkProof on the CC VM (sibling SparkDistill required for decontamination + SFT)

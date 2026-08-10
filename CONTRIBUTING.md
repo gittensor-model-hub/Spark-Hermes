@@ -1,6 +1,6 @@
-# Contributing to SparkDistill
+# Contributing to Spark-Hermes
 
-SparkDistill is the model-quality arm of **SN74 on [Gittensor](https://gittensor.io/)**, the same subnet that funds
+Spark-Hermes is the model-quality arm of **SN74 on [Gittensor](https://gittensor.io/)**, the same subnet that funds
 [`sparkinfer`](https://github.com/gittensor-ai-lab/sparkinfer). Contributions are rewarded
 for **real, verified distillation quality improvements** — not benchmark gaming. This guide
 is how to make a contribution that counts.
@@ -24,7 +24,7 @@ is built through **SN74 on [Gittensor](https://gittensor.io/)**.
 - **Quality first, not just loss.** A recipe change that lowers training loss but degrades
   held-out benchmark quality is worth zero. Every change is gated against a frozen eval
   basket (see *Quality gate* below).
-- **Reasoning, not just answers.** SparkDistill's goal is reasoning distillation: a
+- **Reasoning, not just answers.** Spark-Hermes's goal is reasoning distillation: a
   trajectory or recipe change should be judged on whether it makes the student better at
   *reasoning through* a problem, not just at matching a final answer — that's why the
   benchmark basket includes hard-reasoning tasks (AIME, GPQA-Diamond) alongside the

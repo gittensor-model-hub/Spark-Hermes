@@ -1,7 +1,7 @@
-# SparkDistill Miner Guide
+# Spark-Hermes Miner Guide
 
 This guide is for SN74 miners and contributors who want to earn rewards by improving
-SparkDistill. The rule is simple: rewards come from verified improvements, not from
+Spark-Hermes. The rule is simple: rewards come from verified improvements, not from
 claims, formatting, or duplicated ideas.
 
 > **Scope.** This guide covers the **live** SN74 mining tracks, which are unchanged: the
@@ -30,7 +30,7 @@ data.
 
 Live payout is `fixed_base_score (1.0) × label_multiplier × time_decay` from
 [`master_repositories.json`](https://github.com/entrius/gittensor/blob/test/gittensor/validator/weights/master_repositories.json)
-(`gittensor-model-hub/SparkDistill-Hermes`). **Training-track `eval:*` tiers pay 2× the
+(`gittensor-model-hub/Spark-Hermes`). **Training-track `eval:*` tiers pay 2× the
 `dataset:*` tier at the same letter** — a verified frontier win is weighted higher than
 adding training rows at the same size band:
 
@@ -119,7 +119,7 @@ Pin the snapshot by comparing your file's sha256 to
 The lightweight `accepted_task_ids.json` on the same HF repo is useful for
 pre-generation filtering so you do not burn GPU on tasks already accepted.
 
-SparkDistill sizes rewards from canonical-mix `rows_selected` (fair label), so
+Spark-Hermes sizes rewards from canonical-mix `rows_selected` (fair label), so
 miners should treat the snapshot as the source of truth for expected credit.
 
 **Before you generate on a CC VM:** decontamination needs the TritonBench problem set. It
@@ -146,7 +146,7 @@ Without TDX, production verification records `"tdx": null` and rejects the bundl
 **No — the current dataset track accepts verified training trajectories only.** There is
 no miner evaluation-dataset track, registry schema, reward label, or merge path. A miner
 can technically upload any files to a personal Hugging Face repository, but publishing a
-repository does not make it an accepted SparkDistill dataset. A registry submission
+repository does not make it an accepted Spark-Hermes dataset. A registry submission
 containing eval material is expected to fail the release gate or production verification,
 receive `dataset:REJECT`, and are closed automatically by CI. Sub-threshold valid
 proofs (`dataset:none`) are also closed automatically.
@@ -196,7 +196,7 @@ filename or description:
    not enough to bypass decontamination.
 6. **Required eval corpus.** Production decontamination aborts if the protected
    TritonBench corpus is unavailable; it does not silently continue without checking.
-7. **Validator replay.** SparkDistill downloads `proof/` from Hugging Face, checks the
+7. **Validator replay.** Spark-Hermes downloads `proof/` from Hugging Face, checks the
    release-gate result and pinned trajectory hash, and re-runs SparkProof production
    verification before the registry PR can merge.
 
@@ -552,6 +552,12 @@ Merged proof-of-training runs are appended to [`runs/ledger.jsonl`](../runs/ledg
 ## Local Checklist Before Opening A PR
 
 ### Triton / SparkProof path (Blackwell or Hopper CC VM — recommended)
+
+> **Maintainer-only flow.** The vendored TritonBench tree this path depends on was never part
+> of the public `Spark-Hermes` repository. It lives in the pre-rename archive
+> (`Spark-Hermes-3.8-27B`, private) at `archive/tritonbench`, so the commands below are
+> reproducible only with access to that archive. Directory names are kept as written because
+> they match the maintainer checkout layout.
 
 Run from **SparkProof** on the CC VM (sibling **SparkDistill** repo required — including
 the gitignored `SparkDistill/tritonbench/` tree for decontamination). Works on Blackwell

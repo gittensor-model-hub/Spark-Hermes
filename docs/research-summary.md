@@ -1,5 +1,10 @@
 # SparkDistill & SparkProof — Research Summary
 
+> Numbered PR and issue references below are historical and point at the pre-rename
+> repository, which is now a private archive (`Spark-Hermes-3.8-27B`). They are kept as
+> plain text rather than links: the public repository's numbering is unrelated, so
+> linking them would produce citations that resolve to the wrong thing.
+
 **Audience:** anyone joining SN74 / Gittensor who needs the full picture in plain language.  
 **Scope:** what we build, how trust works, how KernelLLM / TritonForge / agent traces generate data, and a practical recipe for the **best SN74-verifiable dataset**.  
 **Date:** July 2026. **Last reviewed for staleness:** 2026-07-29 (§4, §7, §8, §18, Key PRs updated).
@@ -49,7 +54,7 @@ Think of two cooperating systems:
 | Repo | Job in one sentence |
 |---|---|
 | **[SparkProof](https://github.com/gittensor-model-hub/SparkProof)** | Generate Triton training **trajectories** and **prove** every kept row ran on a real confidential-compute GPU. |
-| **[SparkDistill](https://github.com/gittensor-model-hub/SparkDistill-Hermes)** | Train **student** models on that data, **score** them against a public frontier, and pay SN74 for verified wins. |
+| **[SparkDistill](https://github.com/gittensor-model-hub/Spark-Hermes)** | Train **student** models on that data, **score** them against a public frontier, and pay SN74 for verified wins. |
 
 **SparkProof answers:** “Is this training row real and policy-clean?”  
 **SparkDistill answers:** “Did training actually make a better model?”
@@ -157,10 +162,10 @@ Both frontiers are still at their original baselines as of this update — no ve
 
 **Two mechanical bugs found and fixed, both in the merge → ledger → frontier path itself (not the scores):**
 
-1. *Verified training PRs never auto-merged.* The dataset-track gate has always auto-merged a `dataset:xs`+ PR; the training-track gate never grew the equivalent — a fully verified `training:valid` + real `eval:*` PR just sat open until a human merged it by hand. Fixed in [#289](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/289): `gate_training_pr` now reports `merge_eligible`, and CI merges on pass, mirroring the dataset side.
-2. *The post-merge ledger write couldn't land.* `training_track_ledger.yml` raw-pushed the ledger/frontier update straight to `main`, which a branch-protection ruleset rejects (`GH013: changes must be made through a pull request`) — so the frontier was **never actually crownable by automation**, even for a fully verified win. Fixed in [#290](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/290): the writer now falls back to a squash-merge PR when the direct push is blocked (mirroring how `datasets/canonical.json` refreshes already worked), and a `workflow_dispatch(pr_number)` input lets a specific merged PR be (re)crowned by hand.
+1. *Verified training PRs never auto-merged.* The dataset-track gate has always auto-merged a `dataset:xs`+ PR; the training-track gate never grew the equivalent — a fully verified `training:valid` + real `eval:*` PR just sat open until a human merged it by hand. Fixed in #289: `gate_training_pr` now reports `merge_eligible`, and CI merges on pass, mirroring the dataset side.
+2. *The post-merge ledger write couldn't land.* `training_track_ledger.yml` raw-pushed the ledger/frontier update straight to `main`, which a branch-protection ruleset rejects (`GH013: changes must be made through a pull request`) — so the frontier was **never actually crownable by automation**, even for a fully verified win. Fixed in #290: the writer now falls back to a squash-merge PR when the direct push is blocked (mirroring how `datasets/canonical.json` refreshes already worked), and a `workflow_dispatch(pr_number)` input lets a specific merged PR be (re)crowned by hand.
 
-**Why this is a good "is the frontier honest" case study:** the two bugs combined to nearly cause a *false* rejection. [#288](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/288) (`magicrails`, `eval:XS`, the first candidate improvement over the Blackwell baseline) passed the gate with a fresh, valid GPU attestation — but because auto-merge didn't exist yet, the PR sat open for ~2 hours before a maintainer merged it manually, by which time the attestation's 1-hour validity window had expired. The post-merge re-verification correctly fail-closed to `eval:REJECT` (`attestation_integrity_failed: JWKS signature has expired`) rather than crowning an unverifiable claim — the right outcome, but it's also *why* the Blackwell frontier is still `0.428` today rather than reflecting that improvement. With #289 shipped, future wins merge within seconds of the gate passing, so the attestation is still fresh when the ledger re-checks it.
+**Why this is a good "is the frontier honest" case study:** the two bugs combined to nearly cause a *false* rejection. #288 (`magicrails`, `eval:XS`, the first candidate improvement over the Blackwell baseline) passed the gate with a fresh, valid GPU attestation — but because auto-merge didn't exist yet, the PR sat open for ~2 hours before a maintainer merged it manually, by which time the attestation's 1-hour validity window had expired. The post-merge re-verification correctly fail-closed to `eval:REJECT` (`attestation_integrity_failed: JWKS signature has expired`) rather than crowning an unverifiable claim — the right outcome, but it's also *why* the Blackwell frontier is still `0.428` today rather than reflecting that improvement. With #289 shipped, future wins merge within seconds of the gate passing, so the attestation is still fresh when the ledger re-checks it.
 
 **Rule of thumb:** if `ledger.jsonl` has a BASELINE/win and `frontiers.json` is empty (or stale) for that arch, first check `runs/frontiers.json` was actually updated by the ledger *workflow run*, not just computed — a green gate does not by itself mean the frontier moved.
 
@@ -179,7 +184,7 @@ Both frontiers are still at their original baselines as of this update — no ve
 
 - Headline metric is **`avg_composite`**, not GSM8K-style exact match — and only **35%** of it (`correctness`) is execution-gated at all. The other **65%** (`api_modernity`, `perf_awareness`, `completeness`, `code_quality`) is static keyword/AST matching on the generated code string — e.g. `perf_awareness` scores a point for the literal substring `"blackwell"` appearing in the code (`tritonbench/core/evaluator.py`). A kernel that never runs can still land ~0.4–0.65 composite by looking right.
 - **Correctness is self-graded, not independently verified.** There is no held-out reference kernel: the harness runs the model's own script and checks whether the model's *own* `torch.allclose` assertion (which it also wrote, against inputs it also picked) raised. `exec_pass=True` + the substring `"torch.allclose"` in the code = full correctness credit — a model can pick loose tolerances or inputs that never exercise edge cases (e.g. sizes that never trigger boundary masking) and still score full marks.
-- **Only 3 problems exist today** (`level1_basic/vector_add`, `level1_basic/softmax`, `bugfix/wrong_mask`) — the two most generic Triton tutorial kernels on earth. `configs/default.yaml` requests `levels: [1,2,3,4]`, but `level2`/`level3`/`level4` directories don't exist, so a "full" run silently collapses to the same 3-problem "quick" run. **Fixed:** the harness now reports this honestly (`eval.triton_bench.level_coverage` — requested vs. covered vs. silently-missing levels, with an opt-in `SPARKDISTILL_TRITONBENCH_STRICT_LEVELS=1` hard-fail), [#282](https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/282). **Not fixed:** actually populating levels 2–4 with held-out problems and adding independent reference kernels (closing the self-grading gap above) is a real, valuable, but large maintainer-owned project — tracked and scoped in [issue #227](https://github.com/gittensor-model-hub/SparkDistill-Hermes/issues/227), closed as roadmap rather than merged (it changes the reward surface for every miner and needs a design pass, not a drive-by fix).
+- **Only 3 problems exist today** (`level1_basic/vector_add`, `level1_basic/softmax`, `bugfix/wrong_mask`) — the two most generic Triton tutorial kernels on earth. `configs/default.yaml` requests `levels: [1,2,3,4]`, but `level2`/`level3`/`level4` directories don't exist, so a "full" run silently collapses to the same 3-problem "quick" run. **Fixed:** the harness now reports this honestly (`eval.triton_bench.level_coverage` — requested vs. covered vs. silently-missing levels, with an opt-in `SPARKDISTILL_TRITONBENCH_STRICT_LEVELS=1` hard-fail), #282. **Not fixed:** actually populating levels 2–4 with held-out problems and adding independent reference kernels (closing the self-grading gap above) is a real, valuable, but large maintainer-owned project — tracked and scoped in issue #227, closed as roadmap rather than merged (it changes the reward surface for every miner and needs a design pass, not a drive-by fix).
 - **Hopper is structurally unbeatable on execution today**, independent of the above: `tritonbench/bench_config.py`'s `require_blackwell_gpu` hard-rejects any non-Blackwell GPU (`sm_9x` and earlier) before a generated kernel can even run — so `exec_pass`/`correctness` are permanently **0** for every Hopper submission, no matter how good the kernel is. Still present as of this update; not yet fixed (it's inside the vendored `tritonbench/` tree, which per `VENDORED.md` must stay byte-identical between evaluators and miners for decontamination — a fix needs care, not a quick patch).
 - Re-verify allows **~5 percentage points** tolerance (vLLM / server drift).
 
@@ -769,10 +774,10 @@ No private dashboard required — the **repo is the dashboard**.
 
 ### Ours
 
-- SparkDistill: https://github.com/gittensor-model-hub/SparkDistill-Hermes  
+- SparkDistill: https://github.com/gittensor-model-hub/Spark-Hermes  
 - SparkProof: https://github.com/gittensor-model-hub/SparkProof  
-- Frontiers / ledger: https://github.com/gittensor-model-hub/SparkDistill-Hermes/tree/main/runs  
-- Dataset registry: https://github.com/gittensor-model-hub/SparkDistill-Hermes/blob/main/datasets/registry.jsonl  
+- Frontiers / ledger: https://github.com/gittensor-model-hub/Spark-Hermes/tree/main/runs  
+- Dataset registry: https://github.com/gittensor-model-hub/Spark-Hermes/blob/main/datasets/registry.jsonl  
 - External seeds guide: `SparkProof/docs/EXTERNAL_SEEDS.md`  
 - Miner guide: `SparkProof/docs/MINER_GUIDE.md`, `SparkDistill/docs/miner-guide.md`  
 - This document: `SparkDistill/docs/research-summary.md`  
@@ -790,19 +795,19 @@ No private dashboard required — the **repo is the dashboard**.
 
 ### Key PRs (recent, as of this update)
 
-- SparkDistill TritonBench honest level coverage: https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/282  
-- SparkDistill Qwen3.5 training hardening (`sample_packing` skew, missing `Python.h`): https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/284 , https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/286  
-- SparkDistill training-track auto-merge parity with the dataset gate: https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/289  
-- SparkDistill ledger publish via PR fallback (branch-protection fix): https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/290  
-- SparkDistill community-PR auto-close policy: https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/295 , https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/296  
-- SparkDistill reward-tier bypass fixes (`gpu_architecture` spoof, forged `triton` composite): https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/298  
+- SparkDistill TritonBench honest level coverage: archived PR #282  
+- SparkDistill Qwen3.5 training hardening (`sample_packing` skew, missing `Python.h`): archived PR #284 , archived PR #286  
+- SparkDistill training-track auto-merge parity with the dataset gate: archived PR #289  
+- SparkDistill ledger publish via PR fallback (branch-protection fix): archived PR #290  
+- SparkDistill community-PR auto-close policy: archived PR #295 , archived PR #296  
+- SparkDistill reward-tier bypass fixes (`gpu_architecture` spoof, forged `triton` composite): archived PR #298  
 - Gittensor live weights: double training-track multipliers over dataset track (open, unmerged): https://github.com/entrius/gittensor/pull/1660  
 
 ### Earlier key PRs
 
 - SparkProof multi-turn episodes: https://github.com/gittensor-model-hub/SparkProof/pull/34  
 - SparkProof external task seeds: https://github.com/gittensor-model-hub/SparkProof/pull/35  
-- SparkDistill frontiers on merge: https://github.com/gittensor-model-hub/SparkDistill-Hermes/pull/201  
+- SparkDistill frontiers on merge: archived PR #201  
 
 ---
 
