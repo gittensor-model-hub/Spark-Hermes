@@ -23,6 +23,7 @@ nobody knows the state of, and `overfit_rate` depends on it.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import sys
 import tempfile
@@ -33,12 +34,93 @@ from hermesbench.tasks import Task, load_suite
 from hermesbench.verify import setup_task, verify_hidden, verify_task
 from hermesbench.withheld import WITHHELD_ROOT_ENV, WITHHELD_SALT_ENV, overlay, unscorable
 
+# Interpreters a grader might invoke. Only these are reported -- see `missing_commands` for why
+# the general "find every command" version was abandoned. `python` is the one that has actually
+# bitten: the Dockerfile provides the alias, a stock host does not, and 14 of 19 graders already
+# resolve it defensively while two did not and scored 0/10 on the first real baseline.
+INTERPRETERS = ("python", "python2", "node", "ruby", "perl", "bash", "zsh")
+
+
+def missing_commands(script: str) -> list[str]:
+    """Executables a script invokes that do not exist on this machine.
+
+    This exists because the fresh-workspace assertion below is structurally blind to a
+    verifier that cannot run at all. `verify-speedup-claim` read
+
+        test -f winner.txt && python - <<'EOF'
+
+    and on a clean workspace the `test` failed first, so the command exited 1 -- which is
+    exactly what this module asserts a verifier must do. The short-circuit satisfied the check
+    while the grader was incapable of ever PASSING: the moment an agent created `winner.txt`
+    the interpreter lookup ran and exited 127. It scored 0/10 on the first real baseline and
+    read as a capability gap in the model.
+
+    Proving a verifier CAN pass would need a known-good solution, and tasks here do not ship
+    one. Proving its interpreter exists is weaker and cheap, and it catches the class that
+    actually bit: an absent interpreter fails the verifier whatever the workspace contains, so
+    no state an agent could reach would reveal it.
+
+    Deliberately narrow: it only reports names in `INTERPRETERS`, not every command it can find.
+    The first attempt tried to identify all commands and produced false positives immediately --
+    `PYTHONPATH=deps python3 -c "` opens a multi-line double-quoted Python string, so a
+    line-oriented reader treats `import`, `major` and `raise` as commands. Parsing shell properly
+    is not the goal here, and a lint that cries wolf gets switched off, taking the real finding
+    with it.
+
+    Restricting the report to known interpreter names removes that whole class at once, because
+    `import` is not an interpreter. It gives up on catching an absent `jq` or `zstd` -- those
+    fail loudly and immediately when a verifier runs, unlike an interpreter alias, which fails
+    identically to a model that cannot do the task. That is the asymmetry worth spending
+    precision on.
+    """
+    # Drop heredoc bodies before looking for commands.
+    lines: list[str] = []
+    in_heredoc, terminator = False, ""
+    for line in script.splitlines():
+        if in_heredoc:
+            if line.strip() == terminator:
+                in_heredoc = False
+            continue
+        opener = re.search(r"<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?", line)
+        if opener:
+            in_heredoc, terminator = True, opener.group(1)
+        lines.append(line)
+
+    # `command -v python` is the RESOLVED form -- it tests for the interpreter rather than
+    # invoking it, and flagging it would fail exactly the graders that have been repaired.
+    text = re.sub(r"command\s+-v\s+\S+", "", "\n".join(lines))
+
+    missing: list[str] = []
+    for name in INTERPRETERS:
+        # Command position: line start, or after a shell operator, or after a VAR=value prefix.
+        # Followed by whitespace then something, so a bare mention in prose does not match.
+        if not re.search(rf"(?:^|[;&|(]\s*|\s)(?:[A-Z_]+=\S*\s+)?{re.escape(name)}\s+\S", text, re.M):
+            continue
+        if shutil.which(name) is None and name not in missing:
+            missing.append(name)
+    return missing
+
 
 def check_task(task: Task, root: Path) -> list[str]:
     """Run setup and the verifiers against an unsolved workspace. Returns problems."""
     problems: list[str] = []
     workspace = root / task.task_id
     workspace.mkdir(parents=True, exist_ok=True)
+
+    # Before running anything. A verifier that invokes a command this machine does not have
+    # fails for a reason no workspace state can reveal, and the fresh-workspace assertion below
+    # would still pass -- which is exactly how an ungradeable verifier reached a live baseline.
+    for label, script in (("published", task.verify), ("withheld", task.hidden_verify)):
+        if not script.strip():
+            continue
+        absent = missing_commands(script)
+        if absent:
+            problems.append(
+                f"{label} verifier invokes {absent}, which do not exist here; it can never pass on "
+                "this machine, and a task whose grader cannot run scores 0 and reads as a capability "
+                'gap in the model. Resolve the interpreter -- PY="$(command -v python3 || command -v '
+                'python)" -- or install the tool.'
+            )
 
     setup = setup_task(task, workspace)
     if setup is not None and not setup.passed:
