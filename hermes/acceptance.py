@@ -34,9 +34,36 @@ reduction this often:
        30%                   30.1%                       21
 
 **The spread is unknown until a baseline run exists**, so a fixed threshold cannot be
-calibrated yet. This gate therefore does not trust the constant: it compares the margin
-against the spread it actually observed, and refuses when the spread swamps it. A margin
-that survives that is real whatever the constant happens to be.
+calibrated on its own. This gate therefore does not trust the constant: it asks whether the
+margin survives the noise in the data it was measured from.
+
+## How it asks that, and the version of this that was wrong
+
+The first implementation compared the margin against `2.0 x observed_spread`. The baseline run
+of 2026-08-10 showed why that is not merely conservative but broken. Measured per-task token
+spreads ranged from 7.3% to 98.3%, and at the top of that range the rule demanded a **196.6%**
+token reduction. A reduction cannot exceed 100%, so the gate was unsatisfiable: verified by
+running it, a candidate that cut tokens by 99.9% with a perfectly tight distribution was still
+refused. The noisiest tasks were permanently unwinnable, which is worse than a mis-set
+threshold -- it silently removed them from the competition.
+
+The statistical error is specific. Raw spread does not shrink with more repeats; the
+*uncertainty in the median* does, roughly as one over root n. So comparing a margin against
+raw spread conflates "this task is noisy" with "we cannot tell whether this margin is real",
+and the table above already says they are different things: at 30% variation, twenty-one
+paired repeats bring the false-positive rate under 5%. The code contradicted its own
+docstring.
+
+So the gate now bootstraps a confidence interval on the reduction itself and requires its
+**lower bound** to clear the bar. That has the properties the multiple was reaching for and
+the one it lacked:
+
+    high spread          -> wide interval -> low lower bound -> refused
+    more paired repeats  -> tighter interval -> lower bound rises -> satisfiable
+    reduction <= 100%    -> the requirement can never exceed what is achievable
+
+A refusal now means "not yet distinguishable from noise, run more repeats", which is
+actionable, rather than "impossible", which was not.
 
 ## Tool calls: in the vector, never a bounty
 
@@ -50,6 +77,7 @@ no separate purse.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from statistics import median
 from typing import Any
@@ -63,9 +91,12 @@ MIN_ATTEMPTS = 10
 MIN_TOKEN_REDUCTION = 0.20
 MIN_TOOL_CALL_REDUCTION = 2
 
-# A margin must clear this multiple of the observed run-to-run spread. Two, because at one
-# the margin sits inside the noise it is being compared against.
-SPREAD_MULTIPLE = 2.0
+# Bootstrap settings for the interval on the reduction. Seeded, because an acceptance decision
+# that differs between two runs over identical data is not an acceptance decision -- and the
+# whole point of this module is that the same evidence yields the same verdict for everyone.
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 20260810
+CONFIDENCE = 0.95
 
 
 class AcceptanceError(ValueError):
@@ -105,6 +136,49 @@ class Arm:
         if mid <= 0:
             return float("inf")
         return (max(self.tokens) - min(self.tokens)) / (2.0 * mid)
+
+
+def reduction_interval(
+    baseline_tokens: tuple[int, ...],
+    candidate_tokens: tuple[int, ...],
+    *,
+    confidence: float = CONFIDENCE,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float, float]:
+    """Percentile-bootstrap interval on the relative reduction in median tokens.
+
+    Resamples both arms with replacement and recomputes the reduction each time, so the
+    interval reflects the uncertainty in both medians rather than in the baseline alone.
+
+    Unlike a multiple of the raw spread, this tightens as attempts accumulate -- which is the
+    property that makes a refusal actionable. Bounded above by 1.0 by construction, because a
+    reduction is `(base - cand) / base` and no resample can make the candidate negative.
+
+    Seeded. Two people judging the same submission must reach the same verdict, and an
+    unseeded bootstrap would make acceptance a coin flip in the fourth decimal place.
+    """
+    if len(baseline_tokens) < 2 or len(candidate_tokens) < 2:
+        # One sample says nothing about its own variability. Returning a degenerate interval
+        # would let any margin through; returning this refuses until there are repeats.
+        return (-float("inf"), float("inf"))
+
+    rng = random.Random(seed)
+    base_n, cand_n = len(baseline_tokens), len(candidate_tokens)
+    draws: list[float] = []
+    for _ in range(resamples):
+        base = median([baseline_tokens[rng.randrange(base_n)] for _ in range(base_n)])
+        cand = median([candidate_tokens[rng.randrange(cand_n)] for _ in range(cand_n)])
+        if base <= 0:
+            continue
+        draws.append((base - cand) / base)
+    if not draws:
+        return (-float("inf"), float("inf"))
+    draws.sort()
+    tail = (1.0 - confidence) / 2.0
+    lo = draws[min(len(draws) - 1, int(tail * len(draws)))]
+    hi = draws[min(len(draws) - 1, int((1.0 - tail) * len(draws)))]
+    return (round(lo, 4), round(hi, 4))
 
 
 @dataclass(frozen=True)
@@ -185,18 +259,42 @@ def decide(
     tool_delta = int(median(baseline.tool_calls) - median(candidate.tool_calls))
 
     spread = max(baseline.token_spread, candidate.token_spread)
-    required = max(min_token_reduction, SPREAD_MULTIPLE * spread)
-    if reduction < required:
-        if required > min_token_reduction:
-            # The interesting refusal: the margin met the stated bar and lost to the noise.
+    if len(baseline.tokens) < 2 or len(candidate.tokens) < 2:
+        # Named separately from a wide interval. "One of these arms has a single measurement"
+        # and "the margin is inside the noise" call for different actions, and printing an
+        # infinite interval to describe the first invites a reader to think the data was noisy
+        # when in fact there was no second observation to be noisy about.
+        return Decision(
+            accepted=False,
+            reasons=(
+                f"one arm has too few token measurements to bound a reduction "
+                f"(baseline {len(baseline.tokens)}, candidate {len(candidate.tokens)}); a single "
+                "measurement carries no information about its own variability, so no interval "
+                "can be computed and any margin would be accepted on faith",
+            ),
+            token_reduction=round(reduction, 4),
+            tool_call_reduction=tool_delta,
+            true_rate_lower_bound=round(bound.low, 4),
+        )
+
+    low, high = reduction_interval(baseline.tokens, candidate.tokens)
+    if low < min_token_reduction:
+        if reduction >= min_token_reduction:
+            # The interesting refusal: the point estimate cleared the bar and the interval did
+            # not. Says what to DO about it, because at high spread the answer is more repeats
+            # rather than a bigger margin -- the interval narrows with n, the spread does not.
             reasons.append(
-                f"token reduction {reduction:.1%} meets the {min_token_reduction:.0%} bar but not the "
-                f"{required:.1%} the observed spread demands (run-to-run spread {spread:.1%}). Two draws "
-                "from one distribution clear a 20% gate about 15% of the time at that spread, so this "
-                "cannot be distinguished from noise. More paired repeats, or a bigger margin."
+                f"token reduction {reduction:.1%} clears the {min_token_reduction:.0%} bar but its 95% "
+                f"interval is [{low:.1%}, {high:.1%}], whose lower bound does not (run-to-run spread "
+                f"{spread:.1%}). On this evidence the margin cannot be distinguished from noise. The "
+                f"interval narrows as one over root n, so more paired repeats resolve it -- "
+                f"{len(candidate.tokens)} attempts here."
             )
         else:
-            reasons.append(f"token reduction {reduction:.1%} is below the {min_token_reduction:.0%} bar")
+            reasons.append(
+                f"token reduction {reduction:.1%} is below the {min_token_reduction:.0%} bar "
+                f"(95% interval [{low:.1%}, {high:.1%}])"
+            )
 
     if not reasons:
         return Decision(
@@ -269,7 +367,9 @@ __all__ = [
     "MIN_ATTEMPTS",
     "MIN_TOKEN_REDUCTION",
     "MIN_TOOL_CALL_REDUCTION",
-    "SPREAD_MULTIPLE",
+    "BOOTSTRAP_RESAMPLES",
+    "CONFIDENCE",
+    "reduction_interval",
     "AcceptanceError",
     "Arm",
     "Decision",

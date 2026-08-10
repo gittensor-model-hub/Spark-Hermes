@@ -2,7 +2,14 @@
 
 import pytest
 
-from hermes.acceptance import MIN_ATTEMPTS, AcceptanceError, Arm, decide, dominates
+from hermes.acceptance import (
+    MIN_ATTEMPTS,
+    MIN_TOKEN_REDUCTION,
+    AcceptanceError,
+    Arm,
+    decide,
+    dominates,
+)
 
 
 def _arm(passes, attempts, tokens, calls):
@@ -76,13 +83,15 @@ def test_a_reduction_below_the_stated_bar_is_refused():
 
 
 def test_a_reduction_that_meets_the_bar_but_loses_to_the_noise_is_refused():
-    """The interesting refusal. Two draws from one distribution clear a 20% gate about 15%
-    of the time at a 15% spread, so a 20% margin there is indistinguishable from nothing."""
+    """The interesting refusal: the point estimate clears the bar and the interval's lower
+    bound does not, so the margin cannot be told apart from sampling noise."""
     noisy_baseline = _arm(MIN_ATTEMPTS, MIN_ATTEMPTS, [7_000, 10_000, 13_000] * 4, [20] * 12)
     d = decide(candidate=_steady(MIN_ATTEMPTS, 8_000, 10), baseline=noisy_baseline)
     assert d.accepted is False
-    assert "the observed spread demands" in d.reasons[0]
     assert "cannot be distinguished from noise" in d.reasons[0]
+    # Says what to do about it. At high spread the answer is more repeats, not a bigger
+    # margin: the interval narrows with n, the raw spread does not.
+    assert "more paired repeats" in d.reasons[0]
 
 
 def test_a_margin_that_clears_the_spread_is_accepted():
@@ -92,12 +101,14 @@ def test_a_margin_that_clears_the_spread_is_accepted():
     assert d.token_reduction == 0.5
 
 
-def test_a_single_run_arm_has_infinite_spread_so_no_margin_can_clear_it():
-    """One run tells you nothing about its own variability, and a gate that accepted it
-    would be accepting an uncalibrated threshold."""
+def test_a_single_measurement_arm_cannot_bound_a_reduction():
+    """One run tells you nothing about its own variability. Reported as its own reason rather
+    than as an infinite interval: "there was no second observation" and "the data was noisy"
+    call for different actions, and the second misdescribes the first."""
     d = decide(candidate=_steady(MIN_ATTEMPTS, 1_000, 2), baseline=_arm(1, 1, [10_000], [20]))
     assert d.accepted is False
-    assert "observed spread demands" in d.reasons[0]
+    assert "too few token measurements" in d.reasons[0]
+    assert "no information about its own variability" in d.reasons[0]
 
 
 # --- tool calls are reported, never a purse ---------------------------------------------------
@@ -205,3 +216,67 @@ def test_an_arm_with_no_attempts_is_refused():
 def test_a_baseline_with_no_tokens_is_refused():
     with pytest.raises(AcceptanceError, match="nothing to improve on"):
         decide(candidate=_steady(MIN_ATTEMPTS, 1, 1), baseline=_steady(MIN_ATTEMPTS, 0, 5))
+
+
+# --- the gate must be satisfiable, which the spread multiple was not -------------------------
+
+
+def test_a_large_win_on_a_high_spread_task_is_no_longer_impossible():
+    """The regression this replaces. `max(0.20, 2.0 * spread)` demanded 196.6% of
+    migrate-and-keep-green, whose measured spread was 98.3% -- and a reduction cannot exceed
+    100%, so no candidate could ever clear it. Verified at the time: even a 99.9% reduction was
+    refused. The noisiest tasks were silently removed from the competition."""
+    noisy = tuple([61_798] * 4 + [1_200, 122_000] + [61_798] * 4)
+    baseline = Arm(passes=10, attempts=10, tokens=noisy, tool_calls=(24,) * 10)
+    assert baseline.token_spread > 0.9, "this fixture must reproduce the high-spread case"
+
+    candidate = Arm(passes=10, attempts=10, tokens=(30_000,) * 10, tool_calls=(10,) * 10)
+    d = decide(candidate=candidate, baseline=baseline)
+    assert d.accepted is True, d.reasons
+
+
+def test_the_required_margin_can_never_exceed_what_is_achievable():
+    """A reduction is bounded by 100%. Any rule that can demand more than that is not strict,
+    it is broken -- it refuses every possible submission while looking like a threshold."""
+    from hermes.acceptance import reduction_interval
+
+    noisy = tuple([61_798] * 4 + [1_200, 122_000] + [61_798] * 4)
+    low, high = reduction_interval(noisy, (1,) * 10)
+    assert high <= 1.0
+    assert low <= 1.0
+
+
+def test_two_draws_from_one_distribution_do_not_clear_the_bar():
+    """The property the gate exists for, and the one the multiple did achieve: no real
+    improvement must not read as one."""
+    from hermes.acceptance import reduction_interval
+
+    same = (52_000, 61_000, 70_000, 58_000, 66_000, 49_000, 73_000, 60_000, 55_000, 68_000)
+    other = (61_000, 52_000, 66_000, 70_000, 49_000, 58_000, 60_000, 73_000, 68_000, 55_000)
+    low, _ = reduction_interval(same, other)
+    assert low < MIN_TOKEN_REDUCTION
+
+
+def test_the_interval_narrows_as_attempts_accumulate():
+    """What makes a refusal actionable. The raw spread does not shrink with n; the uncertainty
+    in the median does, so "run more repeats" is a real remedy rather than a brush-off."""
+    from hermes.acceptance import reduction_interval
+
+    base_cycle = (52_000, 61_000, 70_000, 58_000, 66_000, 49_000, 73_000, 60_000, 55_000, 68_000)
+    cand_cycle = (36_000, 43_000, 49_000, 41_000, 46_000, 34_000, 51_000, 42_000, 39_000, 48_000)
+
+    def width(reps):
+        lo, hi = reduction_interval(base_cycle * reps, cand_cycle * reps)
+        return hi - lo
+
+    assert width(8) < width(1), "more paired attempts must tighten the interval"
+
+
+def test_the_interval_is_deterministic():
+    """Two people judging the same submission must reach the same verdict. An unseeded
+    bootstrap would make acceptance a coin flip in the fourth decimal place."""
+    from hermes.acceptance import reduction_interval
+
+    a = (52_000, 61_000, 70_000, 58_000, 66_000)
+    b = (36_000, 43_000, 49_000, 41_000, 46_000)
+    assert reduction_interval(a, b) == reduction_interval(a, b)

@@ -26,7 +26,7 @@ challenge that shipped the check would hand every miner the answer key on the wa
 
 ## What a challenge deliberately does not contain
 
-No acceptance thresholds. `MIN_TOKEN_REDUCTION` and the spread multiple in
+No acceptance thresholds. `MIN_TOKEN_REDUCTION` and the reduction interval in
 `hermes.acceptance` are uncalibrated until a real baseline exists -- the run that produces
 challenges is the same run that measures the spread. Baking a threshold into the packet
 would freeze a guess at exactly the moment the data to replace it arrives. The packet
