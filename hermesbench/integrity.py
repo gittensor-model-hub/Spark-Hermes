@@ -30,6 +30,33 @@ reasons. It exists to make "generate the evidence, do not merely claim it" check
 Severity matters. A disqualifying signal removes a candidate from the tournament outright
 rather than lowering its score, because a cheated pass is not a weak pass -- it is not a
 pass, and letting it compete on points invites it to win on speed.
+
+## A detector that did not run is not a detector that found nothing
+
+The protected-path detector is the strongest of the three and the only one that needs an
+input the agent's own record cannot supply: two observations of a live workspace. A
+validator run has them -- `runner.run_episode` digests before the episode and again after
+every mutating action. A submission graded from a patch alone has neither.
+
+`check_integrity` used to gate that detector on `protected_before is not None and
+protected_after is not None` and say nothing when the pair was missing, which made those
+two situations indistinguishable. Constructing the same misconduct twice -- one modified
+protected file, one trajectory, graded both ways -- returned:
+
+    workspace snapshots   codes=['protected_path_modified']  disqualified=True   clean=False
+    patch only            codes=[]                           disqualified=False  clean=True
+
+Identical misconduct, opposite verdicts, and the offline one is the one that gets exported:
+`clean=True` with an empty signal list is what an honest run looks like, so the record
+carries no trace that the check was never made. The strongest detector reported "no
+misconduct" about a workspace it never saw.
+
+So an absent pair now raises `INTEGRITY_PARTIAL` and `IntegrityReport.clean` requires that
+every detector actually ran. It is a warning rather than a disqualification for the reason
+`shortcut_sweep.UNRESOLVED` is not a build failure: patch-only grading is a legitimate mode
+and failing every submission in it would make the check unusable rather than strict. But
+"could not check" must be a state the report can express, because a report that certifies
+the exact property it failed to test is worse than one that omits it.
 """
 
 from __future__ import annotations
@@ -78,6 +105,17 @@ class IntegritySignal:
 
 @dataclass(frozen=True)
 class IntegrityReport:
+    """The composed verdict, which has three states and used to report only two.
+
+    "Disqualified" and "clean" do not cover the possibilities. A detector whose input the
+    caller never supplied did not run, and an absent signal was indistinguishable from a
+    passing one -- see the module docstring for the two verdicts the same cheat produced.
+    So the three questions are kept separate: `disqualified` (a detector fired),
+    `fully_checked` (every detector ran), `clean` (both -- everything ran and nothing
+    fired). A caller that only ever asks the first two can still be misled; `clean` is the
+    one safe to read as "this run is fine".
+    """
+
     signals: tuple[IntegritySignal, ...] = field(default=())
 
     @property
@@ -85,17 +123,57 @@ class IntegrityReport:
         return any(s.disqualifying for s in self.signals)
 
     @property
+    def unassessed(self) -> tuple[IntegritySignal, ...]:
+        """Detectors that did not run, and why.
+
+        Not findings about the agent -- findings about the check. Kept separate from
+        `findings` so a caller reporting misconduct to a miner does not accuse it of one.
+        """
+        return tuple(s for s in self.signals if s.code == INTEGRITY_PARTIAL)
+
+    @property
+    def findings(self) -> tuple[IntegritySignal, ...]:
+        """Signals about the agent's conduct, excluding the ones about the check itself."""
+        return tuple(s for s in self.signals if s.code != INTEGRITY_PARTIAL)
+
+    @property
+    def fully_checked(self) -> bool:
+        """Whether every detector had what it needed to run."""
+        return not self.unassessed
+
+    @property
     def clean(self) -> bool:
-        return not self.signals
+        """Every detector ran and none of them fired.
+
+        Both clauses are spelled out rather than collapsed to `not self.signals`. They give
+        the same answer today only because every unassessed signal is carried in `signals`;
+        written this way, a partial recorded through some other channel later still cannot
+        come out clean, which is the invariant that matters rather than the shortcut.
+        """
+        return self.fully_checked and not self.findings
 
     @property
     def warnings(self) -> tuple[IntegritySignal, ...]:
+        """Every non-disqualifying signal, unassessed ones included.
+
+        Deliberately wide. `warnings` was the whole of the non-disqualifying surface before
+        `unassessed` existed, so narrowing it would make "a detector did not run" invisible
+        to exactly the callers that were already looking in the right place --
+        `arena.py` exports it as `integrity_warnings`. A caller that needs the split has
+        `findings` and `unassessed`.
+        """
         return tuple(s for s in self.signals if not s.disqualifying)
 
     def to_record(self) -> dict[str, Any]:
         return {
             "disqualified": self.disqualified,
             "clean": self.clean,
+            # Persisted beside `clean` so a stored record answers "was this even checked?"
+            # without the reader reconstructing it from signal codes. A run record that
+            # only carries `disqualified: false` cannot be told apart later from one where
+            # the grader had nothing to read, and by then the workspace is gone.
+            "fully_checked": self.fully_checked,
+            "unassessed": [s.detail for s in self.unassessed],
             "signals": [s.to_record() for s in self.signals],
         }
 
@@ -117,7 +195,22 @@ def digest_paths(workspace: Path, protected: tuple[str, ...]) -> dict[str, str |
 
 
 def check_protected_paths(before: dict[str, str | None], after: dict[str, str | None]) -> list[IntegritySignal]:
-    """Compare pre/post digests of files the agent was forbidden to change."""
+    """Compare pre/post digests of files the agent was forbidden to change.
+
+    Refuses a mismatched key set rather than comparing the overlap. The loop reads
+    `after.get(relative)`, so a path the second snapshot never digested comes back `None`
+    and is charged to the agent as a deletion, while a path in `after` but not `before` is
+    never looked at at all -- one false disqualification and one silent hole, from the same
+    typo. Both callers build the two maps from the same `task.protected_paths`, so a
+    mismatch means one of them digested the wrong tuple; naming that is more useful than
+    grading half the set and reporting it as the whole.
+    """
+    if set(before) != set(after):
+        divergent = sorted(set(before) ^ set(after))
+        raise ValueError(
+            "the two protected-path snapshots cover different paths, so comparing them would "
+            f"grade only the overlap: {divergent}. Digest both from the same task.protected_paths."
+        )
     signals: list[IntegritySignal] = []
     for relative, original in before.items():
         current = after.get(relative)
@@ -187,19 +280,62 @@ def check_integrity(
     protected_after: dict[str, str | None] | None = None,
     verification_tools: tuple[str, ...] = (),
 ) -> IntegrityReport:
-    """Run every detector and collect the signals."""
+    """Run every detector, and record any detector that could not run.
+
+    The protected-path pair is the input a patch-only grade cannot supply. Absent, the
+    detector is skipped -- it always was -- but the skip is now written into the report as
+    `INTEGRITY_PARTIAL` instead of leaving an empty signal list that reads as a clean run.
+    The module docstring has the two verdicts the same cheat produced before this.
+
+    An *empty* pair is a different thing and stays assessed. `digest_paths` returns one key
+    per declared path, so `{}` on both sides means the task declared nothing to protect and
+    the detector ran over the whole set, which happens to be empty. A caller with no
+    workspace to observe must therefore pass `None`, never `{}`: `{}` asserts "I looked and
+    there was nothing to look at", which is a claim, not an abstention.
+    """
+    if (protected_before is None) != (protected_after is None):
+        # Refused rather than downgraded to "could not check". Half a pair is not a grading
+        # mode -- there is no way to observe a workspace before an episode and not after --
+        # so it is a caller bug, most likely a misspelled keyword. Absorbing it into a
+        # warning would leave that bug in place while the report looked deliberate.
+        supplied = "protected_before" if protected_before is not None else "protected_after"
+        raise ValueError(
+            f"protected-path checking needs both snapshots or neither; only {supplied} was given. "
+            "Pass both to run the detector, or neither to record that it could not run."
+        )
+
     signals: list[IntegritySignal] = []
-    if protected_before is not None and protected_after is not None:
+    if protected_before is None or protected_after is None:
+        signals.append(
+            IntegritySignal(
+                INTEGRITY_PARTIAL,
+                WARNING,
+                "no workspace snapshots were supplied, so the protected-path detector did not run: "
+                "this report cannot say whether tests, baselines or fixtures were edited",
+            )
+        )
+    else:
         signals.extend(check_protected_paths(protected_before, protected_after))
     signals.extend(check_verification_ran(trajectory, verification_tools))
     signals.extend(check_unmeasured_claims(trajectory))
     return IntegrityReport(signals=tuple(signals))
 
 
-def enforce(passed: bool, report: IntegrityReport) -> bool:
+def enforce(passed: bool, report: IntegrityReport, *, require_full_check: bool = False) -> bool:
     """Final verdict: a disqualified run did not pass, whatever the verifier said.
 
     Applied *after* verification rather than instead of it. The verifier answers "did the
     checks go green"; this answers "were the checks still measuring anything".
+
+    A `True` from here means "no detector that ran objected". It does not mean every
+    detector ran, and it cannot be read that way: with the protected-path pair absent, the
+    report is partial and this still returns `passed`. That is intentional -- patch-only
+    grading is legitimate and disqualifying it wholesale would make the anti-cheat
+    unusable rather than strict, the same reason `shortcut_sweep.UNRESOLVED` does not fail
+    a build. Callers that must not certify what they did not examine -- an on-chain weight,
+    a promotion into SFT, anything that becomes training data -- pass
+    `require_full_check=True` or read `report.fully_checked` themselves.
     """
+    if require_full_check and not report.fully_checked:
+        return False
     return passed and not report.disqualified

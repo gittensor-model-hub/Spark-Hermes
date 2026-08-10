@@ -119,8 +119,14 @@ class EnvOutcome:
 
     @property
     def fully_checked(self) -> bool:
-        """Whether every integrity detector actually ran."""
-        return self.integrity is not None and not any(s.code == INTEGRITY_PARTIAL for s in self.integrity.signals)
+        """Whether every integrity detector actually ran.
+
+        Delegated rather than re-derived from signal codes. `check_integrity` raises its own
+        partials now -- for a missing protected-path pair -- and a second copy of the rule
+        here would keep answering `True` for those, reporting a fully-checked run off a
+        report that says otherwise.
+        """
+        return self.integrity is not None and self.integrity.fully_checked
 
     def to_record(self) -> dict[str, Any]:
         return {
