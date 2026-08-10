@@ -718,3 +718,93 @@ def test_each_round_module_points_at_the_other():
     assert "hermes.round.RoundWindow" in seed_src
     # And it states plainly what is NOT wired, so the gap is not mistaken for done.
     assert "is not done" in round_src
+
+
+# --- the window checks the assignment ---------------------------------------------------------
+
+
+def _assignment(task_id, miners=("alice", "bob", "carol")):
+    """A real seeded assignment round, not a stub -- the point is that the two compose."""
+    from hermes.seed import open_round as open_assignment
+
+    return open_assignment("a-1", [task_id, "other-task"], list(miners))
+
+
+def test_a_submission_for_someone_elses_task_is_unassigned_not_refused(monkeypatch):
+    """The gap #29 documented. A window took a contract-clean submission for any task from
+    anyone, and `eval.rollout_track.check_scope` caught it later -- on a different code path,
+    for a different submission shape, and only for rollout PRs.
+
+    UNASSIGNED is kept apart from REFUSED because the remedies share nothing: REFUSED means
+    "your files are not allowed" and is fixed by changing the submission, UNASSIGNED means
+    "this task is not yours" and is fixed by working on another one. A miner told only
+    "refused" would rewrite a strategy that was never the problem.
+    """
+    from hermes.round import ACCEPTED, UNASSIGNED
+
+    window = _round()
+    assignment = _assignment(window.task_id)
+    window.assignment = assignment
+
+    owner = next(m for m in assignment.miner_ids if assignment.owns(m, window.task_id))
+    stranger = next(m for m in assignment.miner_ids if not assignment.owns(m, window.task_id))
+
+    ok = window.submit(owner, paths=["SOUL.md"], payload_digest="sha256:" + "a" * 64, received_at=1100.0)
+    assert ok.outcome == ACCEPTED
+
+    bad = window.submit(stranger, paths=["SOUL.md"], payload_digest="sha256:" + "b" * 64, received_at=1200.0)
+    assert bad.outcome == UNASSIGNED
+    assert "was not assigned" in " ".join(bad.problems)
+    # And it did not displace anything, since it never stood.
+    assert stranger not in window.submissions
+
+
+def test_an_unscoped_window_says_so_rather_than_implying_a_check(monkeypatch):
+    """A window with no assignment accepts from anybody. Correct for one hand-run challenge,
+    wrong for a live round -- and invisible from outside unless it is published."""
+    window = _round()
+    assert window.scope_enforced is False
+    assert window.public_view()["scope_enforced"] is False
+
+    window.assignment = _assignment(window.task_id)
+    assert window.scope_enforced is True
+    assert window.public_view()["scope_enforced"] is True
+
+
+def test_the_scope_check_runs_after_late_and_before_the_contract():
+    """Ordering follows the rationale already in `submit`: tell a miner the thing that makes the
+    rest of the work moot, first. A miner past the cutoff learns that rather than a scope
+    problem they cannot act on; a miner out of scope is not sent to audit their paths."""
+    from hermes.round import LATE, UNASSIGNED
+
+    window = _round()
+    assignment = _assignment(window.task_id)
+    window.assignment = assignment
+    stranger = next(m for m in assignment.miner_ids if not assignment.owns(m, window.task_id))
+
+    # In time, out of scope, and with a path the contract would reject -> UNASSIGNED wins,
+    # so the miner is not sent to fix files on a task that was never theirs.
+    scoped = window.submit(stranger, paths=["mcp.json"], payload_digest="sha256:" + "d" * 64, received_at=1300.0)
+    assert scoped.outcome == UNASSIGNED
+
+    # Past the cutoff AND out of scope -> LATE wins, because a miner who missed the window
+    # cannot act on a scope problem. Submitted second: the round's clock only moves forward.
+    late = window.submit(stranger, paths=["SOUL.md"], payload_digest="sha256:" + "c" * 64, received_at=2500.0)
+    assert late.outcome == LATE
+
+
+def test_being_out_of_scope_leaks_nothing_about_correctness():
+    """Safe to return during an open round: the assignment is a pure function of the published
+    announcement, so a miner can compute it before submitting and anyone can check the verdict
+    afterwards. That is the property `hermes.seed` exists for."""
+    from hermes.round import RECEIPT_FIELDS, UNASSIGNED
+
+    window = _round()
+    assignment = _assignment(window.task_id)
+    window.assignment = assignment
+    stranger = next(m for m in assignment.miner_ids if not assignment.owns(m, window.task_id))
+
+    receipt = window.submit(stranger, paths=["SOUL.md"], payload_digest="sha256:" + "e" * 64, received_at=1400.0)
+    assert receipt.outcome == UNASSIGNED
+    # Screens against the envelope allowlist like every other receipt: no verdict-shaped key.
+    assert set(receipt.to_record()) <= RECEIPT_FIELDS

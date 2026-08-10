@@ -135,8 +135,26 @@ REFUSED = "refused"
 # Arrived after the admission cutoff. Recorded rather than dropped, so "my upload went
 # through" and "I have no record of it" cannot both be true.
 LATE = "late"
+# Out of scope: a real, contract-clean submission for a task this miner was not assigned.
+#
+# Separate from REFUSED because the remedies have nothing in common. REFUSED means "your files
+# are not allowed" and is fixed by changing the submission; UNASSIGNED means "this task is not
+# yours" and is fixed by working on a different task -- and a miner told only "refused" would
+# rewrite a strategy that was never the problem.
+#
+# Not a leak. The assignment is a pure function of the published announcement, so a miner can
+# compute this before submitting and anyone can check the verdict afterwards. That is the
+# property `hermes.seed` exists for.
+UNASSIGNED = "unassigned"
 
-SUBMISSION_OUTCOMES: tuple[str, ...] = (ACCEPTED, MALFORMED, REFUSED, LATE)
+# `Receipt` refuses an outcome outside this tuple, on the grounds that a new member is how a
+# correctness hint gets a name. UNASSIGNED was added against that guard, so the argument belongs
+# here rather than in a commit message: assignment is a pure function of the published round
+# announcement -- `hermes.seed` derives it by rendezvous hashing from a commit-revealed seed --
+# so a miner can compute it BEFORE submitting and anyone can check the verdict afterwards. It
+# carries no information about whether the submission is correct, which is the property that
+# makes it admissible while the round is open.
+SUBMISSION_OUTCOMES: tuple[str, ...] = (ACCEPTED, MALFORMED, REFUSED, LATE, UNASSIGNED)
 
 
 class RoundError(ValueError):
@@ -189,6 +207,7 @@ PUBLIC_VIEW_FIELDS = frozenset(
         "submissions",
         "replacements",
         "withheld_check_committed",
+        "scope_enforced",
         "no_score_before_freeze",
         "frozen",
         "reveal_available",
@@ -630,6 +649,17 @@ class RoundWindow:
     opened_at: float
     deadline: float
     contract: Any = None
+    # The assignment round this window belongs to, or None.
+    #
+    # `hermes.seed.Round` decides who works on what; this class decides what is accepted and
+    # when. They were unconnected, so a window would take a submission for any task from
+    # anyone and `eval.rollout_track.check_scope` caught it later -- on a different code path,
+    # for a different submission shape, and only for rollout PRs.
+    #
+    # Optional because a window over a single hand-run challenge has no assignment to check.
+    # But `scope_enforced` is published either way: a validator who forgot to attach one is
+    # running an unscoped round, and that must be visible rather than inferred from an absence.
+    assignment: Any = None
     state: str = field(default=OPEN, init=False)
     _clock: float = field(default=0.0, init=False)
     _submissions: dict[str, Submission] = field(default_factory=dict, init=False)
@@ -649,6 +679,17 @@ class RoundWindow:
     @property
     def task_id(self) -> str:
         return self.challenge.task_id
+
+    @property
+    def scope_enforced(self) -> bool:
+        """Whether this window checks that a submitter was assigned the task.
+
+        Published rather than assumed, the same reason `withheld_check_committed` is. A window
+        with no assignment accepts a submission from anybody, which is correct for a single
+        hand-run challenge and wrong for a live round -- and the difference is invisible from
+        outside unless it is stated.
+        """
+        return self.assignment is not None
 
     @property
     def withheld_check_committed(self) -> bool:
@@ -793,6 +834,25 @@ class RoundWindow:
                     f"arrived at {received_at}, after the {cutoff} cutoff. Admission is decided by the "
                     "announced deadline rather than by when the validator got round to freezing, so a "
                     "validator running late does not quietly widen the window."
+                ],
+                received_at=received_at,
+                standing=standing,
+                submission_digest="",
+            )
+
+        if self.assignment is not None and not self.assignment.owns(miner, self.task_id):
+            # After LATE and before the contract, matching the ordering rationale already used
+            # here: tell a miner the thing that makes the rest of the work moot, first. Auditing
+            # paths on a submission for someone else's task is wasted on both sides.
+            return self._record(
+                miner=miner,
+                outcome=UNASSIGNED,
+                problems=[
+                    f"{miner!r} was not assigned {self.task_id!r} in round "
+                    f"{getattr(self.assignment, 'round_id', '?')!r}. The assignment is computable from "
+                    "the published announcement, so this is checkable by anyone rather than a matter "
+                    "of the validator's word -- and working another miner's task is duplicated effort, "
+                    "which is what the seeded assignment exists to prevent."
                 ],
                 received_at=received_at,
                 standing=standing,
@@ -1084,6 +1144,9 @@ class RoundWindow:
             "submissions": len(self._submissions),
             "replacements": sum(self._replacements.values()),
             "withheld_check_committed": self.withheld_check_committed,
+            # An unscoped round accepts a submission from anybody. Published so that is
+            # visible to a miner and an auditor rather than inferred from silence.
+            "scope_enforced": self.scope_enforced,
             # Stated in the payload the way `hermes.challenge` states
             # `acceptance_thresholds_included`: a reader should not have to infer a guarantee
             # from the absence of a field.
@@ -1304,6 +1367,7 @@ __all__ = [
     "REFUSED",
     "SCHEMA_VERSION",
     "SETTLED",
+    "UNASSIGNED",
     "SUBMISSION_OUTCOMES",
     "SUBMISSION_RECORD_FIELDS",
     "VERDICT_WORDS",
