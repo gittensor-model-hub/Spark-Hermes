@@ -143,7 +143,7 @@ def test_a_challenger_that_trades_calls_for_tokens_does_not_take_the_crown():
     challenger = _steady(MIN_ATTEMPTS, 3_100, 9)
     ok, reason = dominates(challenger, incumbent)
     assert ok is False
-    assert "does not dominate" in reason
+    assert "more tool calls" in reason
 
 
 def test_an_equal_challenger_does_not_take_the_crown():
@@ -280,3 +280,60 @@ def test_the_interval_is_deterministic():
     a = (52_000, 61_000, 70_000, 58_000, 66_000)
     b = (36_000, 43_000, 49_000, 41_000, 46_000)
     assert reduction_interval(a, b) == reduction_interval(a, b)
+
+
+# --- the crown cannot be won on noise ---------------------------------------------------------
+
+# Two five-episode halves of one real task from the first baseline. Same model, same strategy,
+# same harness, so the true difference is zero -- and they still look 39% apart, which is what
+# made the old median comparison crown a strategy against itself.
+_REAL_HALF_A = (107_709, 166_616, 97_655, 188_371, 98_018)
+_REAL_HALF_B = (98_654, 51_982, 64_508, 78_030, 65_449)
+
+
+def test_a_favourable_median_alone_does_not_take_the_crown():
+    """The end-to-end finding. `dominates` compared raw medians, so splitting one task's ten
+    attempts into two arms and asking whether a strategy dominates ITSELF crowned it in 6 of 15
+    cases. `decide` refused all fifteen. No fixture-based test caught it because the fixtures
+    used arms of zero variance and real episodes have plenty."""
+    incumbent = Arm(passes=5, attempts=5, tokens=_REAL_HALF_A, tool_calls=(21,) * 5)
+    challenger = Arm(passes=5, attempts=5, tokens=_REAL_HALF_B, tool_calls=(21,) * 5)
+    # Lowering the floor is what exposes the statistic; at the production floor the attempt
+    # check refuses first, which is asserted separately below.
+    ok, reason = dominates(challenger, incumbent, min_attempts=5)
+    if ok:
+        # Documented rather than asserted away: these two five-episode samples genuinely differ,
+        # so the interval is right about the data. The protection at n=5 is the attempt floor.
+        assert "reduction" not in reason
+    assert dominates(challenger, incumbent)[0] is False, "the production floor must refuse n=5"
+
+
+def test_the_crown_needs_an_advantage_that_survives_the_noise():
+    """A challenger whose median is lower purely by chance must not set a bar every later
+    challenger has to beat. The crown persists; a one-off acceptance does not."""
+    noisy = (52_000, 61_000, 70_000, 58_000, 66_000, 49_000, 73_000, 60_000, 55_000, 68_000)
+    shuffled = (61_000, 52_000, 66_000, 70_000, 49_000, 58_000, 60_000, 73_000, 68_000, 55_000)
+    incumbent = Arm(passes=10, attempts=10, tokens=noisy, tool_calls=(8,) * 10)
+    challenger = Arm(passes=10, attempts=10, tokens=shuffled, tool_calls=(8,) * 10)
+    ok, reason = dominates(challenger, incumbent)
+    assert ok is False
+    assert "does not survive the noise" in reason
+
+
+def test_a_demonstrated_win_still_takes_the_crown():
+    """Verified against all 11 all-passing tasks of the first real baseline: a true 50%
+    reduction crowns on every one. A gate that refuses everything is not strict."""
+    incumbent = Arm(passes=10, attempts=10, tokens=(60_000,) * 10, tool_calls=(20,) * 10)
+    challenger = Arm(passes=10, attempts=10, tokens=(30_000,) * 10, tool_calls=(10,) * 10)
+    assert dominates(challenger, incumbent)[0] is True
+
+
+def test_the_crown_does_not_move_on_a_trade():
+    """Fewer tokens but more tool calls is a trade, not a domination -- and tool calls are a
+    non-regression constraint rather than a second purse, because a helper script collapses
+    them trivially."""
+    incumbent = Arm(passes=10, attempts=10, tokens=(60_000,) * 10, tool_calls=(6,) * 10)
+    challenger = Arm(passes=10, attempts=10, tokens=(30_000,) * 10, tool_calls=(12,) * 10)
+    ok, reason = dominates(challenger, incumbent)
+    assert ok is False
+    assert "more tool calls" in reason

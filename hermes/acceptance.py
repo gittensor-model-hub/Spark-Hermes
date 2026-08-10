@@ -349,18 +349,37 @@ def dominates(candidate: Arm, incumbent: Arm, *, min_attempts: int = MIN_ATTEMPT
             )
     if not candidate.all_passed:
         return False, "a challenger that does not pass every attempt cannot hold the crown"
-    tokens = median(candidate.tokens) <= median(incumbent.tokens)
-    calls = median(candidate.tool_calls) <= median(incumbent.tool_calls)
-    if (
-        tokens
-        and calls
-        and (
-            median(candidate.tokens) < median(incumbent.tokens)
-            or median(candidate.tool_calls) < median(incumbent.tool_calls)
+
+    # The token advantage has to survive the noise, not merely show up in the medians.
+    #
+    # This compared raw medians until an end-to-end run over the first real baseline split each
+    # task's ten attempts into two arms of five and asked whether a strategy dominates ITSELF.
+    # The true difference is zero by construction. `decide` refused all fifteen; `dominates`
+    # crowned six, one of them on a spurious 39.2% "reduction" -- whichever half drew the
+    # luckier episodes won. No fixture-based test could catch that, because the fixtures used
+    # arms with zero variance and real episodes have plenty.
+    #
+    # `decide` and `dominates` were fixed in the wrong order. The attempt floor arrived first,
+    # which stopped a crown being set from ONE lucky sample and did nothing about a crown set
+    # from ten noisy ones. The crown persists and every later challenger must beat it, so a bar
+    # placed by chance is worse here than a one-off acceptance made by chance.
+    low, _ = reduction_interval(incumbent.tokens, candidate.tokens)
+    if low <= 0.0:
+        return False, (
+            f"the challenger's token advantage does not survive the noise: the 95% interval on "
+            f"the reduction has a lower bound of {low:.1%}, so a difference of zero is consistent "
+            "with this evidence. The crown persists once taken, so it needs a demonstrated "
+            "advantage rather than a favourable median."
         )
-    ):
-        return True, ""
-    return False, "does not dominate the incumbent on tokens and tool calls"
+    if median(candidate.tool_calls) > median(incumbent.tool_calls):
+        # Tool calls remain a non-regression constraint rather than a second purse -- a helper
+        # script collapses them trivially, which is why `MIN_TOOL_CALL_REDUCTION` never gates.
+        return False, (
+            f"the challenger spends more tool calls than the incumbent "
+            f"({median(candidate.tool_calls):.0f} vs {median(incumbent.tool_calls):.0f}); the crown "
+            "does not move on a trade"
+        )
+    return True, ""
 
 
 __all__ = [
