@@ -35,6 +35,7 @@ from hermesbench import BENCH_VERSION
 from hermesbench.integrity import IntegrityReport, check_integrity, digest_paths, enforce
 from hermesbench.metrics import EpisodeMetrics, SuiteMetrics, episode_metrics, suite_metrics
 from hermesbench.repeats import RepeatedSuite, TaskRepeats
+from hermesbench.sink import EpisodeSink, JsonlEpisodeSink
 from hermesbench.tasks import Task, load_suite
 from hermesbench.verify import (
     OBSERVATION_LIMIT,
@@ -514,6 +515,7 @@ def run_suite(
     *,
     keep_workspaces: bool = False,
     repeats: int = 1,
+    sink: EpisodeSink | None = None,
 ) -> tuple[SuiteMetrics, list[EpisodeResult]]:
     """Run every task in its own workspace and aggregate the scores.
 
@@ -525,6 +527,18 @@ def run_suite(
     Every attempt is returned. Keeping only the best would turn the pass rate into a
     best-of-k order statistic -- `1-(1-p)^k`, which converges to 1.0 for any p above zero --
     and the point of repeating a run is to measure that spread, not to hide it.
+
+    `sink` receives each episode as it finishes. Without one this function is all-or-nothing:
+    results accumulate in memory and the caller writes after the last episode returns, so a run
+    that dies at episode 189 of 190 produces nothing -- not a partial score, not even a list of
+    which tasks got as far as running. Measured on a real baseline: 190 episodes across 8
+    shards, every shard log at 0 bytes until its shard finished. Hours of paid inference would
+    have bought a traceback. See `hermesbench.sink`.
+
+    Recorded after the episode joins `results`, and never inside a `try` that could swallow a
+    scoring error. A sink is observation: it must not be able to change which episodes count,
+    and a failed write must surface rather than quietly leave a short log that still looks like
+    a complete run.
     """
     if repeats < 1:
         raise ValueError("a suite must be run at least once")
@@ -536,7 +550,10 @@ def run_suite(
             workspace = workspace_root / (task.task_id if attempt == 0 else f"{task.task_id}#{attempt}")
             if workspace.exists() and not keep_workspaces:
                 shutil.rmtree(workspace)
-            results.append(run_episode(task, policy_factory(task), executor, workspace))
+            episode = run_episode(task, policy_factory(task), executor, workspace)
+            results.append(episode)
+            if sink is not None:
+                sink.append(episode)
     return suite_metrics([r.metrics for r in results]), results
 
 
@@ -574,6 +591,16 @@ def main(argv: list[str] | None = None) -> int:
         "--task-ids",
         default="",
         help="comma-separated task ids, so one baseline can be sharded across processes",
+    )
+    parser.add_argument(
+        "--episodes-out",
+        type=Path,
+        default=None,
+        help=(
+            "append each episode's metrics here as JSONL as it finishes. Without it a run that "
+            "dies before the last episode produces nothing at all -- measured on a 190-episode "
+            "baseline whose shard logs sat at 0 bytes until each shard completed."
+        ),
     )
     parser.add_argument(
         "--miner-dir",
@@ -713,7 +740,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     executor = LocalToolExecutor(allow_unsandboxed=args.allow_unsandboxed)
-    metrics, results = run_suite(tasks, policy_factory, executor, args.workspace_root, repeats=args.repeats)
+    sink = JsonlEpisodeSink(args.episodes_out) if args.episodes_out else None
+    try:
+        metrics, results = run_suite(
+            tasks, policy_factory, executor, args.workspace_root, repeats=args.repeats, sink=sink
+        )
+    finally:
+        # Closed in `finally` so a crashed run still flushes the episode in flight. The whole
+        # point is that a killed run leaves something readable behind.
+        if sink is not None:
+            sink.close()
 
     record = metrics.to_record()
     # The interval is reported on every run, not only repeated ones. A fifteen-task suite
