@@ -477,3 +477,73 @@ def test_the_digest_excludes_the_signature_and_its_own_field():
     signed = envelopes[0]
     body = {k: v for k, v in signed.items() if k not in ("envelope_digest", "signature")}
     assert envelope_digest(signed) == envelope_digest(body) == signed["envelope_digest"]
+
+
+# --- exclusive has to name the control it rests on --------------------------------------------
+
+
+def _assurance(**kw):
+    return {"assurance": kw}
+
+
+def test_exclusive_asserted_twice_is_refused():
+    """The gap this closes. Before, `exclusive` was reachable by asserting it and then
+    asserting the flag that means it: the two agreed with each other and nothing asked what
+    excluded the off-proxy route. A boolean that concludes the thing it is meant to evidence
+    is the shape of claim this module exists to refuse."""
+    from proof.teacher_proxy import EXCLUSIVE, AssuranceError, check_assurance
+
+    with pytest.raises(AssuranceError, match="without naming what excluded"):
+        check_assurance(_assurance(generation_assurance=EXCLUSIVE, off_proxy_assistance_excluded=True))
+
+
+def test_exclusive_with_a_named_mechanism_is_accepted():
+    from proof.teacher_proxy import EGRESS_RESTRICTION, EXCLUSIVE, check_assurance
+
+    check_assurance(
+        _assurance(
+            generation_assurance=EXCLUSIVE,
+            off_proxy_assistance_excluded=True,
+            off_proxy_assistance_excluded_by=EGRESS_RESTRICTION,
+        )
+    )
+
+
+def test_an_unrecognised_mechanism_is_refused_rather_than_downgraded():
+    """An unreviewable mechanism is not a weaker claim than a reviewable one; a reader cannot
+    go and check `off_proxy_assistance_excluded_by: trust_me`."""
+    from proof.teacher_proxy import EXCLUSIVE, AssuranceError, check_assurance
+
+    with pytest.raises(AssuranceError, match="unknown exclusion mechanism"):
+        check_assurance(
+            _assurance(
+                generation_assurance=EXCLUSIVE,
+                off_proxy_assistance_excluded=True,
+                off_proxy_assistance_excluded_by="trust_me",
+            )
+        )
+
+
+def test_naming_a_mechanism_below_exclusive_is_refused():
+    """Either the run was exclusive and the level understates it, or it was not and the
+    mechanism implies it. Both are worth refusing rather than silently accepting."""
+    from proof.teacher_proxy import PROXY_BOUND, VALIDATOR_EXECUTED, AssuranceError, check_assurance
+
+    with pytest.raises(AssuranceError, match="names an off-proxy exclusion mechanism"):
+        check_assurance(
+            _assurance(
+                generation_assurance=PROXY_BOUND,
+                off_proxy_assistance_excluded_by=VALIDATOR_EXECUTED,
+            )
+        )
+
+
+def test_naming_the_mechanism_does_not_claim_to_verify_it():
+    """Stated in the source so nobody reads this check as proof of egress restriction. No
+    function reading a document can confirm a network was restricted."""
+    import inspect
+
+    from proof import teacher_proxy
+
+    source = inspect.getsource(teacher_proxy)
+    assert "Naming the mechanism does not verify it" in source

@@ -66,6 +66,24 @@ EXCLUSIVE = "exclusive"  # and no other model was reachable (egress-restricted)
 
 ASSURANCE_ORDER = (UNPROVEN, PROXY_BOUND, EXCLUSIVE)
 
+# The controls that can actually exclude off-proxy assistance. `exclusive` has to name one,
+# because a proxy cannot observe the calls that never reached it -- so no amount of detail in
+# the evidence it produces can establish exclusivity on its own.
+#
+# This closed set exists because the requirement used to be stated only in prose. The module
+# docstring said exclusive needs egress restriction or validator-executed strategies, and the
+# check enforced internal consistency instead: a document asserting
+# `generation_assurance: exclusive` beside `off_proxy_assistance_excluded: true` passed,
+# because the two agreed with each other. Confirmed by running it before this change. A flag
+# that asserts its own conclusion is precisely the shape of claim this module exists to refuse.
+#
+# Naming the mechanism does not verify it, and nothing here could: no function reading a
+# document can confirm a network was egress-restricted. What it buys is that the claim points
+# at a specific control a reviewer can go and check, rather than at an unfalsifiable boolean.
+EGRESS_RESTRICTION = "egress_restriction"
+VALIDATOR_EXECUTED = "validator_executed"
+EXCLUSION_MECHANISMS = (EGRESS_RESTRICTION, VALIDATOR_EXECUTED)
+
 
 class ProxyEvidenceError(ValueError):
     """Signed proxy evidence is malformed, unverifiable, or does not chain."""
@@ -287,6 +305,32 @@ def check_assurance(document: dict[str, Any]) -> None:
         raise AssuranceError(
             "claims exclusive assurance without off_proxy_assistance_excluded; a proxy records the "
             "calls that reached it and cannot observe the ones that did not"
+        )
+    if claimed == EXCLUSIVE:
+        # The flag alone was accepted until this check existed, so `exclusive` could be reached
+        # by asserting it twice: the level and the flag agreed with each other and nothing asked
+        # what excluded the off-proxy route. A named mechanism cannot be verified from a
+        # document either, but it points a reviewer at a specific control instead of at a
+        # boolean that concludes the thing it is supposed to evidence.
+        mechanism = str(assurance.get("off_proxy_assistance_excluded_by") or "")
+        if not mechanism:
+            raise AssuranceError(
+                "claims exclusive assurance without naming what excluded off-proxy assistance; "
+                f"set off_proxy_assistance_excluded_by to one of {list(EXCLUSION_MECHANISMS)}. "
+                "Proxy evidence cannot establish exclusivity by itself at any level of detail, so "
+                "the claim has to rest on a control outside the proxy and say which one."
+            )
+        if mechanism not in EXCLUSION_MECHANISMS:
+            raise AssuranceError(
+                f"unknown exclusion mechanism {mechanism!r}; expected one of "
+                f"{list(EXCLUSION_MECHANISMS)}. An unrecognised mechanism is not a weaker claim "
+                "than a recognised one -- it is an unreviewable one."
+            )
+    if assurance.get("off_proxy_assistance_excluded_by") and claimed != EXCLUSIVE:
+        raise AssuranceError(
+            f"names an off-proxy exclusion mechanism at assurance {claimed!r}; that exclusion is "
+            "what exclusive means, so recording the mechanism at a lower level describes a run "
+            "that either was exclusive and is understating it, or was not and is implying it"
         )
     if assurance.get("off_proxy_assistance_excluded") and claimed != EXCLUSIVE:
         raise AssuranceError(
