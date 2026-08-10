@@ -479,8 +479,8 @@ unmeasurable, not because the corpus is clean.
 
 | Component | Role |
 |---|---|
-| **SparkDistill-Hermes** | challenge generation, rollout competition, corpus construction and training |
-| [**SparkProof**](https://github.com/gittensor-model-hub/SparkProof) | proof and verified-data primitives |
+| **Spark-Hermes** (this repo) | challenge generation, rollout competition, corpus construction and training |
+| [**SparkProof**](https://github.com/gittensor-model-hub/SparkProof) | verified Triton training corpus, and its export/dedupe primitives |
 | [**SparkInfer**](https://github.com/gittensor-ai-lab/sparkinfer) | canonical fast inference for the frozen model |
 | **Hermes Agent** | agent runtime, tools, sessions and execution semantics |
 | **SN74 Gittensor** | open competition and rewards for verified marginal improvement |
@@ -565,6 +565,14 @@ continuous model retraining
 
 Planned rollout-evolution components are not claimed as live until their production path is
 merged and exercised.
+
+**The withheld verifiers are not in this repository.** Each task carries a salted
+commitment to its withheld check instead; the checks themselves are held privately, and
+`hermesbench.withheld.overlay` attaches them and verifies each against its commitment, so
+the private half cannot drift from what was published here. A checkout without that tree is
+a public checkout -- a legitimate state, and `suitecheck` reports what it cannot score
+rather than reporting a clean zero. A verifier a model can read is one it can be optimised
+against, which is the whole reason `overfit_rate` means anything.
 
 Two limits worth stating rather than discovering later. The task suite is 16 tasks, which
 gives roughly 9% power to detect a 20-point paired improvement under the exact McNemar test
