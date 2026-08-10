@@ -321,6 +321,19 @@ class TaskResult:
     hidden_passed: bool | None = None
     disqualified: bool = False
     steps: int = 0
+    # The resources the outcome cost. These are here because the manifest is the artifact a
+    # stranger checks, and without them it could not carry the claim the competition is
+    # actually decided on: `hermes.acceptance` gates on a token margin measured against the
+    # observed run-to-run spread, and neither the margin nor the spread was representable in
+    # a published manifest. The numbers lived only in the runner's stdout.
+    #
+    # One entry per ATTEMPT, not per task -- `build_manifest` already emits a TaskResult per
+    # episode -- so a reader can recompute the spread rather than take a reported mean on
+    # trust. That is the whole difference between a checkable claim and a screenshot, and it
+    # is the same reason per-task results are required here at all.
+    tokens_used: int = 0
+    tool_calls: int = 0
+    wall_time_s: float = 0.0
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -329,6 +342,13 @@ class TaskResult:
             "hidden_passed": self.hidden_passed,
             "disqualified": self.disqualified,
             "steps": self.steps,
+            "tokens_used": self.tokens_used,
+            "tool_calls": self.tool_calls,
+            # Recorded, never scored across machines. Reproducing it needs the same hardware
+            # in the same mode -- on the box this was first run on, confidential computing was
+            # enabled, which encrypts host-device traffic and inflates it. See
+            # `hermes.acceptance.dominates`, which excludes latency for this reason.
+            "wall_time_s": round(self.wall_time_s, 3),
         }
 
 

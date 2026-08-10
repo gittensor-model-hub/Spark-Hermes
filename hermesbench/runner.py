@@ -750,6 +750,12 @@ def build_manifest(
                 hidden_passed=r.metrics.hidden_passed,
                 disqualified=r.integrity.disqualified,
                 steps=r.metrics.steps,
+                # Carried so the published manifest can support the claim the competition is
+                # decided on. Without these the token margin and the run-to-run spread that
+                # `hermes.acceptance` gates on existed only in this process's stdout.
+                tokens_used=r.metrics.tokens_used,
+                tool_calls=r.metrics.tool_calls,
+                wall_time_s=r.metrics.wall_time_s,
             )
             for r in results
         ),

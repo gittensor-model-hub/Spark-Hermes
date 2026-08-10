@@ -341,3 +341,57 @@ def test_the_selection_policy_is_part_of_the_harness():
     assert harness_digest(_pin(), suite=suite, executor="local", selection_policy=a) != harness_digest(
         _pin(), suite=suite, executor="local", selection_policy=b
     )
+
+
+# --- the manifest has to be able to carry the claim the competition is decided on -----------
+
+
+def test_a_task_result_records_what_the_outcome_cost():
+    """The manifest is the artifact a stranger checks. Without resource fields it could not
+    express a token margin or the spread that margin is judged against -- both lived only in
+    the runner's stdout, so the published record could not support the claim being made."""
+    from hermes.harness import TaskResult
+
+    record = TaskResult(
+        task_id="t", passed=True, steps=4, tokens_used=8_100, tool_calls=6, wall_time_s=12.345
+    ).to_record()
+    assert record["tokens_used"] == 8_100
+    assert record["tool_calls"] == 6
+    assert record["wall_time_s"] == 12.345
+
+
+def test_the_spread_is_recomputable_from_a_manifest():
+    """The point of publishing per-attempt grain rather than a mean. `hermes.acceptance`
+    refuses a margin the observed spread swamps, so a reader must be able to derive that
+    spread instead of trusting a reported average."""
+    from statistics import median
+
+    from hermes.harness import TaskResult
+
+    attempts = [
+        TaskResult(task_id="t", passed=True, tokens_used=tok, tool_calls=5).to_record()
+        for tok in (9_000, 10_000, 11_000)
+    ]
+    toks = [a["tokens_used"] for a in attempts]
+    spread = (max(toks) - min(toks)) / (2.0 * median(toks))
+    assert round(spread, 3) == 0.1
+
+
+def test_resource_fields_default_to_zero_so_older_callers_still_build():
+    """Additive: the field was absent for the whole life of the manifest so far, and a
+    manifest written without it must still load rather than fail closed on history."""
+    from hermes.harness import TaskResult
+
+    r = TaskResult(task_id="t", passed=False)
+    assert (r.tokens_used, r.tool_calls, r.wall_time_s) == (0, 0, 0.0)
+
+
+def test_wall_time_is_recorded_and_labelled_as_not_comparable():
+    """It is in the manifest for diagnosis, not for ranking: reproducing it needs the same
+    hardware in the same mode, and the first box this ran on had confidential computing
+    enabled, which encrypts host-device traffic and inflates it."""
+    import inspect
+
+    from hermes.harness import TaskResult
+
+    assert "never scored across machines" in inspect.getsource(TaskResult.to_record)
