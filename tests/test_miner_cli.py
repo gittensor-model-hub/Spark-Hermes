@@ -291,3 +291,55 @@ def test_the_default_repeat_count_is_the_attempt_floor():
     with pytest.raises(SystemExit):
         main(["evaluate", "--dir", "/nonexistent", "--help"])
     assert MIN_ATTEMPTS == 10
+
+
+def test_each_arms_runner_output_is_captured_rather_than_printed(monkeypatch, tmp_path, capsys):
+    """Observed on the first live end-to-end run: the runner prints a full suite-metrics JSON block
+    per invocation, so two of them landed ahead of the verdict and buried the one thing a miner
+    opened the tool for. Captured on success, saved beside the report, and printed in full on
+    failure -- where it is the diagnosis rather than noise."""
+    from hermesbench import runner
+    from miner import cli
+
+    scaffold(tmp_path / "sub", skill="s")
+
+    def fake_main(argv):
+        # The real runner writes the log and prints its summary. Do both.
+        out = Path(argv[argv.index("--episodes-out") + 1])
+        payload = {
+            "task_id": "t",
+            "metrics": {
+                "task_id": "t",
+                "public_passed": False,
+                "tokens_used": 50_000,
+                "tool_calls": 11,
+                "steps": 34,
+                "dialect": "hermes-4",
+            },
+        }
+        out.write_text("\n".join(json.dumps(payload) for _ in range(3)) + "\n", encoding="utf-8")
+        print('{"success_rate": 0.0, "mean_tokens": 50000}')
+        return 0
+
+    monkeypatch.setattr(runner, "main", fake_main)
+    code = cli.main(
+        [
+            "evaluate",
+            "--dir",
+            str(tmp_path / "sub"),
+            "--task",
+            "t",
+            "--model",
+            "m",
+            "--repeats",
+            "3",
+            "--workspace-root",
+            str(tmp_path / "eval"),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 1, "identical arms cannot pass the correctness floor"
+    assert '"success_rate"' not in out, "the runner's JSON must not precede the verdict"
+    assert "VERDICT:" in out
+    assert (tmp_path / "eval" / "control-suite.json").is_file()
+    assert (tmp_path / "eval" / "candidate-suite.json").is_file()

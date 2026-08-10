@@ -40,6 +40,8 @@ challenges -- increased median tokens by 58.6% and took the pass rate from 1/3 t
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 from pathlib import Path
@@ -241,22 +243,36 @@ def _evaluate(args: Any) -> int:
         if log.exists():
             log.unlink()
         print(f"\n--- {label} arm: {args.repeats} attempt(s) on {args.task} ---", flush=True)
-        rc = runner.main(
-            runner_argv(
-                task_id=args.task,
-                base_url=args.base_url,
-                model=args.model,
-                api_key_env=args.api_key_env,
-                workspace_root=out / f"ws-{label}",
-                episodes_out=log,
-                repeats=args.repeats,
-                miner_dir=miner_dir,
-                allow_unsandboxed=args.allow_unsandboxed,
+        # The runner prints a full suite-metrics JSON block per invocation. Two of those ahead of
+        # the verdict buried the one thing a miner opened this tool for, so the arms' stdout is
+        # captured and only surfaced when an arm fails -- where it is the diagnosis rather than
+        # noise. Observed on the first live end-to-end run: ~25 lines of JSON before the summary.
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            rc = runner.main(
+                runner_argv(
+                    task_id=args.task,
+                    base_url=args.base_url,
+                    model=args.model,
+                    api_key_env=args.api_key_env,
+                    workspace_root=out / f"ws-{label}",
+                    episodes_out=log,
+                    repeats=args.repeats,
+                    miner_dir=miner_dir,
+                    allow_unsandboxed=args.allow_unsandboxed,
+                )
             )
-        )
+        arm_output = captured.getvalue()
+        if args.verbose and arm_output:
+            print(arm_output, end="")
         if rc != 0:
+            # Not swallowed. An arm that failed is the whole answer, so its output goes out in full.
+            print(arm_output, end="", file=sys.stderr)
             print(f"miner: the {label} arm exited {rc}", file=sys.stderr)
             return rc
+        summary = out / f"{label}-suite.json"
+        summary.write_text(arm_output, encoding="utf-8")
+        print(f"  done; runner output in {summary}")
         arms.append(arm_from_log(log, label=label))
 
     report = compare(*arms)
@@ -290,6 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--workspace-root", type=Path, default=Path("var/miner-eval"))
     parser.add_argument("--report", type=Path, default=None, help="write the report as JSON")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print each arm's full runner output instead of saving it beside the report",
+    )
     parser.add_argument(
         "--allow-unsandboxed",
         action="store_true",
