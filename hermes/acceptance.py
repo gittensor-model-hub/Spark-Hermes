@@ -33,6 +33,12 @@ reduction this often:
        20%                   21.8%                        7
        30%                   30.1%                       21
 
+The right-hand column is history, not the rule. It comes from a simulation of the fixed-multiple
+threshold described below, which was replaced -- so it is here to show why a constant cannot work
+and must not be read as what this gate now requires. `repeats_needed` answers that question by
+asking the current gate, and its answers are larger: at 30% spread a 25% win projects past 200
+paired repeats rather than 21.
+
 **The spread is unknown until a baseline run exists**, so a fixed threshold cannot be
 calibrated on its own. This gate therefore does not trust the constant: it asks whether the
 margin survives the noise in the data it was measured from.
@@ -181,6 +187,91 @@ def reduction_interval(
     return (round(lo, 4), round(hi, 4))
 
 
+# Ladder for `repeats_needed`, as multiples of the repeats already run rather than absolute
+# counts. A ladder because each rung is a full bootstrap and the answer is advice about scale:
+# "about 40" and "about 45" lead a miner to the same decision, so the resolution is not worth
+# paying for. Multiples because a rung must replicate the observed sample a whole number of
+# times -- see `_replicated`.
+REPEAT_MULTIPLES: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 20)
+
+
+def repeats_needed(
+    baseline_tokens: tuple[int, ...],
+    candidate_tokens: tuple[int, ...],
+    *,
+    margin: float = MIN_TOKEN_REDUCTION,
+    multiples: tuple[int, ...] = REPEAT_MULTIPLES,
+    resamples: int = 600,
+    seed: int = BOOTSTRAP_SEED,
+) -> int | None:
+    """Paired repeats at which *this* rule would accept *this* margin. None if beyond the ladder.
+
+    Gate 3's refusal used to end with "more paired repeats resolve it", which is true and useless:
+    at 7% spread the answer is a couple and at 98% it is over a hundred, and a miner given no
+    number has to guess how much GPU time to buy. The design note in this module's docstring lists
+    counts for a few spreads, but those come from a simulation of the rule this gate no longer
+    uses, so quoting them beside a bootstrap refusal would point a miner at a table that does not
+    describe the gate that refused them.
+
+    So this asks the gate itself. Each rung replicates both observed samples k times and runs the
+    real `reduction_interval` over them, returning the first count whose lower bound clears the
+    margin.
+
+    ## What it assumes
+
+    Replication holds the measured distribution and the measured margin exactly where they were
+    and lets only the interval move, which is the one thing more repeats actually change. The first
+    version resampled instead, and that was wrong twice over: a resampled arm is a single draw
+    whose median wanders off the observed one, so the projected margin wandered too and a candidate
+    sitting on the bar was told "about 25 paired repeats" when no count could have helped. And
+    resampling to a length that was not a multiple of the sample size over-weighted whichever
+    observations came first, which made the answer non-monotone in n -- the projection got *worse*
+    at some larger counts.
+
+    So a count that comes back is conditional on the observed distribution and margin persisting.
+    A candidate whose real advantage is smaller than these runs showed will still be refused there.
+
+    ## Why None does not mean "impossible", and the plateau that causes it
+
+    Replication cannot invent information the sample does not have. A bootstrap median can only
+    land on a value that was observed, so the interval converges on the gap between the middle
+    order statistics rather than on zero, and past that point more replication changes nothing.
+    Measured on ten draws at 30% spread with a 27.3% observed win:
+
+        n=10   [ 2.2%, 55.4%]
+        n=50   [10.5%, 49.5%]
+        n=200  [16.2%, 37.0%]
+        n=500  [16.2%, 37.0%]     <- plateau: the 5th and 6th order statistics are 14.8% apart
+        n=2000 [16.2%, 37.0%]
+
+    So a real 27.3% win against a 20% bar projects to None here, and that is a limit of the
+    projection rather than a fact about the candidate. None therefore means "not projectable from
+    this sample" -- more *distinct* runs would move it and this method cannot say how many -- and
+    the refusal says exactly that instead of offering advice the number cannot support.
+    """
+    if len(baseline_tokens) < 2 or len(candidate_tokens) < 2:
+        return None
+    have = min(len(baseline_tokens), len(candidate_tokens))
+    for k in multiples:
+        low, _ = reduction_interval(
+            _replicated(baseline_tokens, k), _replicated(candidate_tokens, k), resamples=resamples, seed=seed
+        )
+        if low >= margin:
+            return have * k
+    return None
+
+
+def _replicated(values: tuple[int, ...], k: int) -> tuple[int, ...]:
+    """Each observation k times over: the same distribution, k times as much of it.
+
+    Element-wise rather than tiling the sequence and truncating. Truncation to a length that is
+    not a multiple of the sample size keeps an extra copy of whichever values sit at the front,
+    which for an unsorted sample is an arbitrary reweighting -- it moved the projected median by
+    7% at some rungs and made the ladder non-monotone.
+    """
+    return tuple(v for v in values for _ in range(k))
+
+
 @dataclass(frozen=True)
 class Decision:
     accepted: bool
@@ -283,12 +374,25 @@ def decide(
             # The interesting refusal: the point estimate cleared the bar and the interval did
             # not. Says what to DO about it, because at high spread the answer is more repeats
             # rather than a bigger margin -- the interval narrows with n, the spread does not.
+            # Says how many, not just "more". At 7% spread the answer is a couple and at 98% it
+            # is over a hundred; a miner given only "more" has to guess how much GPU time to buy.
+            needed = repeats_needed(baseline.tokens, candidate.tokens, margin=min_token_reduction)
+            advice = (
+                f"about {needed} paired repeats would settle evidence like this"
+                if needed is not None
+                else (
+                    f"how many repeats would settle it cannot be projected from {len(candidate.tokens)} "
+                    "measurements: a bootstrap median can only land on a value that was observed, so the "
+                    "interval stops narrowing once it reaches the gap between the middle ones. More "
+                    "distinct runs would move it"
+                )
+            )
             reasons.append(
                 f"token reduction {reduction:.1%} clears the {min_token_reduction:.0%} bar but its 95% "
                 f"interval is [{low:.1%}, {high:.1%}], whose lower bound does not (run-to-run spread "
                 f"{spread:.1%}). On this evidence the margin cannot be distinguished from noise. The "
-                f"interval narrows as one over root n, so more paired repeats resolve it -- "
-                f"{len(candidate.tokens)} attempts here."
+                f"interval narrows as one over root n, so paired repeats resolve it: "
+                f"{len(candidate.tokens)} attempts here, {advice}."
             )
         else:
             reasons.append(
@@ -388,7 +492,10 @@ __all__ = [
     "MIN_TOOL_CALL_REDUCTION",
     "BOOTSTRAP_RESAMPLES",
     "CONFIDENCE",
+    "REPEAT_MULTIPLES",
+    "_replicated",
     "reduction_interval",
+    "repeats_needed",
     "AcceptanceError",
     "Arm",
     "Decision",

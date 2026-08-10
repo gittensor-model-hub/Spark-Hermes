@@ -1,14 +1,19 @@
 """The acceptance bar: correctness first, then efficiency, and only above the noise."""
 
+import random
+
 import pytest
 
-from hermes.acceptance import (
+from hermes.acceptance import (  # noqa: I001
     MIN_ATTEMPTS,
     MIN_TOKEN_REDUCTION,
+    REPEAT_MULTIPLES,
     AcceptanceError,
     Arm,
     decide,
     dominates,
+    reduction_interval,
+    repeats_needed,
 )
 
 
@@ -89,9 +94,16 @@ def test_a_reduction_that_meets_the_bar_but_loses_to_the_noise_is_refused():
     d = decide(candidate=_steady(MIN_ATTEMPTS, 8_000, 10), baseline=noisy_baseline)
     assert d.accepted is False
     assert "cannot be distinguished from noise" in d.reasons[0]
-    # Says what to do about it. At high spread the answer is more repeats, not a bigger
-    # margin: the interval narrows with n, the raw spread does not.
-    assert "more paired repeats" in d.reasons[0]
+    # Says how many, which is the part that used to be missing. The comment here read "at high
+    # spread the answer is more repeats, not a bigger margin" -- true, and no help at all: at 7%
+    # spread the answer is a couple of runs and at 98% it is over a hundred, so a miner given only
+    # the direction has to guess how much GPU time to buy.
+    #
+    # 40 rather than a round number because it is what the gate itself says. This baseline takes
+    # three distinct values, so its median becomes certain once enough repeats accumulate and the
+    # interval closes onto the observed 20.0% -- which clears a bar of "at least 20%".
+    assert "about 40 paired repeats" in d.reasons[0]
+    assert d.token_reduction == 0.20
 
 
 def test_a_margin_that_clears_the_spread_is_accepted():
@@ -238,7 +250,6 @@ def test_a_large_win_on_a_high_spread_task_is_no_longer_impossible():
 def test_the_required_margin_can_never_exceed_what_is_achievable():
     """A reduction is bounded by 100%. Any rule that can demand more than that is not strict,
     it is broken -- it refuses every possible submission while looking like a threshold."""
-    from hermes.acceptance import reduction_interval
 
     noisy = tuple([61_798] * 4 + [1_200, 122_000] + [61_798] * 4)
     low, high = reduction_interval(noisy, (1,) * 10)
@@ -249,7 +260,6 @@ def test_the_required_margin_can_never_exceed_what_is_achievable():
 def test_two_draws_from_one_distribution_do_not_clear_the_bar():
     """The property the gate exists for, and the one the multiple did achieve: no real
     improvement must not read as one."""
-    from hermes.acceptance import reduction_interval
 
     same = (52_000, 61_000, 70_000, 58_000, 66_000, 49_000, 73_000, 60_000, 55_000, 68_000)
     other = (61_000, 52_000, 66_000, 70_000, 49_000, 58_000, 60_000, 73_000, 68_000, 55_000)
@@ -260,7 +270,6 @@ def test_two_draws_from_one_distribution_do_not_clear_the_bar():
 def test_the_interval_narrows_as_attempts_accumulate():
     """What makes a refusal actionable. The raw spread does not shrink with n; the uncertainty
     in the median does, so "run more repeats" is a real remedy rather than a brush-off."""
-    from hermes.acceptance import reduction_interval
 
     base_cycle = (52_000, 61_000, 70_000, 58_000, 66_000, 49_000, 73_000, 60_000, 55_000, 68_000)
     cand_cycle = (36_000, 43_000, 49_000, 41_000, 46_000, 34_000, 51_000, 42_000, 39_000, 48_000)
@@ -275,7 +284,6 @@ def test_the_interval_narrows_as_attempts_accumulate():
 def test_the_interval_is_deterministic():
     """Two people judging the same submission must reach the same verdict. An unseeded
     bootstrap would make acceptance a coin flip in the fourth decimal place."""
-    from hermes.acceptance import reduction_interval
 
     a = (52_000, 61_000, 70_000, 58_000, 66_000)
     b = (36_000, 43_000, 49_000, 41_000, 46_000)
@@ -337,3 +345,93 @@ def test_the_crown_does_not_move_on_a_trade():
     ok, reason = dominates(challenger, incumbent)
     assert ok is False
     assert "more tool calls" in reason
+
+
+# --- how many repeats would settle it ----------------------------------------------------------
+#
+# "More paired repeats resolve it" was the whole of gate 3's advice, which is true and useless: at
+# 7% spread the answer is a couple and at 98% it is over a hundred, and a miner given no number
+# has to guess how much GPU time to buy. `repeats_needed` asks the gate itself.
+
+
+def _noisy(mean: float, cv: float, n: int = 10, seed: int = 7) -> tuple[int, ...]:
+    rng = random.Random(seed)
+    return tuple(int(rng.gauss(mean, mean * cv)) for _ in range(n))
+
+
+def _pair(cv: float, win: float) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """A baseline and a candidate with a given true reduction, at a given spread.
+
+    Distinct seeds on purpose. Drawing both arms from one seeded sequence makes them perfectly
+    rank-correlated, which is not what two independent runs look like and quietly changes every
+    number below.
+    """
+    return _noisy(100_000, cv, seed=7), _noisy(100_000 * (1 - win), cv, seed=11)
+
+
+def test_a_margin_sitting_exactly_on_the_bar_is_unreachable_at_any_count():
+    """The bug the first implementation had, and the reason it tiles rather than resamples.
+
+    A lower bound is below its own point estimate by construction, so a candidate whose measured
+    reduction equals the bar can never clear it. Resampling let the projected margin wander off
+    the measured one and produced a confident "about 25 repeats", which was advice that could not
+    work at any price.
+    """
+    assert repeats_needed(*_pair(cv=0.15, win=0.20), margin=0.20) is None
+    assert repeats_needed(*_pair(cv=0.05, win=0.20), margin=0.20) is None
+
+
+def test_the_count_grows_with_spread_and_shrinks_with_the_margin():
+    """Both directions, because a projection monotone in only one of them is not measuring the
+    interval -- it is measuring whichever input it happens to be sensitive to."""
+    tight = repeats_needed(*_pair(cv=0.05, win=0.30), margin=0.20)
+    wide = repeats_needed(*_pair(cv=0.30, win=0.30), margin=0.20)
+    assert tight is not None and wide is not None
+    assert wide > tight
+
+    small = repeats_needed(*_pair(cv=0.30, win=0.25), margin=0.20)
+    large = repeats_needed(*_pair(cv=0.30, win=0.40), margin=0.20)
+    assert small is not None and large is not None
+    assert small > large
+
+
+def test_the_measured_answer_for_the_case_that_prompted_this():
+    """The finding that motivated separating this from the correctness floor, now a number.
+
+    `MIN_ATTEMPTS` is 10 because 10-of-10 bounds the true success rate above 72%, which is a
+    statement about *correctness*. It says nothing about whether a token margin is real, and a
+    30% win at 30% run-to-run spread needs far more than ten paired repeats to show. This pins
+    how many, so a future change to the bootstrap that quietly makes the gate cheaper to pass
+    shows up here rather than in a miner's favour.
+    """
+    needed = repeats_needed(*_pair(cv=0.30, win=0.30), margin=0.20)
+    assert needed is not None
+    assert needed > MIN_ATTEMPTS, "the correctness floor is not an efficiency floor"
+    assert needed == 50
+
+
+def test_the_projection_is_deterministic():
+    """Two people reading the same refusal must be told the same number, or the advice is noise
+    about noise. Tiling removed the seed dependence the resampling version had."""
+    args = _pair(cv=0.20, win=0.28)
+    assert repeats_needed(*args, margin=0.20) == repeats_needed(*args, margin=0.20)
+
+
+def test_a_single_measurement_projects_nothing():
+    """Not 200, and not the bottom rung. A single observation carries no information about its own
+    variability, so there is no interval to narrow and no honest count to quote."""
+    assert repeats_needed((10_000,), (8_000,), margin=0.20) is None
+
+
+def test_the_ladder_is_ordered_because_the_first_clearing_rung_is_returned():
+    assert list(REPEAT_MULTIPLES) == sorted(REPEAT_MULTIPLES)
+    assert REPEAT_MULTIPLES[0] == 1, "the bottom rung must be the repeats a miner already has"
+
+
+def test_the_count_is_a_multiple_of_the_repeats_already_run():
+    """Rungs replicate the observed sample a whole number of times. Truncating to an arbitrary
+    length over-weights whichever observations came first, which made the projection non-monotone
+    in n -- it got worse at some larger counts."""
+    base, cand = _pair(cv=0.30, win=0.30)
+    needed = repeats_needed(base, cand, margin=0.20)
+    assert needed is not None and needed % len(cand) == 0
