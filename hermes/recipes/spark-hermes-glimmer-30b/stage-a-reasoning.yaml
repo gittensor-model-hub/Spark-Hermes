@@ -1,29 +1,33 @@
-# Stage C -- tool reliability.
+# Stage A -- reasoning repair.
 #
-# Narrow, low-LR pass over executed trajectories only. Stage B teaches the shape of
-# agentic behavior from a mixed corpus; Stage C tightens the mechanics -- correct tool
-# choice, well-formed arguments, no invented tools -- and it does that on rows whose
-# tool outputs were really observed (`metadata.executed = true`), because this is the
-# stage that decides whether the model believes its own predictions about the world.
+# Teaches planning, decomposition and debugging before any tool behavior is layered on.
+# The order is load-bearing: stage B on a model that cannot plan produces a model that
+# calls tools confidently and wrongly.
 #
-#   scripts/train.sh recipes/spark-hermes-agent-3.8-27b/stage-c-tools.yaml
+#   scripts/train.sh recipes/spark-hermes-glimmer-30b/stage-a-reasoning.yaml
+#
+# Base model pinned to a revision, not a name -- see hermes/base_model.json, which this
+# must agree with (tests/test_base_model.py). Qwen3.8-27B is the Phase 1 target and is not
+# published: the only repositories under that name are third-party derivatives with no
+# official base. Phase 0 validates the pipeline on 3.6, which exists.
+#
+# Nothing in this directory has been trained yet. See docs/roadmap-hermes.md.
 
-# Pinned in hermes/base_model.json; tests/test_base_model.py keeps them in step.
-base_model: Qwen/Qwen3.6-27B
-base_model_revision: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+base_model: meta-models/Muse-Glimmer-30B
+base_model_revision: 97c77dff50b2797bcc558fa2d909761dbc575c59
 trust_remote_code: true
 
-chat_template: qwen3_5
+chat_template: chat_template.jinja
 roles_to_train: ["assistant"]
 
 datasets:
-  - path: data/processed/hermes_executed_sft.jsonl
+  - path: data/processed/stage_a_reasoning_sft.jsonl
     type: chat_template
     field_messages: messages
 
-dataset_prepared_path: data/prepared/spark-hermes-27b-stage-c
-val_set_size: 0.05
-output_dir: outputs/spark-hermes-agent-3.8-27b/stage-c
+dataset_prepared_path: data/prepared/spark-hermes-27b-stage-a
+val_set_size: 0.02
+output_dir: outputs/spark-hermes-glimmer-30b/stage-a
 
 sequence_len: 8192
 sample_packing: true
@@ -41,7 +45,6 @@ pad_to_sequence_len: true
 # activations at this sequence length. Measure before raising `sequence_len` -- the headroom is
 # real but not large, and 16K is where it gets tight.
 adapter: lora
-lora_model_dir: outputs/spark-hermes-agent-3.8-27b/stage-b
 lora_r: 32
 lora_alpha: 64
 lora_dropout: 0.05
@@ -51,15 +54,13 @@ lora_target_modules:
   - v_proj
   - o_proj
 
-gradient_accumulation_steps: 16
+gradient_accumulation_steps: 8
 micro_batch_size: 1
-# One epoch at a low LR: this is a refinement pass, and hammering a small executed-only
-# corpus is a fast way to overfit to the handful of tasks that produced it.
-num_epochs: 1
+num_epochs: 2
 optimizer: adamw_torch
 lr_scheduler: cosine
-learning_rate: 2.0e-5
-warmup_ratio: 0.05
+learning_rate: 1.0e-4
+warmup_ratio: 0.03
 weight_decay: 0.0
 
 bf16: true
@@ -70,7 +71,7 @@ gradient_checkpointing_kwargs:
 attn_implementation: flash_attention_2
 
 evals_per_epoch: 4
-saves_per_epoch: 1
+saves_per_epoch: 2
 logging_steps: 10
 
 plugins:

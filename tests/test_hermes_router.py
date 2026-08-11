@@ -36,7 +36,7 @@ def test_confidence_must_be_a_fraction():
 
 def test_decision_exposes_the_serving_model():
     assert RoutingDecision(target="cuda", confidence=0.9, reason="x").model == "Spark-Hermes-CUDA"
-    assert model_for(GENERAL) == "Spark-Hermes-3.8-27B"
+    assert model_for(GENERAL) == "Spark-Hermes-Glimmer-30B"
 
 
 def test_decision_record_is_json_safe():

@@ -1,49 +1,50 @@
 {
   "schema_version": "spark-base-model-v1",
   "phase": 0,
-  "phase_intent": "pipeline validation; Phase 1 retargets to Qwen3.8-27B when it is published",
-  "repository": "Qwen/Qwen3.6-27B",
-  "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
-  "pinned_on": "2026-08-10",
-  "model_type": "qwen3_5",
+  "phase_intent": "development base for Spark-Hermes-Glimmer-30B. Trained and scored in bf16 on a 96 GB card; distributed as GGUF sized for a 32 GB card, which is a separate artifact whose scores must be re-measured rather than inherited.",
+  "repository": "meta-models/Muse-Glimmer-30B",
+  "revision": "97c77dff50b2797bcc558fa2d909761dbc575c59",
+  "pinned_on": "2026-08-11",
+  "model_type": "muse_glimmer",
   "architectures": [
-    "Qwen3_5ForConditionalGeneration"
+    "MuseGlimmerForConditionalGeneration"
   ],
-  "chat_template": "qwen3_5",
-  "hermes_dialect": "hermes-4",
-  "hermes_dialect_evidence": "the repository's own tokenizer_config chat template emits <tool_call>, <tools>, <tool_response> and <think>, and does not emit <scratch_pad>",
+  "chat_template": "chat_template.jinja",
+  "parameters": 29776626688,
+  "hermes_dialect": "atem",
+  "hermes_dialect_evidence": "the repository's own chat_template.jinja renders tool calls as <atem:function_calls> / <atem:invoke name=\"...\"> / <atem:parameter name=\"...\">, returns results in <tool_output name=\"...\">, and addresses deliberation to a `self` recipient rather than emitting an inline reasoning tag. It contains no <tool_call> and no <think>: this model does not speak Hermes, and hermes/atem.py exists because of that. Verified by generation, not only by reading -- see docs/serving-muse-glimmer.md.",
+  "dialect_note": "The pinned artifact for this dialect is upstream's own chat_template.jinja, committed at hermes/templates/chat-template-atem.jinja, and hermes.conformance checks that every marker hermes/atem.py parses is still present in it. There is no rendered system prompt to pin because this repo writes no tool block for ATEM: the definitions go with the request so the template renders them, the valid-recipient list and the reasoning line as one consistent block.",
+  "serving": "SGLang built from the upstream muse-glimmer branch. vLLM 0.27.0 has no native support for this architecture and its --model-impl transformers fallback returns incoherent output for it. scripts/serve_agent.sh carries the recipe; docs/serving-muse-glimmer.md carries the evidence and the eight startup failures behind it, none of which were the model.",
   "multimodal": true,
   "language_model_only": false,
   "text_config": {
-    "num_hidden_layers": 64,
-    "num_attention_heads": 24,
-    "num_key_value_heads": 4,
-    "head_dim": 256,
-    "hidden_size": 5120,
-    "vocab_size": 248320,
-    "max_position_embeddings": 262144,
-    "full_attention_interval": 4,
+    "num_hidden_layers": 52,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 2,
+    "head_dim": 128,
+    "hidden_size": 6656,
+    "intermediate_size": 19968,
+    "vocab_size": 202048,
+    "max_position_embeddings": 131072,
+    "tie_word_embeddings": false,
+    "final_logit_softcapping": 20.0,
+    "sliding_window": 2048,
     "layer_types_counts": {
-      "full_attention": 16,
-      "linear_attention": 48
-    },
-    "linear_key_head_dim": 128,
-    "linear_value_head_dim": 128,
-    "linear_num_key_heads": 16,
-    "linear_num_value_heads": 48,
-    "linear_conv_kernel_dim": 4
+      "full_attention": 13,
+      "sliding_attention": 39
+    }
   },
+  "vision_config": {
+    "hidden_size": 1536,
+    "num_hidden_layers": 50
+  },
+  "text_config_note": "Every text hyperparameter is nested under text_config. This is a MuseGlimmerForConditionalGeneration, so the top level of config.json carries only vision and projector keys -- anything reading it for hidden_size or num_hidden_layers gets None and computes a memory budget out of nothing. tests/test_base_model.py asserts the nesting for that reason. AutoModelForCausalLM also refuses this config outright; the class is AutoModelForImageTextToText.",
   "kv_bytes_per_token": {
-    "bf16": 65536,
-    "fp8": 32768
+    "bf16": 13312,
+    "fp8": 6656
   },
-  "safetensors_shards": 15,
-  "kv_bytes_per_token_note": "Over the 16 FULL-ATTENTION layers only. This model is hybrid: layer_types is 48 linear_attention + 16 full_attention, so 48 of 64 layers keep a fixed per-sequence recurrent state instead of a per-token KV cache. The previous value here, 262144, used 2*64*4*256*2 -- every layer -- and overstated the per-token cost by 4x. That matters because kv_bytes() sizes a VRAM budget against a card, and a 4x overstatement rules out hardware that in fact runs this model comfortably.",
-  "kv_bytes_measured": {
-    "source": "vLLM 0.26.0 on RTX PRO 6000 Blackwell Server Edition, 2026-08-10",
-    "available_kv_cache_gib": 33.36,
-    "gpu_kv_cache_tokens": 507539,
-    "implied_bytes_per_token": 70576,
-    "note": "Measured total is slightly above the 65536 derived here because vLLM's KV pool accounting also carries the linear-attention layers' per-sequence state. That state does not scale with context length, so it belongs in a per-sequence budget rather than a per-token one -- which is why the derived figure, not this one, is what kv_bytes() multiplies by a context length."
-  }
+  "safetensors_shards": 2,
+  "kv_bytes_per_token_note": "Over the 13 FULL-ATTENTION layers only: 2 * 13 * 2 kv_heads * 128 head_dim * 2 bytes. This model is hybrid -- layer_types is 39 sliding_attention + 13 full_attention -- and the 39 sliding layers hold at most `sliding_window` (2048) tokens each rather than growing with context, so they belong in a bounded per-sequence budget and not in a figure multiplied by a context length. Counting all 52 layers would give 53248 and overstate the per-token cost by 4x, which is how a card that runs this model comfortably gets ruled out on paper. Two KV heads is aggressive GQA and is most of why this figure is small for a 30B.",
+  "kv_bytes_measured": null,
+  "kv_bytes_measured_note": "Not yet measured on this model. The previous pin carried a measured figure from vLLM 0.26.0 on an RTX PRO 6000; that number described Qwen3.6-27B and is not transferable, so it is null rather than carried over. Deriving it is arithmetic; measuring it needs a serving run that reports its KV pool, and SGLang's accounting has not been read yet."
 }

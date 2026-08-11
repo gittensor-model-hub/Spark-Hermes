@@ -1,35 +1,30 @@
-# Stage B -- Hermes behavior.
+# Stage C -- tool reliability.
 #
-# Teaches the loop: observe -> plan -> act -> verify -> recover. Trains on agent
-# execution trajectories rendered by `python -m hermes.format`, resuming from Stage A's
-# adapter rather than starting clean.
+# Narrow, low-LR pass over executed trajectories only. Stage B teaches the shape of
+# agentic behavior from a mixed corpus; Stage C tightens the mechanics -- correct tool
+# choice, well-formed arguments, no invented tools -- and it does that on rows whose
+# tool outputs were really observed (`metadata.executed = true`), because this is the
+# stage that decides whether the model believes its own predictions about the world.
 #
-#   scripts/train.sh recipes/spark-hermes-agent-3.8-27b/stage-b-hermes.yaml
-#
-# Keep failure-and-recovery rows in this mix. A corpus of only-successful trajectories
-# teaches a model that tools never fail, which is the one thing that is never true --
-# so do NOT pass --require-success when building this dataset.
+#   scripts/train.sh recipes/spark-hermes-glimmer-30b/stage-c-tools.yaml
 
 # Pinned in hermes/base_model.json; tests/test_base_model.py keeps them in step.
-base_model: Qwen/Qwen3.6-27B
-base_model_revision: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+base_model: meta-models/Muse-Glimmer-30B
+base_model_revision: 97c77dff50b2797bcc558fa2d909761dbc575c59
 trust_remote_code: true
 
-chat_template: qwen3_5
+chat_template: chat_template.jinja
 roles_to_train: ["assistant"]
 
 datasets:
-  - path: data/processed/hermes_trajectories_sft.jsonl
+  - path: data/processed/hermes_executed_sft.jsonl
     type: chat_template
     field_messages: messages
 
-dataset_prepared_path: data/prepared/spark-hermes-27b-stage-b
-val_set_size: 0.02
-output_dir: outputs/spark-hermes-agent-3.8-27b/stage-b
+dataset_prepared_path: data/prepared/spark-hermes-27b-stage-c
+val_set_size: 0.05
+output_dir: outputs/spark-hermes-glimmer-30b/stage-c
 
-# Longer than Stage A: a full execution trajectory with tool outputs is a much longer
-# sequence than a reasoning trace, and truncating mid-episode teaches the model that
-# episodes simply stop.
 sequence_len: 8192
 sample_packing: true
 pad_to_sequence_len: true
@@ -46,7 +41,7 @@ pad_to_sequence_len: true
 # activations at this sequence length. Measure before raising `sequence_len` -- the headroom is
 # real but not large, and 16K is where it gets tight.
 adapter: lora
-lora_model_dir: outputs/spark-hermes-agent-3.8-27b/stage-a
+lora_model_dir: outputs/spark-hermes-glimmer-30b/stage-b
 lora_r: 32
 lora_alpha: 64
 lora_dropout: 0.05
@@ -58,11 +53,13 @@ lora_target_modules:
 
 gradient_accumulation_steps: 16
 micro_batch_size: 1
-num_epochs: 3
+# One epoch at a low LR: this is a refinement pass, and hammering a small executed-only
+# corpus is a fast way to overfit to the handful of tasks that produced it.
+num_epochs: 1
 optimizer: adamw_torch
 lr_scheduler: cosine
-learning_rate: 7.0e-5
-warmup_ratio: 0.03
+learning_rate: 2.0e-5
+warmup_ratio: 0.05
 weight_decay: 0.0
 
 bf16: true
@@ -73,7 +70,7 @@ gradient_checkpointing_kwargs:
 attn_implementation: flash_attention_2
 
 evals_per_epoch: 4
-saves_per_epoch: 2
+saves_per_epoch: 1
 logging_steps: 10
 
 plugins:

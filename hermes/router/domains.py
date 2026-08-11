@@ -153,5 +153,5 @@ def is_valid_target(target: str) -> bool:
 def model_for(target: str) -> str:
     """The worker that serves a routing target."""
     if target == GENERAL:
-        return "Spark-Hermes-3.8-27B"
+        return "Spark-Hermes-Glimmer-30B"
     return DOMAINS[target].model

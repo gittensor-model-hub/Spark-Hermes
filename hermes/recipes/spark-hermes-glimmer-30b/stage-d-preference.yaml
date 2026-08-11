@@ -10,7 +10,7 @@
 #   python -m validator.aggregate --out var/datasets
 #     -> var/datasets/preference.jsonl   {chosen: [...], rejected: [...], chosen_tokens, ...}
 #
-#   scripts/train.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-d-preference.yaml
+#   scripts/train.sh hermes/recipes/spark-hermes-glimmer-30b/stage-d-preference.yaml
 #
 # ## Why this stage exists separately from C
 #
@@ -28,17 +28,17 @@
 # stage C's adapter would make the reference the raw base and quietly optimise against a policy
 # three stages out of date.
 #
-#   scripts/merge_lora.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-c-tools.yaml
+#   scripts/merge_lora.sh hermes/recipes/spark-hermes-glimmer-30b/stage-c-tools.yaml
 #
 # The path below is stage C's `output_dir` with `merged` appended, which is where Axolotl writes
 # and is not configurable. Naming it directly rather than renaming the result afterwards: a rename
 # is a step that can half-succeed and leave a directory whose name stops describing what is in it.
 # `tests/test_base_model.py` holds the two in step.
 
-base_model: outputs/spark-hermes-agent-3.8-27b/stage-c/merged
+base_model: outputs/spark-hermes-glimmer-30b/stage-c/merged
 trust_remote_code: true
 
-chat_template: qwen3_5
+chat_template: chat_template.jinja
 
 rl: dpo
 rl_beta: 0.1
@@ -50,7 +50,7 @@ datasets:
 
 dataset_prepared_path: data/prepared/spark-hermes-27b-stage-d
 val_set_size: 0.05
-output_dir: outputs/spark-hermes-agent-3.8-27b/stage-d
+output_dir: outputs/spark-hermes-glimmer-30b/stage-d
 
 # Agentic episodes are long: the 190-episode baseline had a median of 34 turns. Both sides of a
 # pair are resident at once, so this is the stage most likely to run out of memory -- start here

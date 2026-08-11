@@ -1,21 +1,22 @@
-![Spark-Hermes banner](docs/images/banner.png)
+![Spark-Hermes-Glimmer-30B banner](docs/images/spark-hermes-glimmer.png)
 
 <sub>The RTX 5090 in the artwork is the **distribution** target, not the training host: training
 and scoring happen in bf16 on an RTX PRO 6000 Blackwell Server Edition (96 GB), and what ships is a
 GGUF quantization that fits a 32 GB card. See [Two tiers](#two-tiers-bf16-to-train-gguf-to-ship).
-One thing in the artwork is still wrong: "lower latency" is not something a miner is scored on —
-wall time is reported and never gates the crown, for the reason given under
-[Pareto frontier](#pareto-frontier).</sub>
+One claim in the artwork is not one this project makes: "lower latency" is not something a miner is
+scored on — wall time is reported and never gates the crown, for the reason given under
+[Pareto frontier](#pareto-frontier). The other two, higher success rate and fewer tokens, are
+exactly what the acceptance gate measures.</sub>
 
 # SPARK-HERMES
 
 ### Verified agent intelligence, continuously improved by SN74 Gittensor
 
-**Target:** `Spark-Hermes-3.8-27B`
-**Development baseline:** pinned `Qwen3.6-27B` @ `6a9e13bd`, served bf16
+**Target:** `Spark-Hermes-Glimmer-30B`
+**Development base:** pinned [`meta-models/Muse-Glimmer-30B`](https://huggingface.co/meta-models/Muse-Glimmer-30B) @ `97c77dff`, served bf16
 **Train and score on:** RTX PRO 6000 Blackwell Server Edition, 96 GB, bf16
 **Ship as:** GGUF, sized for a 32 GB card
-**Runtime:** Hermes 4
+**Runtime:** Hermes 4, over the ATEM wire format the base natively speaks
 **Competition:** verified rollout optimization
 **Execution:** NVIDIA Confidential Computing enabled; Intel TDX quote verification implemented,
 no approved guest measurement pinned yet
@@ -214,9 +215,13 @@ same bytes on every miner
 not merely the same model name.
 
 **Nothing in that chain is quantized.** [`hermes/base_model.json`](hermes/base_model.json) pins
-`Qwen/Qwen3.6-27B` at revision `6a9e13bd` with no quantization field, and the measured baseline
-served it in bf16 — which is why the KV figure in that file is `kv_bytes_measured` rather than one
-computed from an assumed precision. The competition is decided on those bytes.
+`meta-models/Muse-Glimmer-30B` at revision `97c77dff` with no quantization field, and it is served
+in bf16. The competition is decided on those bytes.
+
+`kv_bytes_measured` is `null` there rather than carrying the figure the previous pin held. That
+number — 33.36 GiB of KV pool holding 507,539 tokens — was measured on Qwen3.6-27B, and a
+measurement of one model reading as a measurement of another is worse than having none: stale and
+fresh look identical and nothing downstream can tell them apart.
 
 <a id="two-tiers-bf16-to-train-gguf-to-ship"></a>
 
@@ -654,44 +659,50 @@ unmeasurable, not because the corpus is clean.
 
 ## Model path
 
-### Development
-
 ```text
-Qwen3.6-27B
+meta-models/Muse-Glimmer-30B  @ 97c77dff        (bf16, 96 GB card)
     ↓
-Hermes 4 baseline
+Hermes 4 agent over the ATEM wire format
     ↓
 verified rollout-evolution corpus
     ↓
-Spark-Hermes development checkpoint
+Spark-Hermes-Glimmer-30B                        (bf16 — what the competition scores)
+    ↓
+GGUF                                            (32 GB card — re-measured, not inherited)
 ```
 
-### Target
+The exact revision and artifact digest — not the marketing name — define a model epoch. The base is
+pinned in [`hermes/base_model.json`](hermes/base_model.json) at
+`97c77dff50b2797bcc558fa2d909761dbc575c59`, because a name resolves to whatever a repository holds
+when someone runs it: two runs could agree on every other digest here and still have trained on
+different weights.
 
-```text
-open Qwen3.8-27B base when available and pinned
-    ↓
-same verified pipeline
-    ↓
-Spark-Hermes-3.8-27B
-```
+Three things about this base are easy to get wrong, and all three are recorded with the pin.
 
-The exact revision and artifact digest—not the marketing name—define a model epoch.
+**It does not speak Hermes.** Its own chat template renders tool calls as
+`<atem:function_calls>` / `<atem:invoke>` / `<atem:parameter>`, returns results in `<tool_output>`,
+and puts deliberation on a `self` recipient. There is no `<tool_call>` and no `<think>` anywhere in
+it. That is why [`hermes/atem.py`](hermes/atem.py) exists, and the dialect was established by
+reading the model and then confirmed by generating from it — not chosen for it. Nothing forks
+Hermes: the pinned artifact for ATEM is upstream's *own* template, committed byte for byte at
+[`hermes/templates/chat-template-atem.jinja`](hermes/templates/chat-template-atem.jinja), and the
+check runs the other way round — every marker the parser depends on must still be present in it.
 
-The development baseline is pinned in [`hermes/base_model.json`](hermes/base_model.json):
-`Qwen/Qwen3.6-27B` at `6a9e13bd6fc8f0983b9b99948120bc37f49c13e9`. A name resolves to
-whatever a repository holds when someone runs it, so two runs could agree on every other
-digest here and still have trained on different weights.
+**It is multimodal, so "30B" is not 30B of text parameters** and every text hyperparameter lives
+under `text_config`. Anything reading the top level of `config.json` for `hidden_size` gets `None`
+and computes a memory budget out of nothing. `AutoModelForCausalLM` refuses the config outright; the
+class is `AutoModelForImageTextToText`.
 
-Two things about that baseline are easy to get wrong and are recorded with the pin. It is a
-`Qwen3_5ForConditionalGeneration` with a vision tower, so "27B" is not 27B of text
-parameters and the text hyperparameters live under `text_config`. And its own chat template
-emits `<tool_call>`, `<tools>`, `<tool_response>` and `<think>` and does not emit
-`<scratch_pad>` — which is how the Hermes 4 dialect was established here: by reading the
-model, not by choosing for it. Nothing forks Hermes; [`hermes/templates/`](hermes/templates)
-pins the rendered wire format as bytes so a change to it has to appear as a diff.
+**Its KV cache lives in 13 of 52 layers.** `layer_types` is 39 `sliding_attention` + 13
+`full_attention`, and a sliding layer holds at most 2048 tokens rather than growing with the
+context. Counting all 52 overstates the per-token cost by 4×, which is how a card that runs this
+model comfortably gets ruled out on paper. With two KV heads, the whole 131K context costs under a
+gigabyte in fp8.
 
-Qwen3.8-27B is announced and **not yet published**.
+**Serving needs SGLang**, from the upstream `muse-glimmer` branch: vLLM 0.27.0 has no native
+support and its transformers fallback returns incoherent output for this architecture.
+[`docs/serving-muse-glimmer.md`](docs/serving-muse-glimmer.md) has the evidence and the eight
+startup failures behind it, none of which were the model.
 
 ---
 
@@ -880,13 +891,13 @@ six and a half hours sequential and under an hour at 8.
 ```bash
 # rollouts -> datasets -> adapters
 python -m validator.aggregate --out var/datasets
-scripts/train.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-c-tools.yaml
+scripts/train.sh hermes/recipes/spark-hermes-glimmer-30b/stage-c-tools.yaml
 
 # fold the adapter into the base, after checking it is the right adapter
-scripts/merge_lora.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-c-tools.yaml
-#  -> outputs/spark-hermes-agent-3.8-27b/stage-c/merged   <- what stage D starts from
+scripts/merge_lora.sh hermes/recipes/spark-hermes-glimmer-30b/stage-c-tools.yaml
+#  -> outputs/spark-hermes-glimmer-30b/stage-c/merged   <- what stage D starts from
 
-scripts/train.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-d-preference.yaml
+scripts/train.sh hermes/recipes/spark-hermes-glimmer-30b/stage-d-preference.yaml
 
 # benchmark the candidate the same way, then ask whether it replaces what is served
 python -m hermes.promotion --incumbent runs/m0.json --candidate runs/m1.json

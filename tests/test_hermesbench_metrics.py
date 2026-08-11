@@ -446,15 +446,23 @@ def test_the_default_dialect_is_the_pinned_one():
     from hermes.base_model import load as load_pin
     from hermesbench.runner import _pinned_dialect
 
-    assert _pinned_dialect() == load_pin().hermes_dialect == "hermes-4"
+    # `atem` today, because the pinned base does not speak Hermes. Asserted against the pin rather
+    # than against a literal so that repinning moves both together: the earlier version of this
+    # line named "hermes-4" and would have had to be edited by whoever changed the base -- which is
+    # the same coupling it exists to prevent, one level up.
+    assert _pinned_dialect() == load_pin().hermes_dialect
+    from hermes.protocol import DIALECTS
+
+    assert _pinned_dialect() in DIALECTS
 
 
 def test_an_unknown_pinned_dialect_falls_back_rather_than_raising():
     """`--help` must work in a checkout whose pin is missing or malformed, and a broken pin is
     better reported by the run than by argument parsing."""
+    from hermes.protocol import DIALECTS
     from hermesbench.runner import _pinned_dialect
 
-    assert _pinned_dialect(default="hermes-3") in {"hermes-3", "hermes-4"}
+    assert _pinned_dialect(default="hermes-3") in DIALECTS
 
 
 def test_the_episode_record_says_which_dialect_produced_it():

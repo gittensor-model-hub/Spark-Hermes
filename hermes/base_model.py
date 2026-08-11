@@ -1,11 +1,11 @@
 """The base model, pinned to a revision rather than to a name.
 
-Phase 0 is pipeline validation and it needs a model that exists. `Qwen/Qwen3.8-27B` does
-not: as of 2026-08-10 the only repositories under that name on the Hub are third-party
-derivatives with no official base, which cannot be pinned or verified and should not be
-trained against. `Qwen/Qwen3.6-27B` does exist, and the recipes now point at it.
+The development base is `meta-models/Muse-Glimmer-30B`. It replaced `Qwen/Qwen3.6-27B`, which
+itself stood in for an announced-and-unpublished `Qwen/Qwen3.8-27B` -- the only repositories under
+that name were third-party derivatives with no official base, which cannot be pinned or verified
+and should not be trained against.
 
-**A name is not a pin.** `base_model: Qwen/Qwen3.6-27B` resolves to whatever that
+**A name is not a pin.** `base_model: meta-models/Muse-Glimmer-30B` resolves to whatever that
 repository holds when someone runs it. `eval.hf_pin` already refuses movable refs on the
 mining side for exactly that reason; the base model was the one place still naming a
 repository without saying which commit of it. Two runs that agree on every other digest
@@ -15,9 +15,12 @@ this project computes could still have trained on different weights.
 
 `revision` is the whole point -- a 40-character commit, checked by `eval.hf_pin`.
 
-`hermes_dialect` is recorded with its evidence rather than asserted. The repository's own
-chat template emits `<tool_call>`, `<tools>`, `<tool_response>` and `<think>`, and does not
-emit `<scratch_pad>`. That is the Hermes 4 shape, established by reading the model rather
+`hermes_dialect` is recorded with its evidence rather than asserted, and for this base the
+evidence says something inconvenient: the repository's own chat template renders tool calls as
+`<atem:function_calls>` / `<atem:invoke>` / `<atem:parameter>`, returns results in
+`<tool_output>`, and puts deliberation on a `self` recipient. It contains no `<tool_call>` and no
+`<think>`. This model does not speak Hermes, which is why `hermes/atem.py` exists -- established
+by reading the model, and then confirmed by generating from it rather
 than by choosing for it -- which matters, because the project's rule is that Hermes is
 upstream and the model is what adapts.
 
