@@ -790,6 +790,47 @@ python -m hermes.challenge --episodes base.jsonl \
 data: the episode log otherwise carries counts only, and
 [`hermes/format.py`](hermes/format.py) renders rows from a trajectory.
 
+`--concurrency` defaults to 1. The served model handles many sequences at once and this runner did
+one episode at a time: at the measured median of 124 s per episode, a 190-episode baseline is about
+six and a half hours sequential and under an hour at 8.
+
+### Training a candidate, and deciding whether it ships
+
+```bash
+# rollouts -> datasets -> adapters
+python -m validator.aggregate --out var/datasets
+scripts/train.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-c-tools.yaml
+
+# fold the adapter into the base, after checking it is the right adapter
+scripts/merge_lora.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-c-tools.yaml
+#  -> outputs/spark-hermes-agent-3.8-27b/stage-c/merged   <- what stage D starts from
+
+scripts/train.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-d-preference.yaml
+
+# benchmark the candidate the same way, then ask whether it replaces what is served
+python -m hermes.promotion --incumbent runs/m0.json --candidate runs/m1.json
+```
+
+A run file names the model, how it was served, and the episode log the runner wrote:
+
+```json
+{"model": "m1", "episodes_path": "m1.jsonl",
+ "serving": {"precision": "bf16", "device": "RTX PRO 6000 Blackwell SE", "engine": "vllm 0.11.2",
+             "temperature": 0.2, "top_p": 0.95, "max_model_len": 32768, "confidential_computing": false}}
+```
+
+`serving` is required in full. `harness_digest` covers the prompt, the tools, the executor and the
+container; it does not cover precision, device or sampling, and a promotion decided across a change
+in those is a serving change wearing the model's name. A blank field is refused rather than assumed,
+because two runs that both recorded nothing would otherwise compare as identically served.
+
+The gate promotes only when success improves on a **paired test over tasks** — fewer than six tasks
+changing direction cannot reach p ≤ 0.05 at all, and that is reported as underpowered rather than as
+a negative — and when tokens per success, tool calls per success, median latency and the
+catastrophic-failure rate have not regressed past their guardrail. Malformed-turn rate is bounded
+separately: a well-formed `<tool_call>` costs tokens, so drifting off-protocol improves every other
+metric in the comparison.
+
 ---
 
 ## Engineering rules
