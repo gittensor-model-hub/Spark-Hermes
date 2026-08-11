@@ -61,6 +61,26 @@ OUTPUT_CLOSE = "</tool_output>"
 # Reasoning arrives on its own channel, so unlike Hermes there is no tag to look for.
 REASONING_CHANNEL = "self"
 
+# The channel framing. A server that splits channels for us hands back clean content and a separate
+# `reasoning_content`; one that does not -- or a raw generate() call -- leaves this scaffolding in
+# the text. Both were observed against the real model on 2026-08-11, so the parser handles both
+# rather than assuming the serving layer is tidy. Left in, the markers end up inside the FINAL
+# step: the answer a task is graded on would carry `<|eom|><|start|>assistant to=user<|message|>`.
+_SELF_TURN_RE = re.compile(
+    # Leading whitespace, because a completion begins immediately after `<|start|>assistant` and
+    # therefore opens with " to=self<|message|>" -- the first version anchored on `^` and matched
+    # nothing on the real transcript.
+    r"(?:\A\s*|<\|start\|>\s*assistant\s*)to=self\s*<\|message\|>(.*?)(?=<\|eom\|>|<\|eot\|>|\Z)",
+    re.DOTALL,
+)
+
+# `to=[^\s<]+` rather than `to=\S+`: the greedy version consumed "to=self<|message|>The" in one
+# bite, swallowing the first word of the answer along with the framing. Observed on the real
+# transcript, which is why the fixture in the tests is that transcript rather than a synthetic one.
+_FRAMING_RE = re.compile(
+    r"<\|(?:start|message|eom|eot|end|return)\|>|(?<![\w-])to=[^\s<]+|(?<![\w-])assistant(?=\s|\Z)"
+)
+
 _BLOCK_RE = re.compile(re.escape(CALLS_OPEN) + r"(.*?)" + re.escape(CALLS_CLOSE), re.DOTALL)
 _INVOKE_RE = re.compile(r'<atem:invoke\s+name="([^"]*)"\s*>(.*?)</atem:invoke>', re.DOTALL)
 _PARAM_RE = re.compile(r'<atem:parameter\s+name="([^"]*)"\s*>(.*?)</atem:parameter>', re.DOTALL)
@@ -205,6 +225,15 @@ def parse_turn(content: str, *, reasoning: str = "", schemas: dict[str, dict[str
     calls: list[ParsedCall] = []
     spans: list[tuple[int, int]] = []
 
+    # Deliberation addressed to `self`, when the serving layer left it in the content instead of
+    # returning it as `reasoning_content`. Taken out before anything else, so it is neither read as
+    # the model's answer nor scanned for near-miss call tags.
+    inline_reasoning = [m.group(1).strip() for m in _SELF_TURN_RE.finditer(content)]
+    if inline_reasoning and not reasoning:
+        reasoning = "\n\n".join(r for r in inline_reasoning if r)
+    for match in reversed(list(_SELF_TURN_RE.finditer(content))):
+        content = content[: match.start()] + content[match.end() :]
+
     for block in _BLOCK_RE.finditer(content):
         spans.append(block.span())
         body = block.group(1)
@@ -253,7 +282,7 @@ def parse_turn(content: str, *, reasoning: str = "", schemas: dict[str, dict[str
             "the tag: `<function_calls>` and `<atem :invoke>` are both unparseable."
         )
 
-    text = _LOOSE_RE.sub("", remainder).strip()
+    text = _FRAMING_RE.sub("", _LOOSE_RE.sub("", remainder)).strip()
     return ParsedTurn(calls=tuple(calls), text=text, scratch_pad=reasoning.strip(), malformed=tuple(malformed))
 
 
