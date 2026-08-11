@@ -716,6 +716,8 @@ reading the model and then confirmed by generating from it — not chosen for it
 Hermes: the pinned artifact for ATEM is upstream's *own* template, committed byte for byte at
 [`hermes/templates/chat-template-atem.jinja`](hermes/templates/chat-template-atem.jinja), and the
 check runs the other way round — every marker the parser depends on must still be present in it.
+Whether that trade serves the project's goals, what forcing Hermes at this base measurably cost, and
+the one alternative worth taking seriously: [`docs/why-atem.md`](docs/why-atem.md).
 
 **It is multimodal, so "30B" is not 30B of text parameters** and every text hyperparameter lives
 under `text_config`. Anything reading the top level of `config.json` for `hidden_size` gets `None`
