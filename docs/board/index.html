@@ -326,6 +326,31 @@
   // describing a competition that has moved on.
   const STALE_AFTER_S = 2 * 3600;
 
+  // Which validator to try, read from a file committed beside this page rather than from the URL.
+  // A `?validator=` parameter would let anyone render another validator's numbers under this
+  // project's name, which is the one thing serving the board from the validator's own origin
+  // avoided. Empty means snapshot only, and that is the correct setting until a validator is
+  // publicly reachable over HTTPS -- a page served over HTTPS cannot fetch an http:// origin, and
+  // the validator needs CORS for this origin before a cross-origin read succeeds at all.
+  let CONFIG = { validator: "", refresh_seconds: 15 };
+
+  async function loadConfig() {
+    try {
+      const response = await fetch("config.json", { cache: "no-store" });
+      if (response.ok) {
+        const loaded = await response.json();
+        CONFIG = { ...CONFIG, ...loaded };
+      }
+    } catch {
+      // No config file: this is the validator serving its own board, where relative paths are right.
+    }
+  }
+
+  function endpoint(path) {
+    const base = String(CONFIG.validator || "").replace(/\/+$/, "");
+    return base ? `${base}${path}` : path;
+  }
+
   function showMode(kind, detail) {
     const el = document.getElementById("mode");
     el.className = kind;
@@ -348,10 +373,10 @@
     let current = null;
     let snapshot = null;
     try {
-      const response = await fetch("/v1/round/current", { cache: "no-store" });
+      const response = await fetch(endpoint("/v1/round/current"), { cache: "no-store" });
       if (response.ok) {
         current = await response.json();
-        showMode("live", "live");
+        showMode("live", CONFIG.validator ? `live · ${CONFIG.validator}` : "live");
       }
     } catch {
       // A validator with no round open answers 404 here, which is normal and not an error. The
@@ -405,7 +430,7 @@
       return;
     }
     try {
-      const response = await fetch("/v1/submissions", { cache: "no-store" });
+      const response = await fetch(endpoint("/v1/submissions"), { cache: "no-store" });
       if (!response.ok) {
         rows.replaceChildren();
         say(`The validator answered ${response.status} for /v1/submissions. This is not an empty round.`, true);
@@ -419,6 +444,8 @@
     }
   }
 
-  refresh();
-  setInterval(refresh, 15000);
+  loadConfig().then(() => {
+    refresh();
+    setInterval(refresh, Math.max(5, Number(CONFIG.refresh_seconds) || 15) * 1000);
+  });
 </script>

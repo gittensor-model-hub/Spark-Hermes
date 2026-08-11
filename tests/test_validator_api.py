@@ -357,12 +357,35 @@ def test_the_board_is_served_from_the_validator_itself(client):
     assert "Submissions" in response.text
 
 
-def test_the_board_reads_this_hosts_own_endpoints(client):
-    """A page fetching an absolute URL could be aimed at a validator whose receipts nobody
-    published, and would need CORS on this one."""
+def test_the_board_loads_no_code_or_assets_from_another_origin(client):
+    """A validator serves no third-party script, and neither does its board. Data may come from a
+    configured validator; a stylesheet, font or script may not come from anywhere."""
     page = client.get("/").text
-    assert '"/v1/submissions"' in page and '"/v1/round/current"' in page
-    assert "http://" not in page and "https://" not in page, "nothing is loaded from another origin"
+    for attribute in ("src=", "href=", "@import"):
+        for absolute in ("http://", "https://", "//cdn", "//unpkg"):
+            assert f'{attribute}"{absolute}' not in page and f"{attribute}'{absolute}" not in page
+
+
+def test_the_validator_origin_never_comes_from_the_url(client):
+    """The board may be told which validator to read, and only by a file committed beside it.
+
+    A `?validator=` parameter would let anyone render another validator's numbers under this
+    project's name — which is exactly what serving the board from the validator's own origin
+    avoided, and the reason the configurable origin is a committed file rather than a query string.
+    """
+    page = client.get("/").text
+    for taken_from_the_url in ("location.search", "URLSearchParams", "location.hash", "document.referrer"):
+        assert taken_from_the_url not in page, taken_from_the_url
+    assert 'fetch("config.json"' in page, "the origin is read from the committed config"
+
+
+def test_relative_paths_are_used_when_no_validator_is_configured(client):
+    """The validator serving its own board is the case with no config file at all, and it must keep
+    working: `endpoint()` returns the path unchanged when the base is empty."""
+    page = client.get("/").text
+    assert 'endpoint("/v1/round/current")' in page
+    assert 'endpoint("/v1/submissions")' in page
+    assert "return base ? `${base}${path}` : path;" in page
 
 
 def _executable(page: str) -> str:
@@ -532,3 +555,46 @@ def test_every_exemption_names_a_real_handler():
     names = {h.__name__ for h in api.route_handlers()}
     assert set(api.SERVES_NO_DATA) <= names
     assert all(reason for reason in api.SERVES_NO_DATA.values()), "each exemption states why"
+
+
+# --- reading this validator from a board hosted somewhere else -------------------------------------
+
+
+def test_no_cross_origin_reads_are_allowed_by_default(monkeypatch):
+    """Off unless asked for. A validator that shipped permissive CORS would let a page anywhere
+    drive reads from a visitor's browser, and nobody deploying one would have chosen that."""
+    monkeypatch.delenv("SPARK_BOARD_ORIGINS", raising=False)
+    import importlib
+
+    from validator import api as module
+
+    reloaded = importlib.reload(module)
+    try:
+        assert reloaded.READ_ORIGINS == ()
+        names = [m.cls.__name__ for m in reloaded.app.user_middleware]
+        assert "CORSMiddleware" not in names
+    finally:
+        importlib.reload(module)
+
+
+def test_a_named_origin_gets_read_access_and_nothing_more(monkeypatch):
+    """Reads only, and only the origins named. `allow_methods` is GET, so a submission cannot be
+    posted cross-origin however the browser is coaxed -- the write path takes untrusted input and
+    CORS is not an authentication mechanism."""
+    monkeypatch.setenv("SPARK_BOARD_ORIGINS", "https://gittensor-model-hub.github.io")
+    import importlib
+
+    from validator import api as module
+
+    reloaded = importlib.reload(module)
+    try:
+        assert reloaded.READ_ORIGINS == ("https://gittensor-model-hub.github.io",)
+        cors = [m for m in reloaded.app.user_middleware if m.cls.__name__ == "CORSMiddleware"]
+        assert len(cors) == 1
+        options = cors[0].kwargs
+        assert options["allow_methods"] == ["GET"]
+        assert options["allow_credentials"] is False
+        assert "*" not in options["allow_origins"], "a wildcard would invite any page to drive reads"
+    finally:
+        monkeypatch.delenv("SPARK_BOARD_ORIGINS", raising=False)
+        importlib.reload(module)

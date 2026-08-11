@@ -1,0 +1,5 @@
+{
+  "_comment": "Which validator the board should try before falling back to state.json. Committed rather than taken from a URL parameter: a ?validator= would let anyone render another validator's numbers under this project's name. Empty means snapshot only, which is the correct setting until a validator is publicly reachable over HTTPS -- a page served over HTTPS cannot fetch an http:// origin, and the validator needs CORS for the Pages origin before this does anything.",
+  "validator": "",
+  "refresh_seconds": 15
+}

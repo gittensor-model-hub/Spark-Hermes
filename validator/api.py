@@ -44,6 +44,7 @@ in `/round/current`, so nothing is concealed by saying so.
 from __future__ import annotations
 
 import inspect
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -190,6 +191,31 @@ app = FastAPI(
     title="Spark-Hermes validator",
     summary="RoundWindow state and audit records. Submissions arrive as GitHub pull requests.",
 )
+
+
+# Origins allowed to read this validator from a browser. Read-only endpoints only, named
+# explicitly, and empty by default.
+#
+# A board hosted somewhere else -- GitHub Pages -- cannot read this API without them: a page served
+# from another origin gets no response body without the server's consent. So this is what turns the
+# published-snapshot board into a live one.
+#
+# `*` is deliberately not offered. The write path here takes untrusted input, and while CORS is not
+# an authentication mechanism, a wildcard invites a page anywhere to drive it from a visitor's
+# browser. And the allowlist covers reads only: `allow_methods` is GET, so a submission cannot be
+# posted cross-origin at all.
+READ_ORIGINS = tuple(o for o in os.environ.get("SPARK_BOARD_ORIGINS", "").split(",") if o.strip())
+
+if READ_ORIGINS:
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in READ_ORIGINS],
+        allow_credentials=False,
+        allow_methods=["GET"],
+        allow_headers=["*"],
+    )
 
 
 @app.get("/v1/health")
