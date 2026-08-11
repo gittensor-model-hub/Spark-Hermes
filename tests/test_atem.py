@@ -606,8 +606,89 @@ REAL_LEFTOVER = (
 )
 
 
-def test_a_call_left_in_the_text_is_not_lost(monkeypatch):
-    """The transcript above, verbatim from the run that exposed this."""
+def test_a_call_left_in_the_reasoning_is_not_lost():
+    """The transcript above, verbatim from the run that exposed this.
+
+    The server returned one call structurally and left this one in `reasoning_content`, which is the
+    channel it usually lands in: an ATEM turn is `assistant to=self` deliberation followed by
+    `assistant to=<tool>` carrying the call, so a reasoning parser that does not stop cleanly at the
+    end of the first swallows the second. Over one 19-task run this happened in 15 turns across 11
+    episodes, and 8 of those calls matched nothing the server returned -- executed nowhere, counted
+    nowhere, and not malformed either.
+    """
+    from hermes.trajectory import TOOL_CALL
+
+    policy, _ = _policy("")
+    policy.complete = lambda messages, *, tools=None: (
+        "",
+        {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "reasoning_content": REAL_LEFTOVER,
+            "tool_calls": [{"name": "terminal", "arguments": '{"command": "ls -la"}'}],
+        },
+    )
+    steps = policy.next_steps(_task(), [])
+    calls = [s for s in steps if s.kind == TOOL_CALL]
+    assert [c.args["command"] for c in calls] == ["ls -la", "ls -la logs"], (
+        "both the structured call and the one left in the reasoning must be executed, in order"
+    )
+
+
+def test_the_recovered_call_is_not_left_in_the_recorded_reasoning():
+    """Because the trajectory is the SFT corpus.
+
+    A thinking step that still carries `<atem:function_calls>` is rendered into a training row, and
+    the pinned template puts a thinking step on the `to=self` channel -- so the row would teach the
+    model to emit a call where its own template renders private deliberation. Stripping it at the
+    parser is what keeps that out of every corpus built downstream.
+    """
+    from hermes.trajectory import THINKING
+
+    policy, _ = _policy("")
+    policy.complete = lambda messages, *, tools=None: (
+        "",
+        {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "reasoning_content": REAL_LEFTOVER,
+            "tool_calls": [{"name": "terminal", "arguments": '{"command": "ls -la"}'}],
+        },
+    )
+    thinking = [s for s in policy.next_steps(_task(), []) if s.kind == THINKING]
+    assert thinking, "the deliberation itself is still recorded"
+    joined = "\n".join(s.content for s in thinking)
+    assert "We have logs directory" in joined, "the prose the model actually reasoned in survives"
+    assert "<atem:" not in joined, "the wire markup does not"
+
+
+def test_a_call_echoed_in_the_reasoning_is_executed_once():
+    """7 of the 15 measured turns were echoes: the same call, returned structurally AND left in the
+    reasoning. Running those twice is worse than losing them -- a duplicated mutating command is not
+    idempotent, and `rm -rf build` twice is a different episode than once."""
+    from hermes.trajectory import TOOL_CALL
+
+    policy, _ = _policy("")
+    policy.complete = lambda messages, *, tools=None: (
+        "",
+        {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "reasoning_content": "Let's clear the build.\n" + render_tool_call("terminal", {"command": "rm -rf build"}),
+            "tool_calls": [{"name": "terminal", "arguments": '{"command": "rm -rf build"}'}],
+        },
+    )
+    calls = [s for s in policy.next_steps(_task(), []) if s.kind == TOOL_CALL]
+    assert len(calls) == 1, "deduplicated on name and arguments"
+
+
+def test_a_call_left_in_the_text_is_not_lost_either():
+    """The `content` channel gets the same treatment. Not measured in the run above -- every observed
+    leftover was in the reasoning -- but a tool parser is under no obligation about which channel it
+    leaves a call in, and the failure is silent in both."""
     from hermes.trajectory import TOOL_CALL
 
     policy, _ = _policy(REAL_LEFTOVER)
@@ -620,55 +701,31 @@ def test_a_call_left_in_the_text_is_not_lost(monkeypatch):
             "tool_calls": [{"name": "terminal", "arguments": '{"command": "ls -la"}'}],
         },
     )
-    steps = policy.next_steps(_task(), [])
-    calls = [s for s in steps if s.kind == TOOL_CALL]
-    assert [c.args["command"] for c in calls] == ["ls -la", "ls -la logs"], (
-        "both the structured call and the one left in the text must be executed, in order"
-    )
-
-
-def test_a_call_returned_twice_is_executed_once():
-    """A server that returns a call structurally AND echoes its markup would otherwise have it run
-    twice, which is worse than dropping it -- a duplicated mutating command is not idempotent."""
-    from hermes.trajectory import TOOL_CALL
-
-    same = render_tool_call("terminal", {"command": "rm -rf build"})
-    policy, _ = _policy(same)
-    policy.complete = lambda messages, *, tools=None: (
-        same,
-        {
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "total_tokens": 15,
-            "tool_calls": [{"name": "terminal", "arguments": '{"command": "rm -rf build"}'}],
-        },
-    )
     calls = [s for s in policy.next_steps(_task(), []) if s.kind == TOOL_CALL]
-    assert len(calls) == 1, "deduplicated on name and arguments"
+    assert [c.args["command"] for c in calls] == ["ls -la", "ls -la logs"]
 
 
 def test_prose_beside_a_leftover_call_survives_as_text():
     """A turn that is half answer and half call keeps the answer: `text` becomes the FINAL step."""
-    from hermesbench.policy import _merge_text_calls, _turn_from_tool_calls
+    from hermes.protocol import DIALECTS
+    from hermesbench.policy import _merge_leftover_calls, _turn_from_tool_calls
 
     turn = _turn_from_tool_calls([{"name": "terminal", "arguments": "{}"}], text=REAL_LEFTOVER, reasoning="r")
-    from hermes.protocol import DIALECTS
-
-    merged = _merge_text_calls(turn, text=REAL_LEFTOVER, dialect=DIALECTS["atem"], schemas={})
+    merged = _merge_leftover_calls(turn, text=REAL_LEFTOVER, reasoning="r", dialect=DIALECTS["atem"], schemas={})
     assert "We have logs directory" in merged.text
     assert "<atem:invoke" not in merged.text
     assert merged.scratch_pad == "r"
 
 
 def test_a_malformed_leftover_is_still_counted():
-    """A truncated call left in the text is the reason `malformed_turns` exists, and it must survive
-    the merge rather than being replaced by the structured call's clean verdict."""
+    """A truncated call left behind is the reason `malformed_turns` exists, and it must survive the
+    merge rather than being replaced by the structured call's clean verdict."""
     from hermes.protocol import DIALECTS
-    from hermesbench.policy import _merge_text_calls, _turn_from_tool_calls
+    from hermesbench.policy import _merge_leftover_calls, _turn_from_tool_calls
 
     truncated = '<atem:function_calls>\n<atem:invoke name="terminal">\n<atem:parameter name="command">ls'
-    turn = _turn_from_tool_calls([{"name": "terminal", "arguments": "{}"}], text=truncated, reasoning="")
+    turn = _turn_from_tool_calls([{"name": "terminal", "arguments": "{}"}], text="", reasoning=truncated)
     assert turn.malformed == ()
-    merged = _merge_text_calls(turn, text=truncated, dialect=DIALECTS["atem"], schemas={})
+    merged = _merge_leftover_calls(turn, text="", reasoning=truncated, dialect=DIALECTS["atem"], schemas={})
     assert merged.malformed, "the truncation is the measurement"
     assert merged.safe_calls == (), "and nothing from a turn that confused the parser executes"

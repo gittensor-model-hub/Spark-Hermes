@@ -25,6 +25,7 @@ from typing import Any
 
 from hermes.protocol import (
     DIALECTS,
+    HERMES_4,
     Conversation,
     Dialect,
     ProtocolError,
@@ -115,20 +116,71 @@ def _reasoning_text(step: Step) -> str:
     return step.content
 
 
-def _assistant_turn(reasoning: list[str], calls: list[Step], answer: str | None) -> dict[str, Any]:
+def _tool_field(names: tuple[str, ...], *, dialect: Dialect, schemas: dict[str, dict[str, Any]] | None) -> list[Any]:
+    """The row's `tools` field: bare names, or full definitions when the template renders them.
+
+    Hermes puts the definitions in the system prompt, which is already in `messages`, so the names
+    are a record of what was available and nothing reads them as a signature. The ATEM template
+    renders definitions from this field and calls `.name` on each entry -- given a string it raises
+    `'str object' has no attribute 'name'`, which is how an ATEM corpus failed on its first row.
+
+    Refused rather than filled in with stubs. A synthesised signature shows the model parameters
+    that do not exist, which is the same refusal `to_hermes_record` already makes.
+    """
+    if dialect.tools_in_prompt:
+        return list(names)
+    if not schemas:
+        raise ProtocolError(
+            f"dialect {dialect.name!r} renders tool definitions from the row, so {list(names)} cannot be "
+            "written as bare names; pass tool_schemas (hermes.pin.load_tool_schemas reads the committed set)"
+        )
+    missing = [n for n in names if n not in schemas]
+    if missing:
+        raise ProtocolError(
+            f"no schema for {missing}; a corpus that advertises an invented signature teaches the model "
+            "parameters the tool does not have"
+        )
+    return [tool_schema(n, schemas[n].get("description", ""), schemas[n].get("parameters", {})) for n in names]
+
+
+def _assistant_turn(
+    reasoning: list[str], calls: list[Step], answer: str | None, *, dialect: Dialect = HERMES_4
+) -> dict[str, Any]:
+    """One assistant message, shaped for the chat template that will render it.
+
+    Both branches below exist because a real trajectory was rendered through the pinned ATEM
+    template and it raised. The row looked correct in every test in this repository, because every
+    test in this repository checked the row rather than what a template does with it.
+    """
     parts: list[str] = []
     joined = "\n\n".join(r.strip() for r in reasoning if r.strip())
-    if joined:
+    message: dict[str, Any] = {"role": "assistant"}
+    if joined and dialect.reasoning_in_content:
         parts.append(_think_block(joined))
     if answer:
         parts.append(answer.strip())
-    message: dict[str, Any] = {"role": "assistant", "content": "\n\n".join(parts)}
+    message["content"] = "\n\n".join(parts)
+    if joined and not dialect.reasoning_in_content:
+        # A separate field, not a tag inside the content, because that is where this dialect's
+        # template looks. Putting it in `content` loses it entirely on a turn that also carries
+        # tool_calls -- the template renders the calls and never reads `content` at all -- so the
+        # reasoning would vanish from precisely the turns whose reasoning is the lesson.
+        message["reasoning_content"] = joined
     if calls:
         message["tool_calls"] = [
             {
                 "id": call.call_id,
                 "type": "function",
-                "function": {"name": call.tool, "arguments": json.dumps(call.args, ensure_ascii=False)},
+                # A JSON string for Hermes, whose templates parse it; a mapping for a template that
+                # cannot. The ATEM template raises `a JSON string cannot be parsed in the HF jinja
+                # sandbox` rather than rendering something wrong, so every tool-calling row in an
+                # ATEM corpus failed at train time until this branch existed.
+                "function": {
+                    "name": call.tool,
+                    "arguments": json.dumps(call.args, ensure_ascii=False)
+                    if dialect.tool_arguments_json
+                    else call.args,
+                },
             }
             for call in calls
         ]
@@ -171,8 +223,19 @@ def to_messages_record(
     default_system: str = DEFAULT_SYSTEM,
     system_policy: str = KEEP,
     system_replacement: str = "",
+    dialect: Dialect = HERMES_4,
+    tool_schemas: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Render one trajectory as an Axolotl `chat_template` messages record."""
+    """Render one trajectory as an Axolotl `chat_template` messages record.
+
+    `dialect` decides the row's *shape*, not just its markup, and the default keeps every existing
+    caller on the Hermes shape they were written against. Passing the dialect the episode was
+    actually run in is what makes the corpus trainable: see `_assistant_turn`.
+
+    `tool_schemas` resolves `tools_available` -- which is a list of bare names -- into the function
+    definitions a chat template needs. Required for a dialect that renders tool definitions from the
+    row, because the alternative is emitting names into a field the template will call `.name` on.
+    """
     messages: list[dict[str, Any]] = [{"role": "system", "content": _system_content(trajectory, default_system)}]
     messages.append({"role": "user", "content": trajectory.task})
 
@@ -186,7 +249,7 @@ def to_messages_record(
             calls.append(step)
         elif step.kind == TOOL_RESULT:
             if calls:
-                messages.append(_assistant_turn(reasoning, calls, None))
+                messages.append(_assistant_turn(reasoning, calls, None, dialect=dialect))
                 reasoning, calls = [], []
             messages.append(
                 {
@@ -196,14 +259,14 @@ def to_messages_record(
                 }
             )
         elif step.kind == FINAL:
-            messages.append(_assistant_turn(reasoning, calls, step.content))
+            messages.append(_assistant_turn(reasoning, calls, step.content, dialect=dialect))
             reasoning, calls = [], []
 
     record: dict[str, Any] = {
         "messages": apply_system_policy(messages, policy=system_policy, replacement=system_replacement)
     }
     if trajectory.tools_available:
-        record["tools"] = list(trajectory.tools_available)
+        record["tools"] = _tool_field(trajectory.tools_available, dialect=dialect, schemas=tool_schemas)
     if system_policy != KEEP:
         # Recorded on the row, not only in the command that produced it. A corpus is read
         # months later by someone who did not build it, and "were these rows trained toward

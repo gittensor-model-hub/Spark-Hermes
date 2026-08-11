@@ -39,7 +39,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hermes.cost import OPENAI, Usage, usage_from_provider
-from hermes.protocol import Dialect, ParsedTurn, parse_turn, render_system, render_tool_response, tool_schema
+from hermes.protocol import (
+    Dialect,
+    ParsedCall,
+    ParsedTurn,
+    parse_turn,
+    render_system,
+    render_tool_response,
+    tool_schema,
+)
 from hermes.trajectory import FINAL, THINKING, TOOL_CALL, TOOL_RESULT, Step
 from hermesbench.tasks import Task
 
@@ -169,18 +177,23 @@ class ServedModelPolicy:
         reasoning = str(raw.get("reasoning_content") or "") if isinstance(raw, dict) else ""
         structured = raw.get("tool_calls") if isinstance(raw, dict) else None
         if structured:
-            # The server parsed the wire format, and it does not always parse ALL of it. Measured
-            # against SGLang: the model emitted two complete calls in one turn, the server returned
-            # one as a structured call and left the other's markup in `content`, and this branch put
-            # that text into a THINKING step -- so a call the model made was never executed, never
-            # counted in `tool_calls`, and not malformed either. Prose inside a thinking step, which
-            # no metric distinguishes from real reasoning.
+            # The server parsed the wire format, and it does not always parse ALL of it -- and the
+            # channel it leaves a call in is usually `reasoning_content`, not `content`. An ATEM turn
+            # is `assistant to=self` deliberation followed by `assistant to=<tool>` carrying the call,
+            # so a reasoning parser that does not stop cleanly at the end of the first swallows the
+            # second. Measured over one 19-task run: 15 turns arrived with complete call markup inside
+            # the reasoning, in 11 of the 19 episodes, and 8 of those calls matched nothing the server
+            # returned structurally. Those were never executed, never counted in `tool_calls`, and not
+            # malformed either -- markup inside a THINKING step, which no metric distinguishes from
+            # real reasoning.
             #
-            # So the text is parsed too and the results merged. Deduplicated by (name, arguments),
-            # because a server that returns a call structurally AND leaves its text behind would
-            # otherwise have it executed twice.
+            # So both channels are parsed and merged, deduplicated by (name, arguments): the other 7
+            # were echoes of a call the server did return, and executing those twice is worse than
+            # losing them.
             turn = _turn_from_tool_calls(structured, text=text, reasoning=reasoning)
-            turn = _merge_text_calls(turn, text=text, dialect=self.dialect, schemas=self.tool_schemas)
+            turn = _merge_leftover_calls(
+                turn, text=text, reasoning=reasoning, dialect=self.dialect, schemas=self.tool_schemas
+            )
         else:
             turn = parse_turn(text, dialect=self.dialect, reasoning=reasoning, schemas=self.tool_schemas)
         # `parse_turn` already separates malformed from abstained, and `steps_from_turn`
@@ -193,34 +206,59 @@ class ServedModelPolicy:
         return steps_from_turn(turn)
 
 
-def _merge_text_calls(
-    turn: ParsedTurn, *, text: str, dialect: Dialect, schemas: dict[str, dict[str, Any]]
+def _fingerprint(call: ParsedCall) -> tuple[str, str]:
+    return call.name, json.dumps(call.arguments, sort_keys=True)
+
+
+def _merge_leftover_calls(
+    turn: ParsedTurn, *, text: str, reasoning: str, dialect: Dialect, schemas: dict[str, dict[str, Any]]
 ) -> ParsedTurn:
-    """Add calls the server left in the text, and keep whatever the parser says about them.
+    """Recover calls the server left in the text or the reasoning, and clean both channels.
 
-    A serving layer's tool parser is not obliged to return every call in a turn, and one measured
-    here does not: given two, it returned the first structurally and left the second's markup in
-    `content`. Reading only the structured list loses that call silently -- the worst shape, because
-    the episode still succeeds if the model reissues it and simply looks like it took more turns.
+    A serving layer's tool parser is not obliged to return every call in a turn, and the one measured
+    here does not. Over a 19-task run, 15 turns in 11 episodes arrived with complete ATEM call markup
+    inside `reasoning_content`; 8 of those calls matched nothing the server returned structurally, so
+    reading only the structured list dropped them. That is the worst shape a loss can take: the
+    episode still succeeds when the model reissues the call, and the only symptom is an agent that
+    appears to need more turns than it does.
 
-    Deduplicated on (name, arguments): a server that returns a call structurally *and* echoes its
-    text would otherwise get it executed twice, which is worse than dropping it.
+    Both channels are read because both carry it -- and `reasoning_content` is the likelier one. An
+    ATEM turn is `assistant to=self` deliberation followed by `assistant to=<tool>` carrying the call,
+    so a reasoning parser that does not stop cleanly at the end of the first swallows the second. The
+    markup is a parser artifact, not the model deliberating about a call it chose not to make, which
+    is why these are executed rather than dropped the way Hermes drops a call inside `<think>`.
+
+    Deduplicated on (name, arguments): the other 7 were echoes of a call the server did return, and
+    executing those twice is worse than losing them.
+
+    The cleaned prose from each channel replaces it, so the recorded trajectory -- and therefore the
+    SFT corpus built from it -- does not carry raw wire markup inside a reasoning block and teach the
+    model to emit a call where its own template renders private deliberation.
     """
-    if not text.strip():
-        return turn
-    from_text = parse_turn(text, dialect=dialect, reasoning="", schemas=schemas)
-    if not from_text.calls and not from_text.malformed:
-        return turn
+    from_text = parse_turn(text, dialect=dialect, reasoning="", schemas=schemas) if text.strip() else None
+    from_reasoning = (
+        parse_turn(reasoning, dialect=dialect, reasoning="", schemas=schemas) if reasoning.strip() else None
+    )
 
-    seen = {(c.name, json.dumps(c.arguments, sort_keys=True)) for c in turn.calls}
-    extra = [c for c in from_text.calls if (c.name, json.dumps(c.arguments, sort_keys=True)) not in seen]
+    seen = {_fingerprint(c) for c in turn.calls}
+    extra: list[ParsedCall] = []
+    malformed: tuple[str, ...] = turn.malformed
+    for parsed in (from_text, from_reasoning):
+        if parsed is None:
+            continue
+        malformed = malformed + parsed.malformed
+        for call in parsed.calls:
+            if _fingerprint(call) not in seen:
+                seen.add(_fingerprint(call))
+                extra.append(call)
+
     return ParsedTurn(
         calls=turn.calls + tuple(extra),
-        # Whatever the parser judged to be prose after removing the call markup, so a turn that was
-        # half answer and half call keeps the answer.
-        text=from_text.text,
-        scratch_pad=turn.scratch_pad,
-        malformed=turn.malformed + from_text.malformed,
+        # The parser's prose for each channel, so a turn that was half answer and half call keeps the
+        # answer while the markup stops being recorded as something the model said.
+        text=from_text.text if from_text is not None else turn.text,
+        scratch_pad=from_reasoning.text.strip() if from_reasoning is not None else turn.scratch_pad,
+        malformed=malformed,
     )
 
 
@@ -233,8 +271,6 @@ def _turn_from_tool_calls(calls: list[dict[str, Any]], *, text: str, reasoning: 
     found" would score the protocol's hardest failure as its most disciplined behaviour.
     """
     import json
-
-    from hermes.protocol import ParsedCall
 
     parsed: list[ParsedCall] = []
     malformed: list[str] = []

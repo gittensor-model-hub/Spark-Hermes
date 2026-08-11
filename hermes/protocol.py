@@ -111,6 +111,20 @@ class Dialect:
     # symptom is a model that never calls a tool, which is the failure shape this repo already
     # warns about: zero tool calls, zero malformed turns, and a clean protocol score.
     tools_in_prompt: bool = True
+    # How a *training row* must be shaped for this dialect's own chat template. Both were found by
+    # rendering a real trajectory through the pinned template rather than by reading it, and both
+    # were wrong for ATEM in a way no test could see: the corpus looked fine and raised at train time.
+    #
+    # `reasoning_in_content` -- Hermes trains reasoning as `<think>...</think>` inside the assistant
+    # message content. The ATEM template renders `message['reasoning_content']` on an
+    # `assistant to=self` turn, and IGNORES `content` entirely on any message that has `tool_calls`.
+    # So a `<think>` block is silently dropped on exactly the turns that reason toward a call, and
+    # trained as literal visible prose on the turns that do not.
+    reasoning_in_content: bool = True
+    # `tool_arguments_json` -- Hermes templates take `function.arguments` as a JSON string. The ATEM
+    # template refuses one outright (`a JSON string cannot be parsed in the HF jinja sandbox`) and
+    # requires a mapping, so every tool-calling row raises.
+    tool_arguments_json: bool = True
 
     def __post_init__(self) -> None:
         if self.tool_result_role not in ("tool", "user"):
@@ -183,6 +197,8 @@ ATEM = Dialect(
     pydantic_line=False,
     family="atem",
     tools_in_prompt=False,
+    reasoning_in_content=False,
+    tool_arguments_json=False,
 )
 
 DIALECTS = {d.name: d for d in (HERMES_3, HERMES_4, ATEM)}

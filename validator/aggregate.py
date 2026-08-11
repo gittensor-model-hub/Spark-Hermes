@@ -64,6 +64,12 @@ class Episode:
     overfit: bool
     tokens: int
     trajectory: dict[str, Any]
+    # Which wire dialect produced it. Carried because it decides the SHAPE of the training row, not
+    # only its markup: reasoning belongs in `content` for one dialect and in `reasoning_content` for
+    # another, and tool arguments are a JSON string for one and a mapping for another. A corpus
+    # rendered in the wrong shape does not look wrong -- it raises in the trainer's chat template, or
+    # silently drops every reasoning block. See `hermes.protocol.Dialect`.
+    dialect: str = ""
 
     @property
     def usable(self) -> bool:
@@ -119,9 +125,41 @@ def read_episodes(path: Path, *, round_id: str, miner_id: str) -> list[Episode]:
                 overfit=public and hidden is False,
                 tokens=int(metrics.get("tokens_used") or 0),
                 trajectory=row.get("trajectory") or {},
+                dialect=str(metrics.get("dialect") or ""),
             )
         )
     return out
+
+
+def _render_context(episodes: list[Episode]) -> dict[str, Any]:
+    """The dialect every usable episode was run in, and the schemas its rows will need.
+
+    Refused when the episodes disagree. One corpus file is trained with one chat template, so mixing
+    dialects means half the rows are shaped for a template that will not render them -- and the half
+    that fails is decided by which dialect the trainer's template happens to be. `check_graders`
+    refuses a cross-dialect comparison for the same reason; this is that refusal on the corpus side.
+
+    An empty dialect keeps the Hermes default, so a log recorded before the field existed still
+    aggregates instead of failing on absence.
+    """
+    from hermes.protocol import DIALECTS, HERMES_4
+
+    seen = {e.dialect for e in episodes if e.usable and e.dialect}
+    if len(seen) > 1:
+        raise AggregateError(
+            f"the episodes were run in more than one wire dialect: {sorted(seen)}. The dialect decides "
+            "the shape of a training row, so one corpus cannot hold both"
+        )
+    dialect = DIALECTS.get(next(iter(seen), ""), HERMES_4)
+    schemas: dict[str, dict[str, Any]] | None = None
+    if not dialect.tools_in_prompt:
+        # This dialect's template renders tool definitions from the row, so bare names are not
+        # enough. Read from the committed set, which is the one the model was actually shown.
+        from hermes.pin import load_tool_schemas
+        from hermesbench.runner import HARNESS_DIR
+
+        schemas = load_tool_schemas(HARNESS_DIR / "tools.json")
+    return {"dialect": dialect, "tool_schemas": schemas}
 
 
 def sft_rows(episodes: list[Episode], *, system_policy: str = "keep") -> list[dict[str, Any]]:
@@ -134,12 +172,13 @@ def sft_rows(episodes: list[Episode], *, system_policy: str = "keep") -> list[di
     from hermes.format import to_messages_record
     from hermes.trajectory import AgentTrajectory
 
+    context = _render_context(episodes)
     rows: list[dict[str, Any]] = []
     for episode in episodes:
         if not episode.verified or not episode.usable:
             continue
         trajectory = AgentTrajectory.from_record(episode.trajectory)
-        record = to_messages_record(trajectory, system_policy=system_policy)
+        record = to_messages_record(trajectory, system_policy=system_policy, **context)
         rows.append(
             {
                 **record,
@@ -165,6 +204,7 @@ def preference_pairs(
     from hermes.format import to_messages_record
     from hermes.trajectory import AgentTrajectory
 
+    context = _render_context(episodes)
     by_task: dict[tuple[str, str], list[Episode]] = {}
     for episode in episodes:
         if episode.usable:
@@ -187,8 +227,12 @@ def preference_pairs(
                     {
                         "task_id": task_id,
                         "round_id": round_id,
-                        "chosen": to_messages_record(AgentTrajectory.from_record(good.trajectory))["messages"],
-                        "rejected": to_messages_record(AgentTrajectory.from_record(bad.trajectory))["messages"],
+                        "chosen": to_messages_record(AgentTrajectory.from_record(good.trajectory), **context)[
+                            "messages"
+                        ],
+                        "rejected": to_messages_record(AgentTrajectory.from_record(bad.trajectory), **context)[
+                            "messages"
+                        ],
                         "chosen_tokens": good.tokens,
                         "rejected_tokens": bad.tokens,
                     }

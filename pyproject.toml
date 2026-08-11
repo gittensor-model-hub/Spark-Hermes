@@ -18,6 +18,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    # The chat-template renderer. A declared test dependency rather than a transitive one, because
+    # tests/test_corpus_template.py renders a real training row through the pinned template and a
+    # test that skips when jinja2 is missing is a check that cannot fire -- which is the exact shape
+    # of defect it exists to catch.
+    "jinja2>=3.1.4",
     "pre-commit==4.6.1",
     "pyright==1.1.411",
     "pytest==9.1.1",

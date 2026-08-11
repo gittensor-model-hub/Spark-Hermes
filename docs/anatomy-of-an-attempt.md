@@ -197,7 +197,9 @@ The second line of the bundle's own summary is the honest limit: binding the epi
 weights needs the evaluation to run inside a measured confidential VM, with `claim_sha256` as the
 attestation nonce. The bundle says so rather than letting a reader assume more than it proves.
 
-## 7. One thing this transcript exposed
+## 7. Two things this transcript exposed
+
+### A call can go missing between the server and the harness
 
 Step 3 of the episode above was recorded as a `thinking` step, and it contained this:
 
@@ -210,16 +212,51 @@ We have logs directory. Let's list logs.
 </atem:function_calls>
 ```
 
-That is a **complete, well-formed tool call**, and it was never executed. The serving layer returned
-one call of that turn as a structured `tool_call` and left the second's markup in the message
-content; the policy used the structured list and put the leftover text into a thinking step. So a
-call the model made was dropped — not executed, not counted in `tool_calls`, and not `malformed`
-either, because there was nothing wrong with it.
+That is a **complete, well-formed tool call** sitting inside a reasoning channel. An ATEM turn is
+`assistant to=self` deliberation followed by `assistant to=<tool>` carrying the call, so a reasoning
+parser that does not stop cleanly at the end of the first swallows the second — and the harness,
+reading only the server's structured `tool_calls` list, never sees it.
 
-The episode still passed, because the model reissued the same command two steps later. That is the
-dangerous shape: the only visible effect is an agent that looks like it took more turns than it
-needed.
+In *this* turn nothing was lost: the server also returned `ls -la logs` structurally, so the markup
+was an echo. Scanning the whole run is what showed the real number:
 
-Fixed by parsing the text alongside the structured list and merging, deduplicated on name and
-arguments so a server that returns a call *and* echoes it does not run it twice. Found by reading a
-transcript rather than by any test, which is the argument for keeping trajectories.
+| turns whose reasoning carried complete call markup | 15, across 11 of the 19 episodes |
+|---|---|
+| calls that matched something the server also returned (echoes) | 7 |
+| **calls that matched nothing and were therefore never executed** | **8** |
+
+Eight calls the model made, in eight different episodes, were **not executed, not counted in
+`tool_calls`, and not `malformed`** — there was nothing wrong with them. One of them,
+`wc -w net/script.txt` in `sv-retry-request-budget`, had no other call in its turn at all: a clean
+loss. The others show as the model issuing a near-identical command a step later, which reads as an
+agent that needs more turns than it does.
+
+Fixed by parsing both channels alongside the structured list and merging them, deduplicated on
+`(name, arguments)` so the 7 echoes are not executed twice while the 8 losses are recovered. Verified
+by replaying the recorded turns: 8 recovered, 7 deduplicated, 0 turns left with markup in the record.
+
+### The corpus those trajectories become could not be trained
+
+The same markup mattered a second time. Trajectories are what `validator.aggregate` turns into SFT
+rows and preference pairs, so anything left in a thinking step is trained. Rendering a real row
+through the model's own pinned `chat_template.jinja` — rather than only inspecting the row — found
+three separate faults, none of which any existing test could see:
+
+| what the row had | what the template does | effect |
+|---|---|---|
+| `tools: ["terminal", …]` | calls `.name` on each entry | raises `'str object' has no attribute 'name'` |
+| `arguments` as a JSON string | refuses it: *a JSON string cannot be parsed in the HF jinja sandbox* | raises on every tool-calling row |
+| reasoning as `<think>…</think>` in `content` | renders `reasoning_content` on `assistant to=self`, and **ignores `content` entirely** when `tool_calls` are present | reasoning silently dropped from exactly the turns that reason toward a call — and trained as literal visible prose on the turns that do not |
+
+The first two raise, so somebody notices. The third does not. A corpus that trains **zero** reasoning
+tokens while every row visibly contains reasoning is the same defect shape this project keeps
+finding: an absence that reads as a measurement.
+
+The fix makes the row's *shape* — not just its markup — a property of the dialect, and
+`tests/test_corpus_template.py` now renders through the pinned template and asserts on the rendered
+text. It also asserts that the template still refuses a JSON string and still drops `content` beside
+`tool_calls`, so if upstream changes either, the reason for the flag is known to have changed.
+
+Both faults were found by reading a transcript and by running the real artifact through the real
+template — not by any test. That is the argument for keeping trajectories, and for testing the thing
+that finally consumes your output rather than the output itself.
