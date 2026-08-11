@@ -40,29 +40,36 @@ and used by the maintainer to train the next open Spark-Hermes checkpoint.
 TASK
   │
   ▼
-FROZEN SPARK-HERMES MODEL
+FROZEN SPARK-HERMES MODEL                 the validator runs the baseline
   │
   ├── verified + efficient ────────────────┐
   │                                        │
   └── fail / loop / expensive              │
              │                             │
              ▼                             │
-       CHALLENGE PACKAGE                   │
+       CHALLENGE PACKET                    │  datasets/challenges/
              │                             │
              ▼                             │
-       SN74 MINERS                         │
-   optimize agent strategy                 │
+       SN74 MINERS                         │  improve a private surface
+             │                             │  SOUL.md, skills, references
+             ▼                             │
+   PRIVATE BUNDLE ──► validator API        │  the surface stays the miner's edge
+   PUBLIC DIGEST  ──► pull request         │  timestamped, attributable, binding
              │                             │
              ▼                             │
-  INTEL TDX + NVIDIA GPU CC                │
+     VALIDATOR RUNS IT                     │  pinned model, environment, runtime
+   pinned everything, its own hardware     │  withheld verifiers never leave
              │                             │
              ▼                             │
-       VERIFY + SCORE                      │
-   correctness first                       │
-   efficiency second                       │
+       VERIFY + SCORE                      │  correctness gates efficiency
              │                             │
              ▼                             │
-  VERIFIED SFT / PREFERENCE / RL DATA      │
+     ONE CROWN PER HOUR                    │  every other pull request closes
+             │                             │
+             ├──► ROUND PROOF PUBLISHED    │  the commitment is opened
+             │                             │
+             ▼                             │
+  VERIFIED SFT / PREFERENCE DATA           │
              │                             │
              ▼                             │
     TRAIN NEXT SPARK-HERMES                │
@@ -73,6 +80,69 @@ FROZEN SPARK-HERMES MODEL
 
 This is the product: not a one-time fine-tune, and not a miner race to use the biggest
 hidden model.
+
+---
+
+## How a submission works
+
+A miner uploads their surface bundle **privately** to the validator API and opens a pull
+request carrying **only its digest**.
+
+```text
+POST /v1/round/{id}/submission     {miner_id, files: {path: content}}
+   ↓
+receipt: submission_id, bundle_sha256, status=pending
+   ↓
+pull request appends one line naming that digest
+   ↓
+validator runs the bundle the digest identifies
+```
+
+Both halves are load-bearing and neither works alone. A private upload with no public
+commitment is unauditable: nothing outside the validator records what was submitted, by whom,
+or when. A public surface is no longer an edge: the miner's strategy is the thing they are
+competing with, and publishing it hands it to every competitor.
+
+Together they give the property that matters. The validator cannot evaluate a bundle other
+than the one committed, and the miner cannot revise after the fact — the digest was published
+before anything ran.
+
+The digest **selects** which bundle is evaluated. A miner who uploads twice and commits to the
+first is evaluated on the first, not on whatever arrived most recently. That is what makes the
+public commitment authoritative rather than decorative.
+
+The upload is a JSON map of path to text, not an archive. A tarball brings path traversal,
+symlinks that resolve outside the extraction root, and decompression bombs; a map of strings
+has none of them, and a surface is a few kilobytes of prose so the encoding cost is nothing.
+Everything is validated — size, path shape, then the contract in
+[`hermes/miner_contract.json`](hermes/miner_contract.json) — before a byte reaches the
+filesystem.
+
+A receipt carries envelope facts only: `submission_id`, round, miner, digest, time, file count,
+bytes, and status. Nothing about merit. The endpoint is cheap to call repeatedly, so anything it
+said about correctness would be a free oracle on the withheld check.
+
+```text
+pending → evaluating → result
+```
+
+`GET /v1/submissions` serves those receipts, which is what the dashboard renders.
+
+---
+
+## Why the validator runs the surface
+
+At this stage the validator executes the submitted bundle itself: pinned model, pinned
+environment, pinned runtime, on its own hardware, against verifiers the miner never holds.
+
+That removes an entire class of question rather than answering it. Under miner-side generation
+the attestation proves genuine confidential hardware and binds to the exported files — but no
+approved guest measurement is pinned, so a quote proves *a* confidential VM ran, not that it ran
+an image anyone approved. On hardware the submitter owns, that is the whole question. Running it
+here means the model, the environment and the checks are not claims at all.
+
+The cost is that a miner must now trust the validator, which is what the round proof below is
+for.
 
 ---
 
@@ -142,34 +212,48 @@ inference-optimization track; no such track exists.
 
 ---
 
-## Confidential miner execution
+## The round proof, and where confidential computing becomes load-bearing
 
-The target rollout track uses:
-
-```text
-NVIDIA RTX PRO 6000 Blackwell Server Edition
-+
-NVIDIA Confidential Computing
-+
-Intel TDX confidential VM
-```
-
-The proof chain binds:
+The validator runs the surface, so a miner takes its word for the result unless something makes
+that word checkable. After a round settles it publishes a bundle:
 
 ```text
-model epoch
-task + challenge lease
-miner strategy
-runtime
-trajectory/result root
-hardware state
+challenge.json     the challenge it ran, with the withheld-check commitment
+round.json         the ledger, verdicts included once graded
+reveal.json        the per-task salt, released at settle
+episodes/          the logs each verdict came from
+scorecards/        the decisions
+manifest.json      a digest of every file, and claim_sha256 over all of them
 ```
 
-The validator verifies the Intel and NVIDIA evidence, exact artifact digests, task scope,
-resource accounting, replay protection, and the public/hidden task verdicts.
+`python -m validator.audit verify` recomputes `salted_digest(withheld_check, per_task_salt)` and
+compares it to the commitment the challenge published **before submissions opened**. That is the
+claim it supports: the validator graded against the check it committed to, not one written
+afterwards to suit a result. The salt is per-task —
+`derive_task_salt` is `HMAC(master, task_id)` — so opening one round leaves every unspent task's
+commitment sealed. The master never enters a bundle, and `build` searches for it rather than
+trusting itself not to have written it.
 
-The goal is to prove that **this exact approved model and strategy produced this exact
-result inside the declared confidential environment**.
+### What the bundle does not prove, and what would
+
+That the episodes came from the pinned model. Nothing in a published bundle can: a validator
+willing to fabricate a log can fabricate a consistent one. The manifest says so in a
+`does_not_prove` field rather than letting a reader infer more from the word "manifest".
+
+That is where confidential computing earns its place. Run the evaluation inside a measured VM and
+bind `claim_sha256` as the NRAS nonce and the TDX REPORTDATA — the same binding
+[`proof/bundle.py`](proof/bundle.py) already uses — and the log is tied to hardware running an
+approved image.
+
+The pieces are real and verified end to end on an RTX PRO 6000 Blackwell with CC enabled: NRAS
+issues a signed token (`measres: success`, `secboot: true`, nonce echoed), and
+[`eval/attestation.py`](eval/attestation.py) accepts it while refusing a self-signed local one.
+
+One gap stands between that and the stronger claim. `check_tdx_measurement` is called with no
+allowlist, so it returns `None` — no approved guest measurement is pinned. Until one is, a quote
+proves a genuine confidential VM ran and committed to this bundle, not that it ran an image we
+approved. The gate also tests `if measured is False`, which cannot fire on `None`: today that is
+a check incapable of failing, and pinning a measurement means fixing both.
 
 ---
 
@@ -334,11 +418,17 @@ while maintaining equal or stronger verification.
 ```text
 input   9,271,813   94.9%      re-sent context
 output    493,190    5.1%
-cache hit rate          0.00%  prefix caching was off
+cache hit rate          0.00%  prefix caching was off for that run
 ```
 
 Input dominates by nearly twenty to one, and almost all of it is the same conversation re-sent
-on every turn with no prefix cache behind it. So a strategy does not reduce input tokens by
+on every turn.
+
+Prefix caching has since been turned on for the pinned model and measured at an **80.8%** hit
+rate, so the system prompt and the accumulated conversation are served from cache after the first
+turn. That changes what the number means without changing the ranking: input is still the bill,
+but most of it is no longer paid twice. The tighter constraint is the 32,768-token window, which
+caching does nothing for -- the model still re-reads every earlier turn before each decision. So a strategy does not reduce input tokens by
 writing less — it reduces them by taking fewer turns, and input follows. Listing the two side
 by side invites a miner to optimise the 5% and read the 95% as separately winnable. Wall time
 is deliberately absent from this list; the section below says why.
@@ -572,78 +662,62 @@ Qwen3.8-27B is announced and **not yet published**.
 
 ## Current status
 
-Already present in the repository:
+The loop runs end to end. Most of it has been driven on the pinned model against a real challenge
+packet rather than only in tests, and the two columns say which is which — a status section that
+does not distinguish "exercised" from "implemented" is how a repository comes to claim more than it
+has.
 
 ```text
-Hermes trajectory representation
-Hermes protocol handling
-task execution + objective verification
-dataset generation
-SFT / DPO export
-Pareto selection
-cost accounting
-mutation task supply
-hardware-attestation utilities
-submission gates
-training recipes
+                            exercised on the live model?
+announce a round            yes    commit-reveal seed, rendezvous assignment
+open a window over a packet yes    persisted; the API serves it
+miner checks a surface      yes    contract + the runtime's own assemble, no GPU
+miner rehearses             yes    paired arms, the real acceptance gate
+miner uploads a bundle      HTTP   validated before storage; over the real app, not the box
+validator runs it           yes    --miner-dir, pinned everything
+score                       yes    against the published bar, withheld check counted
+record                      yes    submit → freeze → verdict → grade → settle
+publish the round proof     yes    commitment opened, integrity checked
+crown                       tests  nothing has reached 10/10, so no crown has been awarded
+aggregate                   tests  driven on constructed trajectories, not a live run
 ```
 
-Next production boundary:
+Still to build:
 
 ```text
-miner StrategySpec
-TDX + GPU CC generation proof
-approved guest measurement pinned
-paired baseline/candidate execution
-hidden sibling tasks
-improvement scoring
-strategy frontier
-continuous model retraining
-separate inference-optimization track (quantization, kernels)
+the pull-request gate that checks a committed digest against the receipts
+the dashboard that renders them
+an approved guest measurement, pinned
+more challenges
 ```
 
-Baseline failure mining and challenge packaging have moved out of this list: the first four
-challenges are in [`datasets/challenges/`](datasets/challenges), opened by
-`python -m hermes.challenge` from the baseline's own episode log.
-
-Planned rollout-evolution components are not claimed as live until their production path is
-merged and exercised.
-
-**The withheld verifiers are not in this repository.** Each task carries a salted
-commitment to its withheld check instead; the checks themselves are held privately, and
-`hermesbench.withheld.overlay` attaches them and verifies each against its commitment, so
-the private half cannot drift from what was published here. A checkout without that tree is
-a public checkout -- a legitimate state, and `suitecheck` reports what it cannot score
-rather than reporting a clean zero. A verifier a model can read is one it can be optimised
-against, which is the whole reason `overfit_rate` means anything.
-
-Two limits worth stating rather than discovering later.
+### Three limits worth stating rather than discovering
 
 **Challenge supply is the binding constraint, and it is tighter than task supply.** The suite is
-19 tasks, not the 16 this file used to claim (16 in `v1`, 3 in `v0`). Simulated power to detect a
-20-point paired improvement under the exact McNemar test in
+19 tasks. A task becomes a challenge only if the baseline reliably fails it, and exactly **4**
+qualified. Simulated power for the exact McNemar test in
 [`hermesbench/repeats.py`](hermesbench/repeats.py):
 
 ```text
-tasks    power
+tasks    power to detect a 20-point paired improvement
     4      0.0%     <- challenges actually open
-   19     15.3%     <- the whole suite
+   19     15.3%
    30     57.2%
    60     99.0%
 ```
 
-But a task only becomes a challenge if the baseline reliably fails it, and of the 19 exactly
-**4** qualified — the rest the baseline either handles or passes too often to be worth a round.
-So the number that governs every claim above is 4, where the test has no power at all. Growing
-the suite is necessary and not sufficient; the yield from suite to challenge was 21%.
+Every number in this file rests on the first row. Growing the suite is necessary and not
+sufficient; the yield from suite to challenge was 21%.
 
-**Attestation is verified but not yet policed.** [`eval/verify.py`](eval/verify.py) checks NRAS
-tokens and extracts TDX `REPORTDATA` from the quote itself rather than trusting the
-miner-editable JSON field, and [`eval/rollout_track.py`](eval/rollout_track.py) refuses a
-submission whose digests disagree with the attested manifest. What is missing is the policy: no
-approved guest measurement is pinned, so a quote proves a genuine confidential VM ran and
-committed to this bundle, not that it ran an image we approved. The GPU side has CC enabled but
-`nvtrust`/NRAS has not been exercised end to end on the rollout host.
+**Attestation is verified but not policed.** See the round-proof section: no approved guest
+measurement is pinned, and the check that would enforce one cannot currently fail.
+
+**A promising result is usually a small sample.** The first surface written here scored 3 of 3 on
+its first measurement — and 6 of 10 on the next, which is what the attempt floor predicted when it
+refused the 3/3 and said it bounded the true rate to 43.9%. It was a real improvement on both axes
+(4/10 → 6/10 verified, 78,417 → 59,024 median tokens) and it was still refused, because the gate
+requires every attempt to pass. That is the machinery working, and it is the reason `--repeats`
+does not default to 1 anywhere.
 
 ---
 
@@ -660,29 +734,61 @@ committed to this bundle, not that it ran an image we approved. The GPU side has
 
 ---
 
-## Existing pipeline quickstart
+## Quickstart
+
+### As a miner
 
 ```bash
 uv sync
 
-cat hermes/base_model.json
+# scaffold a surface, then check it will load -- no model, no GPU, no pull request
+python -m miner init  --dir ./my-surface --skill protocol-discipline
+python -m miner check --dir ./my-surface
 
-python -m hermesbench.runner --suite v0 --workspace-root /tmp/hermesbench --list
+# rehearse against the baseline before spending anything on an attested run
+python -m miner evaluate --dir ./my-surface --task tc-log-rotation-order \
+  --base-url http://127.0.0.1:8000/v1 --model qwen3.6-27b --repeats 10
 
-python -m hermes.generate \
-  --tasks hermes/tasks/phase0.jsonl \
-  --out data/processed/hermes_trajectories.jsonl \
-  --provider anthropic
-
-python -m hermes.format \
-  --in data/processed/hermes_trajectories.jsonl \
-  --out data/processed/hermes_trajectories_sft.jsonl
-
-# before choosing what happens to the system prompt, measure what removing it costs
-python -m hermes.leakage --in data/processed/hermes_trajectories_sft.jsonl
+# which rule is carrying the result, with the leader re-measured on fresh episodes
+python -m miner search --dir ./my-surface --task tc-log-rotation-order \
+  --base-url http://127.0.0.1:8000/v1 --model qwen3.6-27b --repeats 10
 ```
 
-The rollout-evolution CLI will be documented when the attested miner path is production-ready.
+`check` proves the pinned runtime will load a surface. It does not prove the surface helps, and
+says so: the first one written here passed it cleanly and then raised median tokens by 58.6% and
+92.6% across two independent paired runs.
+
+### As a validator
+
+```bash
+# announce a round, then open a window over a published challenge packet
+python -m hermes.announce commit --round r-001 --tasks tc-log-rotation-order --miners alice,bob
+python -m hermes.announce open   --round r-001 --seed <seed>
+python -m validator.round_loop open --round r-001 \
+  --challenge datasets/challenges/tc-log-rotation-order.json --episodes <baseline.jsonl>
+
+uv run uvicorn validator.api:app --host 127.0.0.1 --port 8080
+
+# after the window closes: run, score, record, then crown and publish
+python -m validator.judge judge --round r-001 --model qwen3.6-27b --repeats 10
+python -m validator.crown select
+python -m validator.audit build --round r-001 --master-salt-env SPARK_MASTER_SALT
+python -m validator.aggregate --out var/datasets
+```
+
+### Opening challenges from a baseline
+
+```bash
+python -m hermesbench.runner --suite all --workspace-root /tmp/ws \
+  --episodes-out base.jsonl --keep-trajectories --allow-unsandboxed
+
+python -m hermes.challenge --episodes base.jsonl \
+  --model-revision <rev> --harness-digest <digest> --out datasets/challenges/
+```
+
+`--keep-trajectories` is off by default and required for anything downstream that builds training
+data: the episode log otherwise carries counts only, and
+[`hermes/format.py`](hermes/format.py) renders rows from a trajectory.
 
 ---
 
