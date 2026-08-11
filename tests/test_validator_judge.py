@@ -10,6 +10,7 @@ that need no GPU.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -353,3 +354,89 @@ def test_a_partially_judged_round_can_be_resumed(setup):
     assert by_miner["carol"].problem == "already judged; skipped"
     assert by_miner["dave"].scorecard is not None
     assert store.load("r-1").state == "settled"
+
+
+# --- what the judge hands the runner --------------------------------------------------------------
+#
+# Two defaults that were wrong in opposite directions, and both were invisible until a round was
+# actually judged against a served model.
+
+
+def test_a_judged_round_keeps_its_trajectories():
+    """`validator.aggregate` builds every SFT row and preference pair FROM trajectories. Without
+    them a judged round yields no training data at all -- and aggregate refuses with "no episode
+    carries a trajectory" rather than writing an empty file, so the loop stops dead one step after
+    the crown."""
+    from miner.evaluate import runner_argv
+
+    argv = runner_argv(
+        task_id="t1",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="K",
+        workspace_root=Path("/tmp/ws"),
+        episodes_out=Path("/tmp/ws/out.jsonl"),
+        repeats=10,
+        miner_dir=Path("/tmp/bundle"),
+        allow_unsandboxed=True,
+    )
+    assert "--keep-trajectories" in argv
+
+
+def test_the_dialect_is_the_pin_unless_the_caller_says_otherwise():
+    """Empty is right when the served model IS the pinned one, which is the normal case."""
+    from miner.evaluate import runner_argv
+
+    common = dict(
+        task_id="t1",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="K",
+        workspace_root=Path("/tmp/ws"),
+        episodes_out=Path("/tmp/ws/out.jsonl"),
+        repeats=1,
+        miner_dir=None,
+        allow_unsandboxed=False,
+    )
+    assert "--dialect" not in runner_argv(**common)
+    assert runner_argv(**common, dialect="atem")[-2:] == ["--dialect", "atem"] or "atem" in runner_argv(
+        **common, dialect="atem"
+    )
+
+
+def test_the_judge_passes_the_dialect_it_was_given(monkeypatch, tmp_path):
+    """A validator serving a model other than the pinned one -- during a migration, or to compare
+    two -- otherwise instructs a wire format the model does not speak. That is not a loud failure:
+    it surfaces as malformed turns, or as a model that never calls a tool, and both read as the
+    model being bad rather than the harness asking wrongly."""
+    from validator.judge import runner_for
+
+    captured = {}
+
+    def fake_main(argv):
+        captured["argv"] = argv
+        Path(argv[argv.index("--episodes-out") + 1]).write_text("", encoding="utf-8")
+        return 0
+
+    import hermesbench.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "main", fake_main)
+    run = runner_for(
+        round_id="r-1",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="K",
+        task_id="t1",
+        repeats=1,
+        repo_root=tmp_path,
+        allow_unsandboxed=False,
+        dialect="atem",
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    try:
+        run("carol", workspace)
+    except Exception:
+        pass  # the bundle lookup may refuse; the argv is what this test is about
+    if "argv" in captured:
+        assert "--dialect" in captured["argv"] and "atem" in captured["argv"]

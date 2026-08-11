@@ -304,6 +304,7 @@ def runner_for(
     repo_root: Path | None,
     allow_unsandboxed: bool,
     intake: Intake | None = None,
+    dialect: str = "",
 ) -> Callable[[str, Path], Path]:
     """A `run` callable that invokes the real runner.
 
@@ -334,6 +335,7 @@ def runner_for(
                 repeats=repeats,
                 miner_dir=_bundle_for(round_id, miner_id, repo_root, intake),
                 allow_unsandboxed=allow_unsandboxed,
+                dialect=dialect,
             )
         )
         if code != 0:
@@ -372,6 +374,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--store", type=Path, default=None)
     parser.add_argument("--repo-root", type=Path, default=None)
     parser.add_argument("--allow-unsandboxed", action="store_true")
+    parser.add_argument(
+        "--dialect",
+        default="",
+        help="wire dialect for the served model. Empty takes it from hermes/base_model.json, which "
+        "is right when the served model IS the pinned one. Pass it when serving something else -- a "
+        "mismatch shows up as malformed turns or as a model that never calls a tool, both of which "
+        "read as the model being bad rather than as the harness instructing the wrong format.",
+    )
     parser.add_argument("--no-settle", action="store_true", help="grade but leave the salt unreleased")
     args = parser.parse_args(argv)
 
@@ -425,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
             repeats=args.repeats,
             repo_root=args.repo_root,
             allow_unsandboxed=args.allow_unsandboxed,
+            dialect=args.dialect,
         )
         results = judge_round(
             round_id=args.round_id,

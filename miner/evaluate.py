@@ -166,8 +166,23 @@ def runner_argv(
     repeats: int,
     miner_dir: Path | None,
     allow_unsandboxed: bool,
+    dialect: str = "",
+    keep_trajectories: bool = True,
 ) -> list[str]:
-    """The argv a validator would use. `--dialect` is deliberately absent: the pin supplies it."""
+    """The argv a validator would use.
+
+    `dialect` is normally empty and the pin supplies it, which is right when the served model is
+    the pinned one. It is passable because a validator can deliberately serve something else --
+    during a base-model migration, or to compare two -- and the runner then instructs a wire format
+    the model does not speak. That is not a loud failure: it shows up as malformed turns, or as a
+    model that never calls a tool, both of which read as the model being bad.
+
+    `keep_trajectories` defaults to TRUE here, unlike the runner, and the difference is deliberate.
+    The runner serves ad-hoc benchmarking where a transcript is a cost nobody asked for. A judged
+    round is the input to `validator.aggregate`, which builds every SFT row and preference pair
+    from trajectories -- so a judged round without them yields no training data at all, and
+    `aggregate` refuses with "no episode carries a trajectory" rather than writing an empty file.
+    """
     argv = [
         "--base-url",
         base_url,
@@ -186,6 +201,10 @@ def runner_argv(
         "--episodes-out",
         str(episodes_out),
     ]
+    if dialect:
+        argv += ["--dialect", dialect]
+    if keep_trajectories:
+        argv += ["--keep-trajectories"]
     if miner_dir is not None:
         argv += ["--miner-dir", str(miner_dir)]
     if allow_unsandboxed:
