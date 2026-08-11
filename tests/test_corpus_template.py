@@ -209,3 +209,47 @@ def test_the_pinned_template_still_ignores_content_beside_tool_calls():
         "the template drops content on a tool-calling message; that is why reasoning goes in "
         "reasoning_content for this dialect"
     )
+
+
+def test_wire_markup_in_a_pre_fix_trajectory_is_stripped_before_training(schemas):
+    """The harness stopped recording call markup inside reasoning. Logs written before it did are on
+    disk and will be aggregated, and this row would put that markup on the channel the template
+    renders private deliberation to -- training the model to address a tool from inside its own head.
+
+    Stripped rather than refused, because refusing makes every pre-fix log unaggregatable. Counted on
+    the message, because a row that was silently repaired is a row nobody can audit.
+    """
+    dirty = AgentTrajectory(
+        task="Count the lines in logs/one.log.",
+        success=True,
+        system="s",
+        tools_available=("terminal",),
+        steps=(
+            Step(
+                kind=THINKING,
+                content=(
+                    "We have logs directory. Let's list logs.\n"
+                    "<atem:function_calls>\n"
+                    '<atem:invoke name="terminal">\n'
+                    '<atem:parameter name="command">ls -la logs</atem:parameter>\n'
+                    "</atem:invoke>\n"
+                    "</atem:function_calls>"
+                ),
+            ),
+            Step(kind=TOOL_CALL, tool="terminal", args={"command": "ls -la logs"}, call_id="c0"),
+            Step(kind=TOOL_RESULT, content="one.log\n", call_id="c0", ok=True),
+            Step(kind=FINAL, content="3"),
+        ),
+    )
+    record = to_messages_record(dirty, dialect=ATEM, tool_schemas=schemas)
+    assistant = next(m for m in record["messages"] if m.get("tool_calls"))
+    assert "We have logs directory" in assistant["reasoning_content"], "the prose survives"
+    assert "<atem:" not in assistant["reasoning_content"], "the markup does not"
+    assert assistant["reasoning_markup_stripped"] == 1, "and the repair is on the record"
+    assert "<atem:invoke" not in _render(record).split("to=self<|message|>")[1].split("<|eom|>")[0]
+
+
+def test_a_clean_trajectory_carries_no_repair_marker(trajectory, schemas):
+    """The marker means something only if it is absent when nothing was repaired."""
+    record = to_messages_record(trajectory, dialect=ATEM, tool_schemas=schemas)
+    assert all("reasoning_markup_stripped" not in m for m in record["messages"])

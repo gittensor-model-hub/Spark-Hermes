@@ -84,6 +84,7 @@ class Summary:
     without_trajectory: int = 0
     overfit_skipped: int = 0
     capped: list[str] = field(default_factory=list)
+    reasoning_markup_stripped: int = 0
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -94,6 +95,10 @@ class Summary:
             # without `--keep-trajectories`; it is missing data, not a failed episode, and the two
             # would be indistinguishable in a single count.
             "episodes_without_trajectory": self.without_trajectory,
+            # Complete call blocks removed from reasoning that was about to be trained onto this
+            # dialect's private-deliberation channel. Non-zero means the episodes predate the
+            # harness fix that stopped recording them; the rows are clean, the logs are not.
+            "reasoning_markup_stripped": self.reasoning_markup_stripped,
             # Excluded from SFT and *kept* as rejected examples. An episode that passed the
             # published check and failed the withheld one is the sharpest negative there is: it is
             # what fitting the visible assertions looks like. Training on it teaches that; training
@@ -268,6 +273,16 @@ def aggregate(
     summary.sft_rows = len(rows)
     summary.pairs = len(pairs)
     summary.capped = capped
+    # Counted off the rows themselves rather than tracked through the renderer, so the number always
+    # describes what was actually written.
+    summary.reasoning_markup_stripped = sum(
+        int(message.get("reasoning_markup_stripped") or 0) for row in rows for message in row["messages"]
+    ) + sum(
+        int(message.get("reasoning_markup_stripped") or 0)
+        for pair in pairs
+        for side in ("chosen", "rejected")
+        for message in pair[side]
+    )
 
     out.mkdir(parents=True, exist_ok=True)
     _write_jsonl(out / SFT_FILE, rows)

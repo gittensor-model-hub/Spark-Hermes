@@ -116,6 +116,28 @@ def _reasoning_text(step: Step) -> str:
     return step.content
 
 
+def _clean_reasoning(text: str, *, dialect: Dialect) -> tuple[str, int]:
+    """Reasoning with any complete call markup removed, and how many were removed.
+
+    The harness stopped recording this markup at capture time, but trajectories recorded before it
+    did are on disk and will be aggregated. For a dialect whose reasoning is its own channel, the
+    row puts this text where the template renders private deliberation -- so a leftover call block
+    would be trained as the model talking to a tool from inside its own head, which is a shape it
+    should never learn.
+
+    Stripped rather than refused, because refusing makes every pre-fix log unaggregatable, and
+    counted rather than dropped quietly, because `to_messages_record` reports the number on the row.
+    """
+    if dialect.family != "atem" or "<atem:" not in text:
+        return text, 0
+    from hermes.atem import parse_turn as parse_atem
+
+    parsed = parse_atem(text)
+    if not parsed.calls and not parsed.malformed:
+        return text, 0
+    return parsed.text.strip(), len(parsed.calls) + len(parsed.malformed)
+
+
 def _tool_field(names: tuple[str, ...], *, dialect: Dialect, schemas: dict[str, dict[str, Any]] | None) -> list[Any]:
     """The row's `tools` field: bare names, or full definitions when the template renders them.
 
@@ -160,12 +182,19 @@ def _assistant_turn(
     if answer:
         parts.append(answer.strip())
     message["content"] = "\n\n".join(parts)
+    stripped = 0
+    if joined and not dialect.reasoning_in_content:
+        joined, stripped = _clean_reasoning(joined, dialect=dialect)
     if joined and not dialect.reasoning_in_content:
         # A separate field, not a tag inside the content, because that is where this dialect's
         # template looks. Putting it in `content` loses it entirely on a turn that also carries
         # tool_calls -- the template renders the calls and never reads `content` at all -- so the
         # reasoning would vanish from precisely the turns whose reasoning is the lesson.
         message["reasoning_content"] = joined
+    if stripped:
+        # On the message, so a corpus reader can find which rows were cleaned rather than being told
+        # only a total. A row that was silently repaired is a row nobody can audit.
+        message["reasoning_markup_stripped"] = stripped
     if calls:
         message["tool_calls"] = [
             {
