@@ -358,9 +358,15 @@
   }
 
   async function loadSnapshot() {
-    // Relative, so it works wherever the page is served from -- including a static host with no
-    // validator behind it, which is the whole reason this path exists.
-    const response = await fetch("board/state.json", { cache: "no-store" });
+    // A SIBLING path, with no directory component. `validator.board` writes the page and the
+    // snapshot into the same directory, so from the page the file is simply `state.json`.
+    //
+    // This said "board/state.json" and 404'd on the published board, because the page is served
+    // FROM board/ and the relative path resolved to board/board/state.json. The board then reported
+    // "no validator, no snapshot" on a site where the snapshot was sitting right beside it. Worse,
+    // a test asserted that string -- its docstring said "the path it is published next to" and its
+    // check demanded a nested one, so the bug was pinned rather than caught.
+    const response = await fetch("state.json", { cache: "no-store" });
     if (!response.ok) throw new Error(`snapshot ${response.status}`);
     const payload = await response.json();
     if (payload.schema_version !== "spark-board-v1") {
@@ -393,8 +399,14 @@
         const age = Math.max(0, Date.now() / 1000 - Number(snapshot.generated_at || 0));
         const older = age > STALE_AFTER_S;
         showMode(older ? "stale" : "snapshot", `published snapshot · ${describeAge(age)}${older ? " · may be out of date" : ""}`);
-      } catch {
-        showMode("stale", "no validator, no snapshot");
+      } catch (error) {
+        showMode("stale", "no data source");
+        rows.replaceChildren();
+        // Neither source answered, so nothing below can say anything about this round. Reported once,
+        // here, rather than letting the submissions fetch blame the validator for a 404 on a page
+        // that was never talking to one.
+        say(`No validator to call and no published snapshot beside this page (${error}).`, true);
+        return;
       }
     }
     if (current) {

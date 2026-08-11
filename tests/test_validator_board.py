@@ -10,6 +10,7 @@ withheld body could reach the world without passing through the API's screen.
 """
 
 import json
+import re
 
 import pytest
 
@@ -224,6 +225,12 @@ def test_publishing_writes_the_page_beside_the_snapshot(world, tmp_path):
     out = tmp_path / "pages" / "board" / "state.json"
     assert main(["--store", str(store.root), "--allow-public-store", "--out", str(out)]) == 0
     assert (out.parent / "index.html").is_file()
-    assert "board/state.json" in (out.parent / "index.html").read_text(encoding="utf-8"), (
-        "the published page must read the snapshot path it is published next to"
-    )
+    page = (out.parent / "index.html").read_text(encoding="utf-8")
+    fetched = re.search(r'fetch\("([^"]*state\.json)"', page).group(1)
+    # Next to, which means no directory component. The first version of this test asserted
+    # "board/state.json" -- a nested path -- while its own docstring said "the path it is published
+    # next to", so it pinned the bug instead of catching it: the page is served FROM board/, the
+    # relative path resolved to board/board/state.json, and the published board reported "no
+    # validator, no snapshot" with the snapshot sitting beside it.
+    assert "/" not in fetched, f"{fetched!r} is not a sibling of the page"
+    assert (out.parent / fetched).is_file(), f"the page fetches {fetched!r}, which was not published"
