@@ -205,12 +205,21 @@ def submission_id(*, round_id: str, miner_id: str, digest: str) -> str:
     return hashlib.sha256(material).hexdigest()[:16]
 
 
+def canonical_path(bundle_dir: Path) -> Path:
+    """The canonical serialisation that sits beside a bundle directory, never within it."""
+    return bundle_dir.with_name(bundle_dir.name + ".bundle.json")
+
+
 @dataclass
 class Intake:
     """Stores accepted bundles privately and appends public receipts."""
 
     root: Path = SUBMISSION_DIR
     receipts: Path = RECEIPTS
+
+    def canonical_path_for(self, receipt: Receipt) -> Path:
+        """Where the canonical serialisation of a stored bundle lives."""
+        return canonical_path(self.bundle_dir(receipt))
 
     def accept(self, *, round_id: str, miner_id: str, files: dict[str, str], now: float | None = None) -> Receipt:
         """Validate, store, and record. Raises `IntakeError` with every reason on refusal."""
@@ -231,7 +240,15 @@ class Intake:
             destination = target / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(content, encoding="utf-8")
-        (target / "bundle.json").write_text(canonical(files).decode("utf-8") + "\n", encoding="utf-8")
+        # BESIDE the bundle directory, not inside it. This is the canonical serialisation the
+        # digest is computed over -- validator metadata, not part of the miner's surface -- and
+        # `validator.judge` hands that directory to the runner as `--miner-dir`. The miner contract
+        # admits SOUL.md, skills/*/SKILL.md and skills/*/references/*.md and refuses everything
+        # else rather than assuming it harmless, so a bundle.json inside made the runner exit 2 on
+        # EVERY judged submission. The competition could not run, and nothing caught it: the judge
+        # filters this name out of its own path accounting, so the file was invisible from both
+        # sides until an end-to-end round was actually attempted.
+        canonical_path(target).write_text(canonical(files).decode("utf-8") + "\n", encoding="utf-8")
 
         receipt = Receipt(
             submission_id=ident,
@@ -318,6 +335,7 @@ __all__ = [
     "IntakeError",
     "Receipt",
     "bundle_digest",
+    "canonical_path",
     "canonical",
     "check_contract",
     "check_paths",

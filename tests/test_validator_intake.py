@@ -264,3 +264,51 @@ def test_a_receipt_round_trips():
         bytes=78,
     )
     assert Receipt.from_record(receipt.to_record()) == receipt
+
+
+# --- the canonical copy is not part of the surface ---------------------------------------------
+#
+# It used to be written INSIDE the bundle directory, and `validator.judge` hands that directory to
+# the runner as `--miner-dir`. The miner contract admits SOUL.md, skills/*/SKILL.md and
+# skills/*/references/*.md and refuses everything else rather than assuming it harmless -- so every
+# judged submission made the runner exit 2 and the competition could not run at all.
+#
+# Nothing caught it because the judge filters this name out of its own path accounting, so the file
+# was invisible from both sides. Only an end-to-end round found it.
+
+
+def test_the_canonical_copy_sits_beside_the_bundle_not_inside_it(intake):
+    from validator.intake import canonical_path
+
+    receipt = intake.accept(round_id="r-1", miner_id="carol", files=GOOD, now=100.0)
+    stored = intake.bundle_dir(receipt)
+
+    served = sorted(p.relative_to(stored).as_posix() for p in stored.rglob("*") if p.is_file())
+    assert served == sorted(GOOD), "the bundle directory holds the surface and nothing else"
+
+    assert canonical_path(stored).is_file()
+    assert canonical_path(stored).parent == stored.parent
+
+
+def test_what_is_stored_would_pass_the_miner_contract(intake):
+    """The property that actually matters: the runner is handed this directory, and the contract
+    refuses anything outside the allowed surface."""
+    from hermes.miner_contract import load as load_contract
+
+    receipt = intake.accept(round_id="r-1", miner_id="carol", files=GOOD, now=100.0)
+    stored = intake.bundle_dir(receipt)
+    paths = [p.relative_to(stored).as_posix() for p in stored.rglob("*") if p.is_file()]
+    assert load_contract().check(paths) == []
+
+
+def test_the_canonical_copy_still_reproduces_the_digest(intake):
+    """Moving it must not make it decorative: it is the serialisation the digest is computed over,
+    which is what lets an auditor recompute a commitment from the stored bundle."""
+    import json
+
+    from validator.intake import bundle_digest, canonical_path
+
+    receipt = intake.accept(round_id="r-1", miner_id="carol", files=GOOD, now=100.0)
+    recorded = json.loads(canonical_path(intake.bundle_dir(receipt)).read_text(encoding="utf-8"))
+    assert recorded == GOOD
+    assert bundle_digest(recorded) == receipt.bundle_sha256
