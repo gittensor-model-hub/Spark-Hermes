@@ -338,21 +338,96 @@ def _executable(page: str) -> str:
     return re.sub(r"^\s*//.*$", "", stripped, flags=re.MULTILINE)
 
 
-def test_the_board_carries_no_withheld_or_verdict_vocabulary():
-    """The page is exempt from `_screened` because it serves a file rather than a payload. So the
-    file is screened instead, by the same vocabulary: a board that rendered a verdict during an
-    open round would be the leak the whole module is built around."""
-    from hermes.round import VERDICT_WORDS, WITHHELD_KEYS
+# Field names the API publishes on purpose that happen to contain screened vocabulary. Enumerated
+# rather than pattern-matched, each with the reason it is safe, and
+# `test_every_vocabulary_exemption_is_still_in_use` refuses a stale one -- an exemption that
+# outlives its field silently covers the next thing to use that name.
+PUBLISHED_FIELDS = {
+    # A boolean stating the invariant: no correctness information is served before the freeze. Its
+    # name contains "score" because it is about the absence of one.
+    "no_score_before_freeze": "asserts the no-score-before-freeze policy; carries no score",
+}
 
-    code = _executable(api.DASHBOARD.read_text(encoding="utf-8"))
-    # Substring rather than word-boundary matching: `hidden_verify` inside a JS property name is as
-    # publishable as one in a payload, which is to say not at all.
+
+def _screenable(page: str) -> str:
+    """The executable page with reads of the PUBLISHED baseline removed.
+
+    `baseline.pass_rate` is the pinned model's own unaided score on the task. It ships inside the
+    challenge packet, which is committed to a public repository on purpose -- it is the bar a
+    submission is measured against, and a board that hid it would be a list of names with nothing
+    to judge them by. A *submission's* pass rate is the thing that must never appear before the
+    round grades.
+
+    A vocabulary check cannot tell those apart, because they use the same word. The API has the
+    same problem and solves it by provenance: `_screened_body` deliberately applies only the
+    withheld-body refusal to `public_view()`, because a blanket verdict-word screen would reject
+    the one payload whose entire purpose is to publish verdicts after grading. This does the same
+    thing one level down -- reads rooted at `baseline.` are the published block, and everything
+    else stays strict.
+
+    Narrow on purpose. `test_the_screen_still_catches_a_submission_pass_rate` holds it there.
+    """
+    import re
+
+    code = _executable(page)
+    for field in PUBLISHED_FIELDS:
+        code = code.replace(field, "")
+    return re.sub(r"baseline\.[A-Za-z_]+", "", code)
+
+
+def test_the_board_never_carries_withheld_vocabulary():
+    """The page is exempt from `_screened` because it serves a file rather than a payload, so the
+    file is screened instead. These names must never appear at any stage of any round: a board that
+    published a withheld check, or the secret that opens one, would end the competition it reports
+    on."""
+    from hermes.round import WITHHELD_KEYS
+
+    code = _screenable(api.DASHBOARD.read_text(encoding="utf-8"))
     for word in WITHHELD_KEYS:
         assert word not in code, f"the board reads or renders {word!r}"
-    # `pass` and `grade` occur in ordinary prose, so only the field-shaped names are checked -- the
-    # ones that would be read off a receipt.
-    for word in sorted(VERDICT_WORDS & {"score", "scores", "pass_rate", "verdict", "verdicts", "reward", "weight"}):
-        assert word not in code, f"the board reads or renders {word!r}"
+
+
+def test_the_board_gates_verdicts_on_the_round_state():
+    """Verdict vocabulary used to be refused outright here, because the board only listed receipts
+    and had no business naming a verdict. It has a verdicts panel now, and refusing the word would
+    refuse the feature.
+
+    The property was never really about vocabulary. It is: **no correctness information before the
+    round is graded** -- which is about WHEN, and a word check cannot express when. Two things
+    enforce it instead, and this test pins the second:
+
+      1. `hermes.round.public_view` withholds `verdicts` entirely until GRADED, so the board cannot
+         render what it is never sent. That is the real guarantee and it is tested server-side.
+      2. The page gates its own rendering on the state, so a validator that somehow served early
+         verdicts still would not display them.
+
+    Belt and braces, and the braces are here."""
+    page = api.DASHBOARD.read_text(encoding="utf-8")
+    assert 'graded", "settled"' in page or '"graded", "settled"' in page, (
+        "the verdict panel must name the states in which verdicts may be shown"
+    )
+    # And it must say so when they cannot exist, rather than rendering an empty table that reads as
+    # a round nobody submitted to.
+    assert "No verdicts until the round is graded" in page
+
+
+def test_every_vocabulary_exemption_is_still_in_use():
+    """An exemption for a field the board no longer reads is an exemption for whatever takes that
+    name next."""
+    page = api.DASHBOARD.read_text(encoding="utf-8")
+    for field, reason in PUBLISHED_FIELDS.items():
+        assert field in page, f"{field} is exempted and unused"
+        assert reason, field
+
+
+def test_the_screen_still_catches_a_submission_pass_rate():
+    """The exemption above is for the published baseline and nothing else. A read of a submission's
+    own rate, or a bare one, must still be refused -- otherwise the narrowing has swallowed the
+    property it was carved out of."""
+    assert "pass_rate" not in _screenable("<td>${baseline.pass_rate}</td>")
+    assert "pass_rate" in _screenable("<td>${submission.pass_rate}</td>")
+    assert "pass_rate" in _screenable("<td>${pass_rate}</td>")
+    assert "pass_rate" in _screenable("<td>${verdict.pass_rate}</td>")
 
 
 def test_the_screen_would_catch_a_verdict_column():

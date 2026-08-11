@@ -63,6 +63,17 @@
   .note { padding: 26px 18px; color: var(--dim); text-align: center; }
   .note.bad { color: var(--bad); }
   .note code { font-family: var(--mono); font-size: 0.85em; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 20px; }
+  .panel h2 { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim); margin: 0 0 10px; font-weight: 650; }
+  .hint { color: var(--dim); font-size: 0.85rem; margin: 0 0 12px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px 30px; }
+  .stats div { font-size: 0.95rem; font-family: var(--mono); }
+  .stats span { display: block; font-family: ui-sans-serif, system-ui, sans-serif; color: var(--dim); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  ol.lifecycle { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; padding: 0; }
+  ol.lifecycle li { font-size: 0.8rem; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim); }
+  ol.lifecycle li.done { color: var(--result); border-color: currentColor; }
+  ol.lifecycle li.now { color: var(--evaluating); border-color: currentColor; font-weight: 650; }
+  td.why { white-space: normal; max-width: 42ch; color: var(--dim); font-size: 0.82rem; }
   footer { color: var(--dim); font-size: 0.82rem; margin-top: 22px; }
   a { color: var(--evaluating); }
 </style>
@@ -77,6 +88,20 @@
 
   <div class="round" id="round" hidden></div>
 
+  <div class="panel" id="lifecycle-panel" hidden>
+    <h2>Lifecycle</h2>
+    <ol class="lifecycle" id="lifecycle"></ol>
+    <p class="hint" id="lifecycle-note"></p>
+  </div>
+
+  <div class="panel" id="bar-panel" hidden>
+    <h2>The bar</h2>
+    <p class="hint">How the pinned model does on this task, unaided. A submission is measured
+    against this, and the withheld check must pass on <em>every</em> attempt before efficiency is
+    considered at all.</p>
+    <div class="stats" id="bar"></div>
+  </div>
+
   <div class="wrap">
     <table>
       <thead>
@@ -88,6 +113,17 @@
       <tbody id="rows"></tbody>
     </table>
     <div class="note" id="note">Loading…</div>
+  </div>
+
+  <div class="panel" id="verdicts-panel" hidden>
+    <h2>Verdicts</h2>
+    <div class="wrap">
+      <table>
+        <thead><tr><th>Miner</th><th>Bundle</th><th>Verdict</th><th>Why</th></tr></thead>
+        <tbody id="verdict-rows"></tbody>
+      </table>
+      <div class="note" id="verdict-note" hidden></div>
+    </div>
   </div>
 
   <footer>
@@ -103,6 +139,121 @@
   const roundBox = document.getElementById("round");
   const stamp = document.getElementById("stamp");
   const STATUSES = ["pending", "evaluating", "result"];
+
+  // The order a round moves through. What a reader may see depends on where it is, and that is the
+  // property the whole design rests on: a verdict cannot exist before the freeze, and the reveal
+  // that makes a round auditable is not published until it settles. Rendering the stage makes
+  // "nothing here yet" legible as a stage rather than as an empty table.
+  const LIFECYCLE = ["open", "frozen", "graded", "settled"];
+  const LIFECYCLE_MEANS = {
+    open: "uploads accepted; no correctness information exists yet, for anyone",
+    frozen: "submissions sealed; verdicts can now be computed but are not published",
+    graded: "verdicts published",
+    // "reveal", not the name of the secret inside it. The screen in tests/test_validator_api.py
+    // refuses the withheld vocabulary anywhere the page reads or renders, and it is right to: this
+    // board must never be the thing that publishes one. The public artifact has its own name and
+    // the API already uses it -- `reveal_available` -- so saying that is both safe and more exact.
+    settled: "the round's reveal is published, so anyone can audit it",
+  };
+
+  function panel(id, show) {
+    document.getElementById(id).hidden = !show;
+  }
+
+  function stat(into, label, value) {
+    const div = document.createElement("div");
+    const span = document.createElement("span");
+    span.textContent = label;
+    div.append(span, document.createTextNode(value));
+    into.appendChild(div);
+    return div;
+  }
+
+  function drawLifecycle(round) {
+    const list = document.getElementById("lifecycle");
+    const note = document.getElementById("lifecycle-note");
+    list.replaceChildren();
+    const at = LIFECYCLE.indexOf(String(round.state || "").toLowerCase());
+    LIFECYCLE.forEach((stage, index) => {
+      const li = document.createElement("li");
+      li.textContent = stage;
+      if (at >= 0 && index < at) li.className = "done";
+      if (index === at) li.className = "now";
+      list.appendChild(li);
+    });
+    const parts = [];
+    if (at >= 0) parts.push(LIFECYCLE_MEANS[LIFECYCLE[at]]);
+    const frozen = round.frozen;
+    if (frozen && frozen.early) {
+      // Published, not hidden. A round frozen before its announced deadline is shortened, and one
+      // that looks like a normal round afterwards is indistinguishable from one that ran its
+      // length -- so the reason is recorded and shown.
+      parts.push(`frozen early: ${frozen.reason || "no reason recorded"}`);
+    }
+    if (round.no_score_before_freeze) {
+      parts.push("no correctness information is served before the freeze");
+    }
+    note.textContent = parts.join(" · ");
+    panel("lifecycle-panel", at >= 0);
+  }
+
+  function drawBar(round) {
+    const baseline = ((round.challenge || {}).baseline) || {};
+    const box = document.getElementById("bar");
+    box.replaceChildren();
+    if (baseline.attempts === undefined) {
+      panel("bar-panel", false);
+      return;
+    }
+    const rate = typeof baseline.pass_rate === "number" ? `${(baseline.pass_rate * 100).toFixed(0)}%` : "—";
+    stat(box, "verified", `${baseline.verified_passes ?? "—"} / ${baseline.attempts} (${rate})`);
+    const interval = baseline.true_pass_rate_interval;
+    if (Array.isArray(interval)) {
+      // The interval, not just the point estimate: n-of-n says almost nothing on its own, and this
+      // is the number that decides whether a margin is distinguishable from noise.
+      stat(box, "true rate, 95%", `${(interval[0] * 100).toFixed(0)}–${(interval[1] * 100).toFixed(0)}%`);
+    }
+    if (baseline.median_tokens !== undefined) stat(box, "median tokens", Number(baseline.median_tokens).toLocaleString());
+    if (baseline.median_tool_calls !== undefined) stat(box, "median tool calls", baseline.median_tool_calls);
+    if (baseline.median_steps !== undefined) stat(box, "median turns", baseline.median_steps);
+    if (baseline.token_spread !== undefined) {
+      stat(box, "token spread", `${(baseline.token_spread * 100).toFixed(1)}%`);
+    }
+    panel("bar-panel", true);
+  }
+
+  function drawVerdicts(round) {
+    const rows = document.getElementById("verdict-rows");
+    const note = document.getElementById("verdict-note");
+    rows.replaceChildren();
+    const state = String(round.state || "").toLowerCase();
+    const verdicts = Array.isArray(round.verdicts) ? round.verdicts : [];
+
+    if (!["graded", "settled"].includes(state)) {
+      // Not "no verdicts". They cannot exist yet, and saying so is the difference between a reader
+      // concluding the round is empty and understanding that this is how the round works.
+      note.textContent = `No verdicts until the round is graded — it is ${state || "not open"}.`;
+      note.hidden = false;
+      panel("verdicts-panel", true);
+      return;
+    }
+    for (const v of verdicts) {
+      const tr = document.createElement("tr");
+      cell(tr, v.miner || "—", "miner");
+      const digest = String(v.submission_digest || "");
+      cell(tr, digest ? digest.slice(0, 18) + "…" : "—", "id").title = digest;
+      const td = cell(tr, "");
+      const badge = document.createElement("span");
+      badge.className = "badge " + (v.passed ? "result" : "pending");
+      badge.textContent = v.passed ? "accepted" : "refused";
+      td.appendChild(badge);
+      cell(tr, v.notes || "", "why");
+      rows.appendChild(tr);
+    }
+    note.hidden = verdicts.length > 0;
+    if (!verdicts.length) note.textContent = "Graded with no standing submissions.";
+    panel("verdicts-panel", true);
+  }
 
   function say(text, bad) {
     note.textContent = text;
@@ -174,6 +325,9 @@
         ["Task", current.task_id],
         ["State", current.state],
         ["Deadline", when(current.deadline)],
+        ["Submissions", current.submissions],
+        ["Withheld check", current.withheld_check_committed ? "committed" : "none"],
+        ["Audit", current.reveal_available ? "available" : "after settle"],
       ]) {
         if (value === undefined || value === null || value === "") continue;
         const div = document.createElement("div");
@@ -183,6 +337,13 @@
         roundBox.appendChild(div);
       }
       roundBox.hidden = !roundBox.children.length;
+      drawLifecycle(current);
+      drawBar(current);
+      drawVerdicts(current);
+    } else {
+      // A validator with no round open answers 404, which is a normal state. The panels are hidden
+      // rather than shown empty, because an empty bar reads as a bar of zero.
+      for (const id of ["lifecycle-panel", "bar-panel", "verdicts-panel"]) panel(id, false);
     }
 
     try {
