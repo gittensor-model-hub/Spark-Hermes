@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from miner.cli import check_submission, describe, scaffold, submission_paths, symlinks_in
+from miner.cli import check_surface, describe, scaffold, surface_paths, symlinks_in
 
 
 def _valid(tmp_path):
@@ -31,7 +31,7 @@ def test_the_scaffold_passes_the_real_contract_and_the_real_assemble(tmp_path):
     """A scaffold the validator would refuse is worse than no scaffold: it teaches the shape of an
     invalid submission."""
     root = _valid(tmp_path)
-    paths, violations, problems = check_submission(root)
+    paths, violations, problems = check_surface(root)
     assert sorted(paths) == ["SOUL.md", "skills/step-budget/SKILL.md"]
     assert violations == []
     assert problems == []
@@ -59,7 +59,7 @@ def test_the_templates_say_to_replace_them(tmp_path):
 def test_an_executable_is_refused_with_the_contract_s_own_reason(tmp_path):
     root = _valid(tmp_path)
     (root / "run_agent.py").write_text("import os\n", encoding="utf-8")
-    _, violations, _ = check_submission(root)
+    _, violations, _ = check_surface(root)
     assert any(v.path == "run_agent.py" for v in violations)
     assert describe(root) == 1
 
@@ -69,7 +69,7 @@ def test_a_shell_script_under_an_allowed_directory_is_still_refused(tmp_path):
     through a documentation path."""
     root = _valid(tmp_path)
     (root / "skills/step-budget/helper.sh").write_text("echo hi\n", encoding="utf-8")
-    _, violations, _ = check_submission(root)
+    _, violations, _ = check_surface(root)
     assert any(v.path == "skills/step-budget/helper.sh" for v in violations)
 
 
@@ -79,7 +79,7 @@ def test_a_symlink_is_refused_even_when_its_name_is_admissible(tmp_path):
     root = _valid(tmp_path)
     os.symlink("/etc/passwd", root / "skills/step-budget/references")
     assert "skills/step-budget/references" in symlinks_in(root)
-    _, _, problems = check_submission(root)
+    _, _, problems = check_surface(root)
     assert any("is a symlink" in p for p in problems)
     assert describe(root) == 1
 
@@ -100,13 +100,13 @@ def test_an_empty_submission_is_refused_rather_than_treated_as_a_no_op(tmp_path)
     while looking like an entry, which is the one outcome a miner must not get silently."""
     empty = tmp_path / "nothing"
     empty.mkdir()
-    _, _, problems = check_submission(empty)
+    _, _, problems = check_surface(empty)
     assert any("contains no files" in p for p in problems)
     assert describe(empty) == 1
 
 
 def test_a_missing_directory_is_reported_rather_than_crashing(tmp_path):
-    _, _, problems = check_submission(tmp_path / "absent")
+    _, _, problems = check_surface(tmp_path / "absent")
     assert problems and "not a directory" in problems[0]
 
 
@@ -115,7 +115,7 @@ def test_every_reason_is_reported_not_just_the_first(tmp_path):
     root = _valid(tmp_path)
     (root / "run_agent.py").write_text("x\n", encoding="utf-8")
     (root / "Makefile").write_text("all:\n", encoding="utf-8")
-    _, violations, _ = check_submission(root)
+    _, violations, _ = check_surface(root)
     assert {v.path for v in violations} >= {"run_agent.py", "Makefile"}
 
 
@@ -125,7 +125,7 @@ def test_every_reason_is_reported_not_just_the_first(tmp_path):
 def test_directories_are_not_listed_as_submitted_files(tmp_path):
     root = _valid(tmp_path)
     (root / "skills" / "step-budget" / "references").mkdir(parents=True)
-    assert "skills/step-budget/references" not in submission_paths(root)
+    assert "skills/step-budget/references" not in surface_paths(root)
 
 
 def test_a_nested_reference_is_admissible_because_the_contract_allows_it(tmp_path):
@@ -133,7 +133,7 @@ def test_a_nested_reference_is_admissible_because_the_contract_allows_it(tmp_pat
     refs = root / "skills/step-budget/references"
     refs.mkdir(parents=True)
     (refs / "notes.md").write_text("context\n", encoding="utf-8")
-    _, violations, problems = check_submission(root)
+    _, violations, problems = check_surface(root)
     assert violations == [] and problems == []
 
 
@@ -146,7 +146,7 @@ def test_check_does_not_claim_the_submission_helps(capsys, tmp_path):
     1/3 to 0/3 on a live paired run."""
     describe(_valid(tmp_path))
     out = capsys.readouterr().out
-    assert "admissible, not that it helps" in out
+    assert "will load your surface, not that it helps" in out
     assert "58.6%" in out
 
 
@@ -203,12 +203,15 @@ def test_a_real_improvement_is_reported_as_not_noise():
     assert "not noise" in render(report, task_id="t")
 
 
-def test_the_verdict_says_a_local_win_is_not_acceptance():
-    """The validator re-measures the baseline on its own hardware. A report copied into a pull
-    request without this line is a claim about hardware nobody measured."""
+def test_the_verdict_says_this_is_a_rehearsal_not_a_submission():
+    """The validator never runs the surface -- it scores the attested rollouts the surface produced.
+    A report pasted into a pull request without this line reads as a submitted result, and an
+    unattested local run is not one."""
     report = compare(_arm("control", 10, [100_000] * 10), _arm("candidate", 10, [50_000] * 10, calls=[5] * 10))
-    assert "evidence, not acceptance" in render(report, task_id="t")
-    assert report.to_record()["a_local_win_is_evidence_not_acceptance"] is True
+    text = render(report, task_id="t")
+    assert "rehearsal, not a submission" in text
+    assert "never runs your surface" in text
+    assert report.to_record()["unattested_local_rehearsal_not_a_submission"] is True
 
 
 def test_unequal_arms_are_refused_because_that_is_not_a_pairing():

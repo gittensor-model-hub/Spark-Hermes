@@ -8,21 +8,26 @@
 repository passed `check` cleanly, then increased median tokens by 58.6% and took the pass rate
 from 1/3 to 0/3.
 
-## Paired, and re-measured locally
+## Paired, and measured where the rollout will actually be produced
 
-Both arms run here, now, on this machine: the control with no submission, the candidate with it.
-Comparing a local candidate against the baseline *published in the packet* would fold every
-difference between the miner's box and the validator's into the margin, and hardware variance is
-the one thing pairing removes for free.
+Both arms run here, now, on this machine: the control with no surface, the candidate with it.
+Comparing against the baseline *published in the packet* would fold every difference between this
+box and the validator's into the margin, and hardware variance is the one thing pairing removes
+for free.
 
-The consequence is stated in the output rather than buried: **a local win is evidence, not
-acceptance.** The validator will re-run the baseline on its own hardware and compare against that,
-so what transfers is the *effect*, not the numbers.
+The validator does not re-run the surface. It never sees it. What a miner submits is the rollouts
+produced by the pinned model on the pinned runtime inside the confidential-computing GPU, plus the
+attestation binding them to that model and runtime -- so the run that counts is an attested one,
+and this is the rehearsal for it. An earlier version of this docstring said the validator would
+re-measure the baseline itself, which is not the design.
+
+The practical consequence is stated in the output: a win measured on an unattested local run
+predicts the attested one, and only the attested one is submissible.
 
 ## It calls the runner's entry point rather than rebuilding it
 
-`hermesbench.runner.main` is invoked with the same argv a validator uses, twice. Reassembling the
-runner's setup here -- tool schemas, dialect, system prompt composition, executor -- would be a
+`hermesbench.runner.main` is invoked twice with the argv the runner itself defines. Reassembling its
+setup here -- tool schemas, dialect, system prompt composition, executor -- would be a
 second implementation of the thing being measured, and the dialect default alone was wrong for
 long enough to make an entire run look like a capability failure. The submission is passed as
 `--miner-dir`, which is the same flag and the same code path the validator's execution step uses.
@@ -92,8 +97,8 @@ class Report:
             "reduction_interval": list(self.interval),
             "repeats_to_settle": self.repeats_to_settle,
             # Said in the record as well as on stdout. A report copied into a pull request without
-            # this line is a claim about the validator's hardware that nobody measured.
-            "a_local_win_is_evidence_not_acceptance": True,
+            # this line reads as a submitted result, and an unattested local run is not one.
+            "unattested_local_rehearsal_not_a_submission": True,
         }
 
 
@@ -225,10 +230,10 @@ def render(report: Report, *, task_id: str) -> str:
 
     lines += [
         "",
-        "A local win is evidence, not acceptance. Both arms ran on this machine, which is what makes",
-        "the comparison fair -- pairing removes hardware variance for free. The validator will",
-        "re-measure the baseline on its own hardware and compare against that, so what transfers is",
-        "the effect, not these numbers.",
+        "This is a rehearsal, not a submission. Both arms ran on this machine, which is what makes the",
+        "comparison fair -- pairing removes hardware variance for free. What you submit is the rollouts",
+        "the pinned model produces on the pinned runtime inside the CC GPU, plus the attestation that",
+        "binds them to it. The validator scores those rollouts; it never runs your surface.",
     ]
     return "\n".join(lines)
 

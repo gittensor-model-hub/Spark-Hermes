@@ -1,40 +1,55 @@
 """What a miner runs before spending anything.
 
-    python -m miner init  --dir ./my-submission --skill step-budget
-    python -m miner check --dir ./my-submission
+    python -m miner init  --dir ./my-surface --skill step-budget
+    python -m miner check --dir ./my-surface
 
-`check` is the whole point of this module: it answers "will the validator take this, and what
-will the model actually see" without contacting a model, touching a GPU, or opening a pull
-request. Every refusal it prints is one a miner would otherwise learn from CI, after paying for
-a run.
+## This is your surface, and it is never submitted
 
-## It calls the validator's own code, not a copy of it
+There is one competition. The validator distributes tasks its baseline failed or handled badly;
+a miner improves their own **surface** -- SOUL.md, skills, references -- and runs the pinned model
+in the pinned environment on the pinned runtime, inside the confidential-computing GPU. What gets
+submitted is the *rollouts that run produced*, plus the attestation proving which model and
+runtime produced them, published to Hugging Face and linked from a pull request.
 
-`hermes.miner_contract.MinerContract.check` decides which files are allowed;
-`hermes.profile.assemble` is the function the runner calls before it contacts the model;
-`hermes.profile.compose_system_prompt` is what folds a submission into the prompt. This module
-calls all three. A second implementation that agreed with them today would drift, and the day it
-drifted "it passed locally" would mean nothing -- which is worse than having no local check,
-because a miner would trust it.
+The surface itself stays on the miner's machine. It is the miner's edge, and nothing asks for it.
+
+So `check` does not ask "will the validator accept this". The validator never sees it. It asks
+**will the pinned runtime load this, and what will the model actually read** -- which is a real
+question with a real refusal, because `hermes.profile.assemble` is what the runner calls before it
+contacts the model and it refuses a surface the contract disallows. A surface that fails this
+check does not produce a bad rollout; it produces no run at all.
+
+An earlier version of this file said the opposite -- that these files were a submission the
+validator would judge. That was wrong, and it is the kind of wrong that costs a miner their
+advantage: anyone who believed it would have published their strategy.
+
+## It calls the runtime's own code, not a copy of it
+
+`hermes.miner_contract.MinerContract.check` decides what the runtime will load;
+`hermes.profile.assemble` is the function the runner calls before contacting the model;
+`hermes.profile.compose_system_prompt` is what folds a surface into the prompt. This module calls
+all three. A second implementation that agreed today would drift, and the day it drifted "it
+passed locally" would mean nothing -- which is worse than having no local check, because a miner
+would trust it.
 
 ## Why it reports sizes
 
 Measured on the 190-episode baseline: input is 94.9% of all tokens, and the median episode takes
-34 turns. A submission's prose sits at the head of the prompt on every one of those turns.
+34 turns. A surface's prose sits at the head of the prompt on every one of those turns.
 
 That is *not* mainly a token bill -- with prefix caching on, the measured hit rate is 80.8%, so
-the system prompt is served from cache after the first turn. It is a **context** cost, and that
-is the tighter constraint: the window is 32,768 tokens, the model re-reads this text before every
+the system prompt is served from cache after the first turn. It is a **context** cost, and that is
+the tighter constraint: the window is 32,768 tokens, the model re-reads this text before every
 decision, and prose that earns its place in one turn is prose the model must re-read 33 more
 times. So the size is reported as what it is, without the arithmetic that would overstate it.
 
 ## What it cannot tell you
 
-Whether the submission is any good. `check` proves a submission is *admissible*. The only thing
-that establishes it *helps* is a paired run against a baseline, and the first submission written
-for this repository -- careful, plausible, aimed squarely at the three `step_budget_exhausted`
-challenges -- increased median tokens by 58.6% and took the pass rate from 1/3 to 0/3. It passed
-`check` cleanly. That gap is the reason `evaluate` exists rather than this being the last step.
+Whether the surface is any good. `check` proves the runtime will load it. The only thing that
+establishes it *helps* is a paired run, and the first surface written for this repository --
+careful, plausible, aimed squarely at the three `step_budget_exhausted` challenges -- increased
+median tokens by 58.6% and then 92.6% across two independent paired runs, taking the pass rate to
+0/3 both times. It passed `check` cleanly. That gap is why `evaluate` exists.
 """
 
 from __future__ import annotations
@@ -74,17 +89,16 @@ SOUL_TEMPLATE = """# Operating identity
 Two or three sentences on how this agent works. Not a persona -- a policy. What it does before
 editing, what it does when a command fails, and when it stops.
 
-Replace this text. A default SOUL.md that survives into a submission is a submission that has not
-been written yet.
+Replace this text. A default SOUL.md that survives into a run is a surface nobody has written yet.
 """
 
 
-def submission_paths(root: Path) -> list[str]:
-    """Every file in the submission, as posix paths relative to its root.
+def surface_paths(root: Path) -> list[str]:
+    """Every file in the surface, as posix paths relative to its root.
 
-    Directories are not listed and symlinks are not followed. A symlink is how a submission that
-    contains only `.md` files comes to contain whatever it points at, and the contract checks
-    names rather than targets.
+    Directories are not listed and symlinks are not followed. A symlink is how a surface that
+    contains only `.md` files comes to load whatever it points at, and the contract checks names
+    rather than targets.
     """
     found: list[str] = []
     for path in sorted(root.rglob("*")):
@@ -100,23 +114,23 @@ def symlinks_in(root: Path) -> list[str]:
     return [p.relative_to(root).as_posix() for p in sorted(root.rglob("*")) if p.is_symlink()]
 
 
-def check_submission(root: Path) -> tuple[list[str], list[Violation], list[str]]:
+def check_surface(root: Path) -> tuple[list[str], list[Violation], list[str]]:
     """Returns (paths, contract violations, extra problems this layer found)."""
     problems: list[str] = []
     if not root.is_dir():
         return [], [], [f"{root} is not a directory"]
 
-    paths = submission_paths(root)
+    paths = surface_paths(root)
     if not paths:
         problems.append(
-            f"{root} contains no files. An empty submission is accepted by every path-based check "
-            "there is, and would run as the unmodified baseline while looking like an entry."
+            f"{root} contains no files. An empty surface is accepted by every path-based check there "
+            "is, and would run as the unmodified baseline while looking like a strategy."
         )
 
     for link in symlinks_in(root):
         # Reported here rather than left to the contract, which matches names. A symlink named
         # `notes.md` satisfies every extension and allowlist rule while resolving to anything.
-        problems.append(f"{link}: is a symlink. A submission is files, not references to files.")
+        problems.append(f"{link}: is a symlink. A surface is files, not references to files.")
 
     contract = load_contract()
     return paths, contract.check(paths), problems
@@ -125,7 +139,7 @@ def check_submission(root: Path) -> tuple[list[str], list[Violation], list[str]]
 def _size_of(path: Path) -> int:
     """Bytes, without following a symlink.
 
-    `stat()` resolves the link, so a submission containing `notes.md -> /etc/passwd` reported the
+    `stat()` resolves the link, so a surface containing `notes.md -> /etc/passwd` reported the
     size of the target -- which is both wrong and a read of a file the tool has no business
     touching. `lstat` describes the link itself, which is the thing that was submitted.
     """
@@ -137,22 +151,22 @@ def _size_of(path: Path) -> int:
 
 def describe(root: Path, *, base_prompt: str = "") -> int:
     """Print the verdict. Returns a process exit code."""
-    paths, violations, problems = check_submission(root)
+    paths, violations, problems = check_surface(root)
 
-    print(f"submission {root}")
+    print(f"surface {root}")
     for path in paths:
         print(f"  {_size_of(root / path):>7,} B  {path}")
     print(f"  {sum(_size_of(root / p) for p in paths):>7,} B  total")
 
     if problems or violations:
-        print("\nREFUSED")
+        print("\nWILL NOT LOAD")
         for problem in problems:
             print(f"  - {problem}")
         for violation in violations:
             print(f"  - {violation}")
         print(
             "\nEvery reason is listed rather than the first, because a miner who learns one problem "
-            "per resubmission stops resubmitting."
+            "per attempt stops attempting."
         )
         return 1
 
@@ -160,10 +174,10 @@ def describe(root: Path, *, base_prompt: str = "") -> int:
     # failure modes are less legible and a contract violation should be reported as one.
     accepted, why, composed = _assemble(root, base_prompt)
     if not accepted:
-        print(f"\nREFUSED by hermes.profile.assemble\n  - {why}")
+        print(f"\nWILL NOT LOAD -- refused by hermes.profile.assemble\n  - {why}")
         return 1
 
-    print("\nACCEPTED by the contract and by hermes.profile.assemble")
+    print("\nLOADABLE: the contract and hermes.profile.assemble both accept this surface")
     print(f"  composed system prompt: {len(composed):,} characters")
     print(
         "  This sits at the head of the prompt on every turn. With prefix caching on, the measured\n"
@@ -172,9 +186,10 @@ def describe(root: Path, *, base_prompt: str = "") -> int:
         "  before every decision it makes."
     )
     print(
-        "\nThis says the submission is admissible, not that it helps. The first submission written\n"
-        "for this repository passed this check cleanly and then increased median tokens by 58.6%\n"
-        "while taking the pass rate from 1/3 to 0/3. Run a paired evaluation before submitting."
+        "\nThis says the pinned runtime will load your surface, not that it helps. Your surface is\n"
+        "never submitted -- the rollouts it produces are. The first surface written for this\n"
+        "repository passed this check cleanly and then raised median tokens by 58.6% and 92.6% in two\n"
+        "independent paired runs, reaching 0/3 passes both times. Run `miner evaluate` first."
     )
     return 0
 
@@ -201,14 +216,14 @@ def _assemble(root: Path, base_prompt: str) -> tuple[bool, str, str]:
 
 
 def scaffold(root: Path, *, skill: str) -> list[Path]:
-    """Write a minimal admissible submission. Refuses to overwrite."""
+    """Write a minimal loadable surface. Refuses to overwrite."""
     soul = root / "SOUL.md"
     skill_file = root / "skills" / skill / "SKILL.md"
     existing = [p for p in (soul, skill_file) if p.exists()]
     if existing:
         raise FileExistsError(
             f"{', '.join(str(p) for p in existing)} already exists. Refusing to overwrite: a "
-            "scaffold that clobbers a submission is a scaffold that loses work."
+            "scaffold that clobbers a surface is a scaffold that loses work."
         )
     skill_file.parent.mkdir(parents=True, exist_ok=True)
     soul.write_text(SOUL_TEMPLATE, encoding="utf-8")
@@ -228,11 +243,11 @@ def _evaluate(args: Any) -> int:
         print("miner: evaluate needs --task and --model", file=sys.stderr)
         return 2
 
-    # Before any GPU time. A submission the validator would refuse is a submission whose
-    # measurement is worthless, and the refusal costs nothing to find.
+    # Before any GPU time. A surface the runtime will not load produces no run at all, and the
+    # refusal costs nothing to find.
     code = describe(args.root)
     if code != 0:
-        print("\nnot evaluating a submission the validator would refuse", file=sys.stderr)
+        print("\nnot evaluating a surface the pinned runtime will not load", file=sys.stderr)
         return code
 
     out = args.workspace_root
@@ -291,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("action", choices=["check", "init", "evaluate"])
-    parser.add_argument("--dir", type=Path, required=True, dest="root", help="the submission directory")
+    parser.add_argument("--dir", type=Path, required=True, dest="root", help="your surface directory")
     parser.add_argument("--skill", default="my-strategy", help="skill directory name (init only)")
     parser.add_argument("--task", default="", help="the task id to evaluate on (evaluate only)")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
@@ -346,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
-__all__ = ["check_submission", "describe", "main", "scaffold", "submission_paths", "symlinks_in"]
+__all__ = ["check_surface", "describe", "main", "scaffold", "surface_paths", "symlinks_in"]
 
 
 if __name__ == "__main__":
