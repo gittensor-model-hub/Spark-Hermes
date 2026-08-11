@@ -5,6 +5,10 @@ name: crown
 # Score every evaluated submission, keep exactly one, close the rest, move the label, open the next
 # round. One miner is rewarded per hour and everyone else starts again.
 #
+# A barren hour leaves the crown where it is and runs the same task again -- it says nothing about
+# the miner who last cleared the bar. Two barren hours rotate the task, because that is evidence
+# about the task rather than the field.
+#
 # Not on merge. A merge grants nothing by itself, which keeps the crown off the submission path --
 # a mistake here mislabels or wrongly closes a pull request rather than blocking intake.
 #

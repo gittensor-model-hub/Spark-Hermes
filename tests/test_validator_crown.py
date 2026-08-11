@@ -17,14 +17,16 @@ from hermes.acceptance import Arm
 from validator.crown import (
     CROWN_LABEL,
     Contender,
+    Standing,
     close_actions,
     contenders_from,
     eligibility,
-    label_actions,
+    next_task,
     pr_numbers,
     render,
     score_of,
     select,
+    settle,
 )
 
 TASK = "tc-log-rotation-order"
@@ -155,22 +157,6 @@ def test_the_record_distinguishes_no_entries_from_no_winner():
 # --- the label and the closures ---------------------------------------------------------------------
 
 
-def test_the_label_moves_from_the_old_crown_to_the_new():
-    outcome = select([_c("erin", _arm(10, 10, 59_000), pr=21)])
-    assert label_actions(outcome, {"winner": {"pr": 11}}) == [("remove", 11), ("add", 21)]
-
-
-def test_an_unchanged_winner_moves_nothing():
-    """Otherwise the hourly job re-notifies the same miner every hour."""
-    outcome = select([_c("erin", _arm(10, 10, 59_000), pr=21)])
-    assert label_actions(outcome, {"winner": {"pr": 21}}) == []
-
-
-def test_no_winner_still_removes_the_previous_label():
-    """A crown left on last hour's pull request claims a standing this round did not confer."""
-    assert label_actions(select([]), {"winner": {"pr": 11}}) == [("remove", 11)]
-
-
 def test_every_pull_request_but_the_winners_is_closed():
     field = [
         _c("erin", _arm(10, 10, 59_000), pr=21),
@@ -190,13 +176,14 @@ def test_each_closure_carries_the_reason_it_lost():
     assert "every attempt" in reasons[23]
 
 
-def test_closing_on_a_winnerless_hour_is_a_flag_not_an_assumption():
-    """Closing keeps the round boundary clean; not closing avoids discarding a field nobody could
-    have won from. That is policy, so it is a switch."""
+def test_challengers_close_on_a_winnerless_hour_and_the_incumbent_does_not():
+    """This replaced a flag. When a barren hour left the crown vacant, whether to close the field
+    was a policy choice; now the crown never vacates, so the answer follows from it -- challengers
+    close, the standing holder does not."""
     outcome = select([_c("frank", _arm(10, 10, BASE), pr=22)])
     assert outcome.winner is None
-    assert [pr for pr, _ in close_actions(outcome, close_when_no_winner=True)] == [22]
-    assert close_actions(outcome, close_when_no_winner=False) == []
+    closed = [pr for pr, _ in close_actions(outcome, Standing.from_record({"winner": {"pr": 21}}))]
+    assert closed == [22]
 
 
 def test_a_submission_with_no_pull_request_number_is_not_closed():
@@ -337,3 +324,114 @@ def test_a_losing_pull_request_is_closed_exactly_once():
     assert outcome.winner is None
     assert [pr for pr, _ in close_actions(outcome)] == [22]
     assert [c.miner_id for c in outcome.losers] == ["frank"]
+
+
+# --- what carries from one hour to the next ---------------------------------------------------------
+
+
+TASKS = ["task-a", "task-b", "task-c"]
+
+
+def _standing(winner=None, task="task-a", barren=0):
+    return {"winner": winner, "task_id": task, "barren_rounds": barren}
+
+
+def test_a_winner_takes_the_crown_and_resets_the_counter():
+    outcome = select([_c("erin", _arm(10, 10, 59_000), pr=21)])
+    standing, labels = settle(_standing(barren=1), outcome, available_tasks=TASKS)
+    assert labels == [("add", 21)]
+    assert standing.pr == 21 and standing.barren_rounds == 0
+    assert standing.task_id == "task-a", "someone beat it, so it is a task worth running again"
+
+
+def test_a_winner_dethrones_the_previous_holder():
+    outcome = select([_c("grace", _arm(10, 10, 50_000), pr=24)])
+    standing, labels = settle(_standing(winner={"pr": 21}), outcome, available_tasks=TASKS)
+    assert labels == [("remove", 21), ("add", 24)]
+    assert standing.pr == 24
+
+
+def test_a_barren_hour_leaves_the_crown_where_it_is():
+    """A barren hour is a fact about this hour's field, not about the miner who last cleared the
+    bar. Nothing is removed and nothing is added, so the holder is not re-notified either."""
+    outcome = select([_c("frank", _arm(10, 10, BASE), pr=22)])
+    assert outcome.winner is None
+    standing, labels = settle(_standing(winner={"pr": 21}), outcome, available_tasks=TASKS)
+    assert labels == []
+    assert standing.pr == 21
+    assert standing.barren_rounds == 1
+    assert standing.task_id == "task-a", "one barren hour is not evidence about the task"
+
+
+def test_two_barren_hours_rotate_the_task():
+    """Evidence about the task rather than the field: either nobody can beat its baseline or nobody
+    is trying, and a third run spends an hour of everyone's GPU time to learn the same thing."""
+    standing, labels = settle(_standing(winner={"pr": 21}, barren=1), select([]), available_tasks=TASKS)
+    assert standing.task_id == "task-b"
+    assert standing.barren_rounds == 0
+    assert labels == [], "the rotation does not touch the crown"
+
+
+def test_the_crown_carries_across_a_rotation():
+    """It was won and nothing has taken it. Stripping it because the subject changed would punish
+    the holder for other people's failure."""
+    standing, _ = settle(_standing(winner={"pr": 21}, barren=1), select([]), available_tasks=TASKS)
+    assert standing.pr == 21
+
+
+def test_rotation_cycles_and_is_deterministic():
+    """A rotation nobody can predict is a rotation nobody can prepare for."""
+    assert next_task("task-a", TASKS) == "task-b"
+    assert next_task("task-c", TASKS) == "task-a"
+    assert next_task("unknown", TASKS) == "task-a"
+    assert next_task("task-a", []) == "task-a", "nothing to rotate to leaves it alone"
+
+
+def test_a_barren_hour_with_no_incumbent_still_counts():
+    """Otherwise a task with no crown yet never rotates, and the first task runs forever."""
+    standing, _ = settle(_standing(), select([]), available_tasks=TASKS)
+    assert standing.barren_rounds == 1 and standing.pr == 0
+
+
+def test_the_crowned_pull_request_is_not_closed_while_it_holds_the_crown():
+    """It is the standing result; closing it would leave the label pointing at a closed page."""
+    outcome = select([_c("frank", _arm(10, 10, BASE), pr=22)])
+    spared = Standing.from_record(_standing(winner={"pr": 21}))
+    closed = [pr for pr, _ in close_actions(outcome, spared)]
+    assert 21 not in closed
+    assert closed == [22]
+
+
+def test_this_hours_winner_is_not_closed_either():
+    outcome = select([_c("erin", _arm(10, 10, 59_000), pr=21), _c("frank", _arm(10, 10, 70_000), pr=22)])
+    closed = [pr for pr, _ in close_actions(outcome, Standing())]
+    assert closed == [22]
+
+
+def test_four_hours_end_to_end():
+    """The sequence the design describes, walked once: win, barren, barren-and-rotate, win again."""
+    tasks = TASKS
+    s1, l1 = settle({}, select([_c("erin", _arm(10, 10, 59_000), pr=21)]), available_tasks=tasks)
+    assert l1 == [("add", 21)] and s1.barren_rounds == 0
+
+    s2, l2 = settle(_standing(s1.winner, s1.task_id, s1.barren_rounds), select([]), available_tasks=tasks)
+    assert l2 == [] and s2.pr == 21 and s2.barren_rounds == 1 and s2.task_id == s1.task_id
+
+    s3, l3 = settle(_standing(s2.winner, s2.task_id, s2.barren_rounds), select([]), available_tasks=tasks)
+    assert l3 == [] and s3.pr == 21 and s3.barren_rounds == 0 and s3.task_id != s2.task_id
+
+    grace = _c("grace", _arm(10, 10, 50_000), pr=24, task=s3.task_id)
+    s4, l4 = settle(_standing(s3.winner, s3.task_id, s3.barren_rounds), select([grace]), available_tasks=tasks)
+    assert l4 == [("remove", 21), ("add", 24)] and s4.pr == 24
+
+
+def test_available_tasks_comes_from_the_published_packets(tmp_path):
+    """A round can only be opened over a task with a challenge packet, so the rotation cannot land
+    somewhere there is nothing to run."""
+    from validator.crown import available_tasks
+
+    (tmp_path / "a.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "b.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    assert available_tasks(tmp_path) == ["a", "b"]
+    assert available_tasks(tmp_path / "absent") == []

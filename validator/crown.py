@@ -27,18 +27,27 @@ are looked at. This mirrors `acceptance.decide` -- correctness is a gate, not a 
 amount of token reduction promotes a submission that fails the withheld check. Ranking eligible
 entries only is what stops the hourly cadence from turning into "cheapest wrong answer wins".
 
-## An hour with no winner
+## An hour with no winner keeps the incumbent, and two of them move the task
 
-If nothing is eligible, no crown is awarded. The alternative is crowning the best of a bad field,
-and an hourly reward that always pays out stops carrying information within a week. Whether the
-losing pull requests still close in that case is a policy choice rather than a fact, so it is a
-flag: closing keeps the round boundary clean, and not closing avoids discarding a field that no one
-could win from. Either way it is reported.
+Nothing is crowned when nothing beats its own baseline: an hourly reward that always pays out
+stops carrying information within a week. But the crown does not vacate. The previous holder keeps
+it and the task runs again, because a barren hour says nothing about the miner who last cleared the
+bar -- it says the field this hour did not.
+
+Two barren hours in a row is different. That is evidence about the *task*: either nobody can beat
+its baseline or nobody is trying, and running it a third time spends an hour of everyone's GPU
+time to learn the same thing. So the task rotates and the counter resets.
+
+The crown carries across a rotation. It was won and nothing has taken it, and stripping it because
+the subject changed would punish the holder for other people's failure.
 
 ## The label is moved by this job and nothing else
 
 Removals are emitted before additions. A crown only ever added is a crown several people hold at
 once, and this design has exactly one at a time by construction.
+
+The crowned pull request stays open while it holds the crown -- it is the standing result, and
+closing it would make the label point at a closed page. Every challenger closes each hour.
 """
 
 from __future__ import annotations
@@ -142,6 +151,93 @@ class Outcome:
         }
 
 
+BARREN_ROUNDS_BEFORE_ROTATION = 2
+
+
+@dataclass(frozen=True)
+class Standing:
+    """What carries from one hour to the next."""
+
+    winner: dict[str, Any] | None = None
+    task_id: str = ""
+    barren_rounds: int = 0
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any] | None) -> Standing:
+        record = record or {}
+        return cls(
+            winner=record.get("winner"),
+            task_id=str(record.get("task_id") or ""),
+            barren_rounds=int(record.get("barren_rounds") or 0),
+        )
+
+    @property
+    def pr(self) -> int:
+        return int((self.winner or {}).get("pr") or 0)
+
+
+def next_task(current: str, available: list[str]) -> str:
+    """The task after this one, cycling. Empty when there is nothing to rotate to.
+
+    Round-robin over the sorted list rather than random: a rotation nobody can predict is a
+    rotation nobody can prepare for, and the point of moving on is to give the field a task it
+    might actually beat.
+    """
+    if not available:
+        return current
+    ordered = sorted(available)
+    if current not in ordered:
+        return ordered[0]
+    return ordered[(ordered.index(current) + 1) % len(ordered)]
+
+
+def settle(
+    previous: dict[str, Any] | None,
+    outcome: Outcome,
+    *,
+    available_tasks: list[str] | None = None,
+) -> tuple[Standing, list[tuple[str, int]]]:
+    """The next standing, and the label moves. Returns (standing, label actions).
+
+    Three cases and they are genuinely different:
+
+    A winner takes the crown from whoever held it, and the barren counter resets. The task stays --
+    someone beat it, so it is a task worth running again.
+
+    No winner leaves the crown where it is and increments the counter. Nothing is removed: a barren
+    hour is a fact about this hour's field, not about the miner who last cleared the bar.
+
+    Two barren hours rotate the task and reset the counter. That is evidence about the task rather
+    than the field, and a third run would spend an hour of everyone's GPU time to learn the same
+    thing. The crown still carries: it was won, nothing has taken it, and stripping it because the
+    subject changed would punish the holder for other people's failure.
+    """
+    standing = Standing.from_record(previous)
+    task = standing.task_id or (outcome.winner.contender.task_id if outcome.winner else "")
+    if not task and outcome.ranked:
+        task = outcome.ranked[0].contender.task_id
+
+    if outcome.winner is not None:
+        actions: list[tuple[str, int]] = []
+        new_pr = outcome.winner.contender.pr
+        if standing.pr and standing.pr != new_pr:
+            actions.append(("remove", standing.pr))
+        if new_pr and standing.pr != new_pr:
+            actions.append(("add", new_pr))
+        return Standing(winner=outcome.winner.to_record(), task_id=task, barren_rounds=0), actions
+
+    barren = standing.barren_rounds + 1
+    if barren >= BARREN_ROUNDS_BEFORE_ROTATION:
+        return Standing(winner=standing.winner, task_id=next_task(task, available_tasks or []), barren_rounds=0), []
+    # The incumbent keeps the label: no actions at all, so the hourly job does not re-notify them.
+    return Standing(winner=standing.winner, task_id=task, barren_rounds=barren), []
+
+
+def available_tasks(challenges: Path) -> list[str]:
+    """Task ids with a published challenge packet, which is what a round can be opened over."""
+    return sorted(p.stem for p in challenges.glob("*.json")) if challenges.is_dir() else []
+
+
 def eligibility(contender: Contender) -> tuple[bool, str]:
     """Whether a submission may be ranked at all. Correctness is a gate, not a term."""
     arm = contender.candidate
@@ -205,35 +301,20 @@ def select(contenders: list[Contender]) -> Outcome:
     return Outcome(winner=winner, ranked=ranked, ineligible=ineligible)
 
 
-def label_actions(outcome: Outcome, previous: dict[str, Any]) -> list[tuple[str, int]]:
-    """(action, pr) pairs for the crown label. Removals first."""
-    actions: list[tuple[str, int]] = []
-    old_pr = int(((previous or {}).get("winner") or {}).get("pr") or 0)
-    new_pr = outcome.winner.contender.pr if outcome.winner else 0
-    if old_pr and old_pr != new_pr:
-        actions.append(("remove", old_pr))
-    if new_pr and old_pr != new_pr:
-        actions.append(("add", new_pr))
-    return actions
+def close_actions(outcome: Outcome, standing: Standing | None = None) -> list[tuple[int, str]]:
+    """(pr, reason) for every pull request this round is finished with.
 
-
-def close_actions(outcome: Outcome, *, close_when_no_winner: bool = True) -> list[tuple[int, str]]:
-    """(pr, reason) for every pull request the round is finished with.
-
-    The winner's stays open and carries the label. With no winner the choice is a policy one --
-    closing keeps the round boundary clean, not closing avoids discarding a field nobody could have
-    won from -- so it is a flag rather than an assumption.
+    Every challenger closes each hour. Two pull requests are spared: this hour's winner, and the
+    standing crown holder if nobody took it from them -- theirs is the current result and closing
+    it would leave the label pointing at a closed page.
     """
-    if outcome.winner is None and not close_when_no_winner:
-        return []
+    spared = {outcome.winner.contender.pr} if outcome.winner else set()
+    if standing is not None and standing.pr:
+        spared.add(standing.pr)
     reasons = {c.miner_id: "the round is over" for c in outcome.losers}
     for contender, why in outcome.ineligible:
         reasons[contender.miner_id] = why
-    return [
-        (c.pr, reasons.get(c.miner_id, "the round is over"))
-        for c in outcome.losers
-        if c.pr and (outcome.winner is None or c.pr != outcome.winner.contender.pr)
-    ]
+    return [(c.pr, reasons.get(c.miner_id, "the round is over")) for c in outcome.losers if c.pr and c.pr not in spared]
 
 
 def contenders_from(scorecard_dir: Path, *, store: Any = None, registry: Path | None = None) -> list[Contender]:
@@ -352,10 +433,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--registry", type=Path, default=Path("datasets/strategies.jsonl"))
     parser.add_argument("--out", type=Path, default=CROWNS)
     parser.add_argument(
-        "--keep-open-on-no-winner",
-        action="store_true",
-        help="leave losing pull requests open when nothing was eligible, instead of closing a field "
-        "nobody could have won from",
+        "--challenges",
+        type=Path,
+        default=Path("datasets/challenges"),
+        help="where the challenge packets live; the task rotates through these after two barren rounds",
     )
     args = parser.parse_args(argv)
 
@@ -368,23 +449,47 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     outcome = select(found)
-    previous = json.loads(args.out.read_text(encoding="utf-8")) if args.out.is_file() else {}
+    standing_before = json.loads(args.out.read_text(encoding="utf-8")) if args.out.is_file() else {}
+    tasks = available_tasks(args.challenges)
+    standing_after, labels = settle(standing_before, outcome, available_tasks=tasks)
 
     if args.action == "actions":
-        for act, pr in label_actions(outcome, previous):
+        for act, pr in labels:
             print(f"label {act} {CROWN_LABEL} #{pr}")
-        for pr, why in close_actions(outcome, close_when_no_winner=not args.keep_open_on_no_winner):
+        for pr, why in close_actions(outcome, Standing.from_record(standing_before)):
             print(f"close #{pr} {why[:110]}")
-        unknown = [c.miner_id for c in outcome.losers if not c.pr]
-        if outcome.winner and not outcome.winner.contender.pr:
-            unknown.append(outcome.winner.contender.miner_id)
-        for miner in unknown:
-            print(f"  no pull request recorded for {miner}; not labelling or closing", file=sys.stderr)
+        if not labels and standing_after.pr:
+            print(f"  crown stays with #{standing_after.pr}; nothing beat it this round", file=sys.stderr)
+        if standing_after.task_id != Standing.from_record(standing_before).task_id:
+            print(
+                f"  task rotates to {standing_after.task_id!r} after {BARREN_ROUNDS_BEFORE_ROTATION} barren round(s)",
+                file=sys.stderr,
+            )
+        for miner in [c.miner_id for c in outcome.losers if not c.pr]:
+            print(f"  no pull request recorded for {miner}; not closing", file=sys.stderr)
         return 0
 
     print(render(outcome))
+    if outcome.winner is None and standing_after.pr:
+        print(
+            f"\nNo crown this round, so it stays with #{standing_after.pr}. Barren rounds: {standing_after.barren_rounds}."
+        )
+    if standing_after.task_id != Standing.from_record(standing_before).task_id:
+        print(
+            f"Task rotates to {standing_after.task_id!r}: two barren rounds is evidence about the task, not the field."
+        )
+    elif standing_after.task_id:
+        print(f"Next round runs {standing_after.task_id!r} again.")
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(outcome.to_record(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    record = {
+        **outcome.to_record(),
+        "winner": standing_after.winner,
+        "this_round_winner": outcome.winner.to_record() if outcome.winner else None,
+        "task_id": standing_after.task_id,
+        "barren_rounds": standing_after.barren_rounds,
+    }
+    args.out.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"\nwrote {args.out}")
     return 0
 
@@ -399,7 +504,10 @@ __all__ = [
     "close_actions",
     "contenders_from",
     "eligibility",
-    "label_actions",
+    "Standing",
+    "available_tasks",
+    "next_task",
+    "settle",
     "main",
     "pr_numbers",
     "render",
