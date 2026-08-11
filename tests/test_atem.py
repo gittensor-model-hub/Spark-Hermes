@@ -729,3 +729,53 @@ def test_a_malformed_leftover_is_still_counted():
     merged = _merge_leftover_calls(turn, text="", reasoning=truncated, dialect=DIALECTS["atem"], schemas={})
     assert merged.malformed, "the truncation is the measurement"
     assert merged.safe_calls == (), "and nothing from a turn that confused the parser executes"
+
+
+def test_the_parser_reads_the_reasoning_channel_without_a_structured_call():
+    """The hole the first version of this fix left.
+
+    `_merge_leftover_calls` runs only when the server returned structured `tool_calls`. When it
+    returned none, `next_steps` reaches the dialect's parser directly -- and that parser recorded the
+    supplied reasoning verbatim. A re-run of the suite measured 7 turns still carrying markup and 5
+    calls still lost through exactly this path, so the recovery belongs in the parser, where both
+    branches reach it.
+    """
+    from hermes.atem import parse_turn as parse_atem
+
+    turn = parse_atem("", reasoning=REAL_LEFTOVER)
+    assert [c.arguments["command"] for c in turn.calls] == ["ls -la logs"], "recovered, not lost"
+    assert "We have logs directory" in turn.scratch_pad, "the deliberation survives"
+    assert "<atem:" not in turn.scratch_pad, "the markup does not"
+
+
+def test_a_call_in_the_reasoning_that_the_content_also_has_runs_once():
+    """The echo case on the parser path: the server left the markup in the reasoning AND the model
+    emitted the same call in the content. Dedupe is against what the content already yielded."""
+    from hermes.atem import parse_turn as parse_atem
+
+    same = render_tool_call("terminal", {"command": "ls pkg"})
+    turn = parse_atem(same, reasoning="Let's look at pkg.\n" + same)
+    assert len(turn.calls) == 1, "one call, not two"
+    assert turn.scratch_pad == "Let's look at pkg."
+
+
+def test_a_truncated_call_in_the_reasoning_is_counted_not_swallowed():
+    """A leftover that broke mid-call is the reason `malformed_turns` exists. Recovering calls from
+    this channel must not turn a truncation into silence."""
+    from hermes.atem import parse_turn as parse_atem
+
+    truncated = '<atem:function_calls>\n<atem:invoke name="terminal">\n<atem:parameter name="command">ls'
+    turn = parse_atem("", reasoning="Let me look.\n" + truncated)
+    assert turn.malformed, "the truncation is the measurement"
+    assert turn.safe_calls == ()
+
+
+def test_reasoning_with_no_markup_is_untouched():
+    """The common case must not be reshaped by the recovery path -- a parser that rewrites ordinary
+    reasoning is a parser that changes every episode to fix a few."""
+    from hermes.atem import parse_turn as parse_atem
+
+    prose = "The file may not exist.\nI should check before reading it."
+    turn = parse_atem("", reasoning=prose)
+    assert turn.scratch_pad == prose
+    assert turn.calls == ()

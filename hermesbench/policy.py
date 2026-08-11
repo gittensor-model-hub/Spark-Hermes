@@ -234,10 +234,19 @@ def _merge_leftover_calls(
     The cleaned prose from each channel replaces it, so the recorded trajectory -- and therefore the
     SFT corpus built from it -- does not carry raw wire markup inside a reasoning block and teach the
     model to emit a call where its own template renders private deliberation.
+
+    This runs only when the server returned structured calls. When it did not, the `else` branch in
+    `next_steps` reaches the dialect's parser directly and the parser handles its own reasoning
+    channel -- one implementation, reached two ways. The first version of this fix covered only the
+    structured branch, and a re-run measured 7 turns still carrying markup and 5 calls still lost
+    because of it.
     """
     from_text = parse_turn(text, dialect=dialect, reasoning="", schemas=schemas) if text.strip() else None
+    # Handed to the parser as the reasoning channel, not as content, so the dialect decides what a
+    # leftover call in reasoning means. For ATEM that is `_read_reasoning_channel`, which also returns
+    # the cleaned prose in `scratch_pad`.
     from_reasoning = (
-        parse_turn(reasoning, dialect=dialect, reasoning="", schemas=schemas) if reasoning.strip() else None
+        parse_turn("", dialect=dialect, reasoning=reasoning, schemas=schemas) if reasoning.strip() else None
     )
 
     seen = {_fingerprint(c) for c in turn.calls}
@@ -257,7 +266,7 @@ def _merge_leftover_calls(
         # The parser's prose for each channel, so a turn that was half answer and half call keeps the
         # answer while the markup stops being recorded as something the model said.
         text=from_text.text if from_text is not None else turn.text,
-        scratch_pad=from_reasoning.text.strip() if from_reasoning is not None else turn.scratch_pad,
+        scratch_pad=from_reasoning.scratch_pad if from_reasoning is not None else turn.scratch_pad,
         malformed=malformed,
     )
 

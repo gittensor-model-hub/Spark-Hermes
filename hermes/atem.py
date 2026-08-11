@@ -283,7 +283,47 @@ def parse_turn(content: str, *, reasoning: str = "", schemas: dict[str, dict[str
         )
 
     text = _FRAMING_RE.sub("", _LOOSE_RE.sub("", remainder)).strip()
-    return ParsedTurn(calls=tuple(calls), text=text, scratch_pad=reasoning.strip(), malformed=tuple(malformed))
+
+    # The reasoning channel gets read too, and this is not defensive coding: an ATEM turn is
+    # `assistant to=self` deliberation followed by `assistant to=<tool>` carrying the call, so a
+    # serving layer whose reasoning parser does not stop cleanly at the end of the first swallows the
+    # second. Measured across two 19-task runs, in over half the episodes. Recording `reasoning`
+    # verbatim did two things wrong at once: the call was lost -- not executed, not counted, not
+    # malformed -- and the markup was recorded as something the model *said*, which then trains onto
+    # the channel this dialect renders private deliberation to.
+    #
+    # Unlike Hermes, which drops a call found inside `<think>`, these are executed. The markup here is
+    # a parser artifact, not the model deliberating about a call it chose not to make.
+    reasoning, from_reasoning, extra_malformed = _read_reasoning_channel(reasoning, calls, schemas)
+    return ParsedTurn(
+        calls=tuple(calls) + tuple(from_reasoning),
+        text=text,
+        scratch_pad=reasoning,
+        malformed=tuple(malformed) + tuple(extra_malformed),
+    )
+
+
+def _read_reasoning_channel(
+    reasoning: str, already: list[ParsedCall], schemas: dict[str, dict[str, Any]] | None
+) -> tuple[str, list[ParsedCall], list[str]]:
+    """(cleaned reasoning, calls recovered from it, malformed found in it).
+
+    Deduplicated against the calls already found in the content: a server that returns a call
+    structurally *and* leaves its markup in the reasoning would otherwise have it executed twice,
+    which is worse than losing it -- a repeated mutating command is not idempotent.
+
+    Recurses once through `parse_turn` with an empty reasoning channel, so there is one
+    implementation of what an ATEM call looks like rather than a second copy here.
+    """
+    stripped = reasoning.strip()
+    if not stripped or CALLS_OPEN not in stripped:
+        return stripped, [], []
+    parsed = parse_turn(stripped, schemas=schemas)
+    if not parsed.calls and not parsed.malformed:
+        return stripped, [], []
+    seen = {(c.name, json.dumps(c.arguments, sort_keys=True)) for c in already}
+    recovered = [c for c in parsed.calls if (c.name, json.dumps(c.arguments, sort_keys=True)) not in seen]
+    return parsed.text.strip(), recovered, list(parsed.malformed)
 
 
 def _strip(text: str, spans: list[tuple[int, int]]) -> str:
