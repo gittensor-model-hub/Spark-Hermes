@@ -76,8 +76,11 @@ class JsonlEpisodeSink:
     this module exists to end.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, keep_trajectories: bool = False) -> None:
         self.path = Path(path)
+        # See `append`: off by default because a trajectory is the whole conversation, and a run
+        # that asked for counts should not silently start writing transcripts.
+        self.keep_trajectories = bool(keep_trajectories)
         if self.path.exists() and self.path.stat().st_size > 0:
             # Refused rather than appended or truncated. Appending would interleave two
             # runs into one file with nothing in the lines to separate them, and a reader
@@ -109,6 +112,23 @@ class JsonlEpisodeSink:
             "disqualified": result.integrity.disqualified,
             "metrics": result.metrics.to_record(),
         }
+        # The trajectory, when the caller asked for it.
+        #
+        # Off by default and not by accident. A trajectory is the whole conversation -- every tool
+        # output the agent read -- so it is orders of magnitude larger than the metrics beside it
+        # and it carries whatever the workspace held. A run that wanted counts should not silently
+        # start writing transcripts.
+        #
+        # But without it nothing downstream can exist. `hermes.format.to_messages_record` builds
+        # training rows *from* a trajectory, and this sink threw the trajectory away -- so an
+        # accepted result could be scored and crowned and never turned into a single SFT row. The
+        # data was in memory at the moment it was dropped.
+        if self.keep_trajectories:
+            trajectory = getattr(result, "trajectory", None)
+            serialise = getattr(trajectory, "to_record", None)
+            # `None` when the result carried no trajectory, which is different from an episode that
+            # produced an empty one -- the reader counts those apart, so they must not collapse here.
+            record["trajectory"] = serialise() if callable(serialise) else None
         # One write of one complete line, then flush. The newline must never reach the file
         # ahead of the payload it terminates: a reader splitting on newlines would then see
         # a truncated record as a complete one, and `read_episodes`' whole tolerance rests

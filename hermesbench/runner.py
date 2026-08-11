@@ -656,6 +656,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--keep-trajectories",
+        action="store_true",
+        help="write each episode's full conversation into the episode log. Required for anything "
+        "downstream that builds training data: hermes.format renders rows from a trajectory, and "
+        "without this the log carries counts only",
+    )
+    parser.add_argument(
         "--miner-dir",
         type=Path,
         default=None,
@@ -805,7 +812,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     executor = LocalToolExecutor(allow_unsandboxed=args.allow_unsandboxed)
-    sink = JsonlEpisodeSink(args.episodes_out) if args.episodes_out else None
+    sink = JsonlEpisodeSink(args.episodes_out, keep_trajectories=args.keep_trajectories) if args.episodes_out else None
     try:
         metrics, results = run_suite(
             tasks, policy_factory, executor, args.workspace_root, repeats=args.repeats, sink=sink
