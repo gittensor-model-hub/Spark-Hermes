@@ -46,9 +46,11 @@ from __future__ import annotations
 import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from hermes.round import (
@@ -367,19 +369,49 @@ def submissions(round_id: str = "") -> dict[str, Any]:
     }
 
 
+DASHBOARD = Path(__file__).with_name("dashboard.html")
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard() -> str:
+    """The submissions board, served by the validator that issued the receipts.
+
+    Static, and served from this origin rather than from GitHub Pages: the page reads
+    `/v1/submissions` on this host, so there is no cross-origin request to allow, no second place
+    to configure a URL, and no way to aim the board at a validator whose receipts nobody
+    published. It loads nothing from a third party for the reason a validator serves no
+    third-party script.
+
+    Exempt from `_screened` because it returns a file rather than a payload assembled from round
+    state -- and named in `SERVES_NO_DATA` so the exemption is a listed decision rather than an
+    omission. `test_the_dashboard_page_carries_no_withheld_vocabulary` screens the file itself.
+    """
+    try:
+        return DASHBOARD.read_text(encoding="utf-8")
+    except OSError as exc:
+        # A packaging mistake, not a request problem. Answering 200 with an apology would leave a
+        # board that renders as an empty round, which is the one reading this page must never give.
+        raise HTTPException(status_code=500, detail=f"dashboard asset is missing: {exc}") from exc
+
+
+# Handlers that serve no data assembled from round state, and why each is exempt from screening.
+# A name here is a decision on the record; `test_every_exemption_names_a_real_handler` refuses a
+# stale one, because an exemption that outlives its handler silently covers the next handler to
+# take that name.
+SERVES_NO_DATA = {"dashboard": "returns a static asset, screened as a file by the test suite"}
+
+
 def route_handlers() -> list[Any]:
-    """Every handler this module serves, for the test that checks each one screens."""
-    return [
-        health,
-        current_round,
-        round_view,
-        challenge,
-        receipts,
-        results,
-        reveal,
-        submit,
-        submissions,
-    ]
+    """Every endpoint this app serves, read off the app rather than listed by hand.
+
+    It was a hand-maintained list, which made the guard below unable to catch the case its own
+    docstring named: a handler added later by someone who never read the module docstring is also
+    a handler nobody adds to a list. Derived from `app.routes`, a new endpoint is covered the
+    moment it is registered.
+    """
+    from fastapi.routing import APIRoute
+
+    return [route.endpoint for route in app.routes if isinstance(route, APIRoute)]
 
 
 def unscreened_handlers() -> list[str]:
@@ -392,10 +424,21 @@ def unscreened_handlers() -> list[str]:
     """
     offenders: list[str] = []
     for handler in route_handlers():
+        if handler.__name__ in SERVES_NO_DATA:
+            continue
         source = inspect.getsource(handler)
         if "_screened(" not in source and "_screened_body(" not in source:
             offenders.append(handler.__name__)
     return offenders
 
 
-__all__ = ["REVEALS", "ROUNDS", "app", "load_from_store", "route_handlers", "unscreened_handlers"]
+__all__ = [
+    "DASHBOARD",
+    "REVEALS",
+    "ROUNDS",
+    "SERVES_NO_DATA",
+    "app",
+    "load_from_store",
+    "route_handlers",
+    "unscreened_handlers",
+]

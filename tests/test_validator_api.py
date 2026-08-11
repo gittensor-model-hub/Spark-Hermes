@@ -296,3 +296,119 @@ def test_the_upload_handler_screens_its_response_like_every_other(client, intake
     assert api.unscreened_handlers() == []
     assert api.submit in api.route_handlers()
     assert api.submissions in api.route_handlers()
+
+
+# --- the submissions board -----------------------------------------------------------------------
+#
+# The dashboard the design asks for: unique id, submitter, and where the upload is in the queue.
+# Served from the validator's own origin, so the page reads `/v1/submissions` on this host and
+# there is no cross-origin request to allow and no second place to configure a URL.
+
+
+def test_the_board_is_served_from_the_validator_itself(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Submissions" in response.text
+
+
+def test_the_board_reads_this_hosts_own_endpoints(client):
+    """A page fetching an absolute URL could be aimed at a validator whose receipts nobody
+    published, and would need CORS on this one."""
+    page = client.get("/").text
+    assert '"/v1/submissions"' in page and '"/v1/round/current"' in page
+    assert "http://" not in page and "https://" not in page, "nothing is loaded from another origin"
+
+
+def _executable(page: str) -> str:
+    """The page with its comments and stylesheet removed.
+
+    Screened on the executable part rather than on the file, and the distinction is the same one
+    `tests/test_base_model.py` learned: a check that forbids *naming* a thing forbids explaining
+    why it is absent, and the first version of this test failed on the comment that says there is
+    no score column. What could leak here is a receipt field being read and rendered; a static
+    comment reads no field and renders nothing, so it cannot carry live data however it is worded.
+    The stylesheet goes for the same reason and cost a second failure: `font-weight` is not a
+    verdict, and CSS cannot read a receipt.
+    """
+    import re
+
+    stripped = re.sub(r"<!--.*?-->", "", page, flags=re.DOTALL)
+    stripped = re.sub(r"<style>.*?</style>", "", stripped, flags=re.DOTALL)
+    return re.sub(r"^\s*//.*$", "", stripped, flags=re.MULTILINE)
+
+
+def test_the_board_carries_no_withheld_or_verdict_vocabulary():
+    """The page is exempt from `_screened` because it serves a file rather than a payload. So the
+    file is screened instead, by the same vocabulary: a board that rendered a verdict during an
+    open round would be the leak the whole module is built around."""
+    from hermes.round import VERDICT_WORDS, WITHHELD_KEYS
+
+    code = _executable(api.DASHBOARD.read_text(encoding="utf-8"))
+    # Substring rather than word-boundary matching: `hidden_verify` inside a JS property name is as
+    # publishable as one in a payload, which is to say not at all.
+    for word in WITHHELD_KEYS:
+        assert word not in code, f"the board reads or renders {word!r}"
+    # `pass` and `grade` occur in ordinary prose, so only the field-shaped names are checked -- the
+    # ones that would be read off a receipt.
+    for word in sorted(VERDICT_WORDS & {"score", "scores", "pass_rate", "verdict", "verdicts", "reward", "weight"}):
+        assert word not in code, f"the board reads or renders {word!r}"
+
+
+def test_the_screen_would_catch_a_verdict_column():
+    """A guard nobody has seen fail is a guard nobody knows works -- and this one had to be
+    narrowed to the executable part, which is exactly where a narrowing can go one step too far."""
+    leaky = "<td>${s.score}</td>\n<!-- a comment mentioning score is fine -->"
+    assert "score" in _executable(leaky)
+    assert "score" not in _executable("<!-- there is no score column -->")
+    assert "weight" not in _executable("<style>th { font-weight: 650; }</style>")
+    assert "weight" in _executable("<td>${s.weight}</td>"), "narrowed to the styles, not past them"
+
+
+def test_an_empty_round_and_an_unreachable_validator_are_different_messages():
+    """Both produce no rows, and only one of them means the board is lying. Structural rather than
+    behavioural -- the branch is client-side -- but the failure it guards is a copy-paste that
+    makes the two read the same, which this does catch."""
+    page = api.DASHBOARD.read_text(encoding="utf-8")
+    assert "No submissions yet" in page
+    assert page.count("This is not an empty round.") == 2, "both failure paths say so"
+
+
+def test_a_missing_asset_is_a_500_rather_than_an_empty_board(client, monkeypatch, tmp_path):
+    """The one reading this page must never give. A 200 with no rows would render as a round
+    nobody has submitted to."""
+    monkeypatch.setattr(api, "DASHBOARD", tmp_path / "gone.html")
+    assert client.get("/").status_code == 500
+
+
+# --- the guard that protects it, which could not fire on the case it names ------------------------
+
+
+def test_the_handler_list_is_read_off_the_app_not_maintained_by_hand():
+    """It was a literal list, so the guard could not catch what its own docstring described: a
+    handler added by someone who never read the module docstring is also a handler nobody adds to
+    a list. Derived from `app.routes`, a new endpoint is covered when it is registered."""
+    names = {h.__name__ for h in api.route_handlers()}
+    assert {"health", "current_round", "submissions", "submit", "reveal", "dashboard"} <= names
+
+
+def test_a_newly_registered_leaky_route_is_caught_without_being_listed():
+    """The proof the previous test is about something. This registers a route the way a future
+    contributor would and asserts the guard notices, with nothing added to any list."""
+
+    @api.app.get("/v1/oops")
+    def oops() -> dict[str, str]:
+        return {"score": "0.91"}
+
+    try:
+        assert "oops" in api.unscreened_handlers()
+    finally:
+        api.app.router.routes = [r for r in api.app.router.routes if getattr(r, "endpoint", None) is not oops]
+    assert api.unscreened_handlers() == []
+
+
+def test_every_exemption_names_a_real_handler():
+    """An exemption that outlives its handler silently covers the next handler to take the name."""
+    names = {h.__name__ for h in api.route_handlers()}
+    assert set(api.SERVES_NO_DATA) <= names
+    assert all(reason for reason in api.SERVES_NO_DATA.values()), "each exemption states why"

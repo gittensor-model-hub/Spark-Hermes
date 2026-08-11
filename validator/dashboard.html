@@ -1,0 +1,205 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Spark-Hermes — submissions</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  The submissions board: one row per receipt, served by the validator that issued them.
+
+  Served from the validator's own origin rather than from GitHub Pages on purpose. The data is
+  read from `/v1/submissions` on this host, so there is no cross-origin request to allow, no
+  second place to configure a URL, and no way to point the page at a validator whose receipts
+  nobody published. Nothing is loaded from a CDN for the same reason a validator serves no
+  third-party script: this page is part of the audit surface.
+
+  What it may show is fixed by what a receipt carries -- submission id, miner, arrival time, file
+  and byte counts, queue status -- and a receipt carries envelope facts and nothing that hints at
+  merit. That is not a rendering choice; `validator.intake` is asserted on it, because during an
+  open round any correctness signal turns the withheld verifier into a check-your-guess oracle.
+  So there is no score column here, no ordering by anything but arrival, and no "leader".
+
+  ## The state this page exists to keep distinct
+
+  A validator that is down and a round with no submissions yet both produce an empty table. The
+  second is a normal state that happens every hour; the first means the board is lying. They are
+  rendered as three different things -- loading, unreachable with the reason, and empty-and-loaded
+  -- because "no rows" is the reading a miner would take as "my upload never arrived".
+-->
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #12151d; --border: #232838; --fg: #e6e9f2; --dim: #9aa3ba;
+    --pending: #d8a534; --evaluating: #4d8dff; --result: #46c17c; --bad: #ef6a6a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f7f8fb; --panel: #fff; --border: #dfe3ec; --fg: #171a21; --dim: #5c6579; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 20px 64px; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--dim); margin: 0 0 28px; font-size: 0.92rem; }
+  .round {
+    display: flex; flex-wrap: wrap; gap: 10px 28px; padding: 14px 18px; margin-bottom: 20px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  }
+  .round div { font-size: 0.88rem; }
+  .round span { color: var(--dim); display: block; font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim); font-weight: 650; }
+  tr:last-child td { border-bottom: 0; }
+  td.id, td.miner { font-family: var(--mono); font-size: 0.85rem; }
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 0.76rem; font-weight: 650;
+    border: 1px solid currentColor;
+  }
+  .badge.pending { color: var(--pending); }
+  .badge.evaluating { color: var(--evaluating); }
+  .badge.result { color: var(--result); }
+  .note { padding: 26px 18px; color: var(--dim); text-align: center; }
+  .note.bad { color: var(--bad); }
+  .note code { font-family: var(--mono); font-size: 0.85em; }
+  footer { color: var(--dim); font-size: 0.82rem; margin-top: 22px; }
+  a { color: var(--evaluating); }
+</style>
+
+<main>
+  <h1>Submissions</h1>
+  <p class="sub">
+    Every bundle this validator has accepted, in arrival order. Bundles are private; the digest is
+    the public commitment, opened as a pull request. Nothing here indicates merit — a receipt says
+    that an upload arrived and is well-formed, and during an open round that is all it may say.
+  </p>
+
+  <div class="round" id="round" hidden></div>
+
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Submission</th><th>Miner</th><th>Digest</th><th>Received</th>
+          <th>Files</th><th>Bytes</th><th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="note" id="note">Loading…</div>
+  </div>
+
+  <footer>
+    <span id="stamp"></span>
+    &nbsp;·&nbsp; <a href="/docs">API</a>
+    &nbsp;·&nbsp; <code>pending</code> queued, <code>evaluating</code> running, <code>result</code> judged
+  </footer>
+</main>
+
+<script>
+  const rows = document.getElementById("rows");
+  const note = document.getElementById("note");
+  const roundBox = document.getElementById("round");
+  const stamp = document.getElementById("stamp");
+  const STATUSES = ["pending", "evaluating", "result"];
+
+  function say(text, bad) {
+    note.textContent = text;
+    note.className = bad ? "note bad" : "note";
+    note.hidden = false;
+  }
+
+  function cell(row, text, cls) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (cls) td.className = cls;
+    row.appendChild(td);
+    return td;
+  }
+
+  function when(seconds) {
+    if (!seconds) return "—";
+    return new Date(seconds * 1000).toISOString().replace("T", " ").slice(0, 19) + "Z";
+  }
+
+  function draw(submissions) {
+    rows.replaceChildren();
+    // Arrival order, and only arrival order. Any other sort would suggest a ranking, and the
+    // receipts deliberately carry nothing that could support one.
+    const ordered = [...submissions].sort((a, b) => (a.received_at || 0) - (b.received_at || 0));
+    for (const s of ordered) {
+      const tr = document.createElement("tr");
+      cell(tr, s.submission_id || "—", "id");
+      cell(tr, s.miner_id || "—", "miner");
+      // Truncated for width; the full digest is what the pull request carries and what the API
+      // serves, so this is a display choice and not the record.
+      const digest = String(s.bundle_sha256 || "");
+      cell(tr, digest ? digest.slice(0, 18) + "…" : "—", "id").title = digest;
+      cell(tr, when(s.received_at));
+      cell(tr, s.files ?? "—");
+      cell(tr, s.bytes ?? "—");
+      const status = STATUSES.includes(s.status) ? s.status : "pending";
+      const td = cell(tr, "");
+      const badge = document.createElement("span");
+      badge.className = "badge " + status;
+      // The server's own word, not a guess. An unrecognised status is shown verbatim rather than
+      // mapped onto a known one, so a vocabulary change here reads as unfamiliar instead of wrong.
+      badge.textContent = s.status || "pending";
+      td.appendChild(badge);
+      rows.appendChild(tr);
+    }
+    if (!ordered.length) {
+      // Loaded, and genuinely empty. Distinct from the failure below, which is the whole point.
+      say("No submissions yet in this round.", false);
+    } else {
+      note.hidden = true;
+    }
+    stamp.textContent = "Updated " + when(Date.now() / 1000);
+  }
+
+  async function refresh() {
+    let current = null;
+    try {
+      const response = await fetch("/v1/round/current", { cache: "no-store" });
+      if (response.ok) current = await response.json();
+    } catch {
+      // A validator with no round open answers 404 here, which is normal and not an error. The
+      // submissions request below is what decides whether this page can be trusted.
+    }
+    if (current) {
+      roundBox.replaceChildren();
+      for (const [label, value] of [
+        ["Round", current.round_id],
+        ["Task", current.task_id],
+        ["State", current.state],
+        ["Deadline", when(current.deadline)],
+      ]) {
+        if (value === undefined || value === null || value === "") continue;
+        const div = document.createElement("div");
+        const span = document.createElement("span");
+        span.textContent = label;
+        div.append(span, document.createTextNode(String(value)));
+        roundBox.appendChild(div);
+      }
+      roundBox.hidden = !roundBox.children.length;
+    }
+
+    try {
+      const response = await fetch("/v1/submissions", { cache: "no-store" });
+      if (!response.ok) {
+        rows.replaceChildren();
+        say(`The validator answered ${response.status} for /v1/submissions. This is not an empty round.`, true);
+        return;
+      }
+      const body = await response.json();
+      draw(Array.isArray(body.submissions) ? body.submissions : []);
+    } catch (error) {
+      rows.replaceChildren();
+      say(`Could not reach the validator (${error}). This is not an empty round.`, true);
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 15000);
+</script>

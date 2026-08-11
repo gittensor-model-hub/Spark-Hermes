@@ -126,7 +126,13 @@ said about correctness would be a free oracle on the withheld check.
 pending → evaluating → result
 ```
 
-`GET /v1/submissions` serves those receipts, which is what the dashboard renders.
+`GET /v1/submissions` serves those receipts, and `GET /` is the board that renders them — served by
+the validator that issued them, so the page reads this host's own endpoints and there is no second
+place to configure a URL. One row per submission in arrival order, and no other ordering: the
+receipts deliberately carry nothing that could support a ranking.
+
+An unreachable validator and a round nobody has submitted to both produce an empty table, and only
+one of them means the board is lying. They render as different messages.
 
 ---
 
