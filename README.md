@@ -892,6 +892,13 @@ python -m hermes.challenge --episodes base.jsonl \
 data: the episode log otherwise carries counts only, and
 [`hermes/format.py`](hermes/format.py) renders rows from a trajectory.
 
+### One attempt, in detail
+
+[`docs/anatomy-of-an-attempt.md`](docs/anatomy-of-an-attempt.md) walks a real episode from the
+2026-08-11 run: the task, the trap firing, the recovery, both graders, the numbers it scored, and
+what a reader can verify afterwards. Every figure and line of transcript in it is copied from the
+episode log.
+
 ### The withheld half
 
 Every task in the suite publishes a salted commitment to a withheld check and none of the bodies

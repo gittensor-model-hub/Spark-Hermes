@@ -585,3 +585,90 @@ def test_raw_atem_in_the_content_is_still_parsed_when_the_server_did_not():
     policy = _structured_policy({}, content=render_tool_call("terminal", {"command": "ls"}))
     steps = policy.next_steps(_task(), [])
     assert any(s.kind == TOOL_CALL for s in steps)
+
+
+# --- calls the serving layer leaves behind ---------------------------------------------------------
+#
+# Measured against SGLang on 2026-08-11: the model emitted two complete calls in one turn, the
+# server returned the first as a structured tool_call and left the second's markup in `content`.
+# Reading only the structured list dropped it -- never executed, never counted in `tool_calls`, and
+# not malformed either, because it was perfectly well formed. It became a THINKING step, which is
+# the one place a failure is indistinguishable from real reasoning.
+
+
+REAL_LEFTOVER = (
+    "We have logs directory. Let's list logs.\n"
+    "<atem:function_calls>\n"
+    '<atem:invoke name="terminal">\n'
+    '<atem:parameter name="command">ls -la logs</atem:parameter>\n'
+    "</atem:invoke>\n"
+    "</atem:function_calls>"
+)
+
+
+def test_a_call_left_in_the_text_is_not_lost(monkeypatch):
+    """The transcript above, verbatim from the run that exposed this."""
+    from hermes.trajectory import TOOL_CALL
+
+    policy, _ = _policy(REAL_LEFTOVER)
+    policy.complete = lambda messages, *, tools=None: (
+        REAL_LEFTOVER,
+        {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "tool_calls": [{"name": "terminal", "arguments": '{"command": "ls -la"}'}],
+        },
+    )
+    steps = policy.next_steps(_task(), [])
+    calls = [s for s in steps if s.kind == TOOL_CALL]
+    assert [c.args["command"] for c in calls] == ["ls -la", "ls -la logs"], (
+        "both the structured call and the one left in the text must be executed, in order"
+    )
+
+
+def test_a_call_returned_twice_is_executed_once():
+    """A server that returns a call structurally AND echoes its markup would otherwise have it run
+    twice, which is worse than dropping it -- a duplicated mutating command is not idempotent."""
+    from hermes.trajectory import TOOL_CALL
+
+    same = render_tool_call("terminal", {"command": "rm -rf build"})
+    policy, _ = _policy(same)
+    policy.complete = lambda messages, *, tools=None: (
+        same,
+        {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "tool_calls": [{"name": "terminal", "arguments": '{"command": "rm -rf build"}'}],
+        },
+    )
+    calls = [s for s in policy.next_steps(_task(), []) if s.kind == TOOL_CALL]
+    assert len(calls) == 1, "deduplicated on name and arguments"
+
+
+def test_prose_beside_a_leftover_call_survives_as_text():
+    """A turn that is half answer and half call keeps the answer: `text` becomes the FINAL step."""
+    from hermesbench.policy import _merge_text_calls, _turn_from_tool_calls
+
+    turn = _turn_from_tool_calls([{"name": "terminal", "arguments": "{}"}], text=REAL_LEFTOVER, reasoning="r")
+    from hermes.protocol import DIALECTS
+
+    merged = _merge_text_calls(turn, text=REAL_LEFTOVER, dialect=DIALECTS["atem"], schemas={})
+    assert "We have logs directory" in merged.text
+    assert "<atem:invoke" not in merged.text
+    assert merged.scratch_pad == "r"
+
+
+def test_a_malformed_leftover_is_still_counted():
+    """A truncated call left in the text is the reason `malformed_turns` exists, and it must survive
+    the merge rather than being replaced by the structured call's clean verdict."""
+    from hermes.protocol import DIALECTS
+    from hermesbench.policy import _merge_text_calls, _turn_from_tool_calls
+
+    truncated = '<atem:function_calls>\n<atem:invoke name="terminal">\n<atem:parameter name="command">ls'
+    turn = _turn_from_tool_calls([{"name": "terminal", "arguments": "{}"}], text=truncated, reasoning="")
+    assert turn.malformed == ()
+    merged = _merge_text_calls(turn, text=truncated, dialect=DIALECTS["atem"], schemas={})
+    assert merged.malformed, "the truncation is the measurement"
+    assert merged.safe_calls == (), "and nothing from a turn that confused the parser executes"

@@ -33,6 +33,7 @@ so the same numbers that price a run are the ones the metrics report.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -168,9 +169,18 @@ class ServedModelPolicy:
         reasoning = str(raw.get("reasoning_content") or "") if isinstance(raw, dict) else ""
         structured = raw.get("tool_calls") if isinstance(raw, dict) else None
         if structured:
-            # The server already parsed the wire format, so re-parsing the text would be a second
-            # implementation of the same job -- and there is no text to parse anyway.
+            # The server parsed the wire format, and it does not always parse ALL of it. Measured
+            # against SGLang: the model emitted two complete calls in one turn, the server returned
+            # one as a structured call and left the other's markup in `content`, and this branch put
+            # that text into a THINKING step -- so a call the model made was never executed, never
+            # counted in `tool_calls`, and not malformed either. Prose inside a thinking step, which
+            # no metric distinguishes from real reasoning.
+            #
+            # So the text is parsed too and the results merged. Deduplicated by (name, arguments),
+            # because a server that returns a call structurally AND leaves its text behind would
+            # otherwise have it executed twice.
             turn = _turn_from_tool_calls(structured, text=text, reasoning=reasoning)
+            turn = _merge_text_calls(turn, text=text, dialect=self.dialect, schemas=self.tool_schemas)
         else:
             turn = parse_turn(text, dialect=self.dialect, reasoning=reasoning, schemas=self.tool_schemas)
         # `parse_turn` already separates malformed from abstained, and `steps_from_turn`
@@ -181,6 +191,37 @@ class ServedModelPolicy:
         # tokens, so anything scoring efficiency is scoring against the protocol.
         self.parse_failures += len(turn.malformed)
         return steps_from_turn(turn)
+
+
+def _merge_text_calls(
+    turn: ParsedTurn, *, text: str, dialect: Dialect, schemas: dict[str, dict[str, Any]]
+) -> ParsedTurn:
+    """Add calls the server left in the text, and keep whatever the parser says about them.
+
+    A serving layer's tool parser is not obliged to return every call in a turn, and one measured
+    here does not: given two, it returned the first structurally and left the second's markup in
+    `content`. Reading only the structured list loses that call silently -- the worst shape, because
+    the episode still succeeds if the model reissues it and simply looks like it took more turns.
+
+    Deduplicated on (name, arguments): a server that returns a call structurally *and* echoes its
+    text would otherwise get it executed twice, which is worse than dropping it.
+    """
+    if not text.strip():
+        return turn
+    from_text = parse_turn(text, dialect=dialect, reasoning="", schemas=schemas)
+    if not from_text.calls and not from_text.malformed:
+        return turn
+
+    seen = {(c.name, json.dumps(c.arguments, sort_keys=True)) for c in turn.calls}
+    extra = [c for c in from_text.calls if (c.name, json.dumps(c.arguments, sort_keys=True)) not in seen]
+    return ParsedTurn(
+        calls=turn.calls + tuple(extra),
+        # Whatever the parser judged to be prose after removing the call markup, so a turn that was
+        # half answer and half call keeps the answer.
+        text=from_text.text,
+        scratch_pad=turn.scratch_pad,
+        malformed=turn.malformed + from_text.malformed,
+    )
 
 
 def _turn_from_tool_calls(calls: list[dict[str, Any]], *, text: str, reasoning: str) -> ParsedTurn:
