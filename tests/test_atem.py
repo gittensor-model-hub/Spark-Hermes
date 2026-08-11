@@ -493,3 +493,95 @@ def test_stripping_the_framing_does_not_eat_the_answer():
     assert turn.text == "The answer is 6."
     assert turn.scratch_pad == "thinking"
     assert turn.abstained, "a final answer with no call is an abstention, not a malformed turn"
+
+
+# --- when the serving layer parses the wire format for us ------------------------------------------
+#
+# SGLang with `--tool-call-parser muse` returns OpenAI `tool_calls` and leaves `content` EMPTY.
+# Measured on the real server: finish_reason=tool_calls, prompt_tokens=424, content=''. A policy
+# that only read `content` would see nothing said and score an abstention -- reporting a model that
+# called a tool correctly as one that declined to, on every single turn.
+
+
+def _structured_policy(raw_extra, *, content=""):
+    from hermes.protocol import DIALECTS
+    from hermesbench.policy import ServedModelPolicy
+
+    def complete(messages, *, tools=None):
+        return content, {"prompt_tokens": 424, "completion_tokens": 231, "total_tokens": 655, **raw_extra}
+
+    return ServedModelPolicy(
+        complete=complete,
+        dialect=DIALECTS["atem"],
+        tool_schemas={"terminal": {"description": "d", "parameters": {}}},
+    )
+
+
+def test_server_parsed_calls_are_used_rather_than_the_empty_content():
+    """The real response shape from SGLang."""
+    from hermes.trajectory import TOOL_CALL
+
+    policy = _structured_policy(
+        {
+            "tool_calls": [{"name": "terminal", "arguments": '{"command": "ls -l logs"}'}],
+            "reasoning_content": "The directory logs/ holds several .log files.",
+        }
+    )
+    steps = policy.next_steps(_task(), [])
+    calls = [s for s in steps if s.kind == TOOL_CALL]
+    assert len(calls) == 1 and calls[0].tool == "terminal"
+    assert calls[0].args == {"command": "ls -l logs"}
+    assert policy.parse_failures == 0
+
+
+def test_an_empty_content_with_a_call_is_not_an_abstention():
+    """The failure this exists to prevent: `abstained` requires something said AND no calls, so a
+    turn whose calls were invisible would qualify."""
+    from hermes.protocol import ParsedTurn
+    from hermesbench.policy import _turn_from_tool_calls
+
+    turn = _turn_from_tool_calls(
+        [{"name": "terminal", "arguments": '{"command": "ls"}'}], text="", reasoning="thinking"
+    )
+    assert isinstance(turn, ParsedTurn)
+    assert not turn.abstained and len(turn.calls) == 1
+
+
+def test_unreadable_server_arguments_are_malformed_not_dropped():
+    """The same failure `parse_turn` reports for an unreadable call. Dropping it would score the
+    protocol's hardest failure as its most disciplined behaviour."""
+    from hermesbench.policy import _turn_from_tool_calls
+
+    turn = _turn_from_tool_calls([{"name": "terminal", "arguments": '{"command": '}], text="", reasoning="")
+    assert turn.calls == () and turn.malformed and "not readable JSON" in turn.malformed[0]
+
+
+def test_arguments_that_decode_to_a_non_object_are_refused():
+    from hermesbench.policy import _turn_from_tool_calls
+
+    turn = _turn_from_tool_calls([{"name": "terminal", "arguments": "[1, 2]"}], text="", reasoning="")
+    assert turn.calls == () and "not an object" in turn.malformed[0]
+
+
+def test_a_call_with_no_name_is_malformed():
+    from hermesbench.policy import _turn_from_tool_calls
+
+    turn = _turn_from_tool_calls([{"arguments": "{}"}], text="", reasoning="")
+    assert turn.calls == () and "no function name" in turn.malformed[0]
+
+
+def test_a_dict_of_arguments_is_accepted_as_well_as_a_json_string():
+    """Servers differ: some hand back the decoded object. Both shapes are the same call."""
+    from hermesbench.policy import _turn_from_tool_calls
+
+    turn = _turn_from_tool_calls([{"name": "terminal", "arguments": {"command": "ls"}}], text="", reasoning="")
+    assert turn.calls[0].arguments == {"command": "ls"}
+
+
+def test_raw_atem_in_the_content_is_still_parsed_when_the_server_did_not():
+    """A server without the parser, or a raw generate() path. Both are real, so both work."""
+    from hermes.trajectory import TOOL_CALL
+
+    policy = _structured_policy({}, content=render_tool_call("terminal", {"command": "ls"}))
+    steps = policy.next_steps(_task(), [])
+    assert any(s.kind == TOOL_CALL for s in steps)

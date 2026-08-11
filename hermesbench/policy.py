@@ -165,7 +165,13 @@ class ServedModelPolicy:
         # tag, so it is read off the response and handed to the parser. Looking for a tag in the
         # text would find nothing and report every turn as having skipped deliberation.
         reasoning = str(raw.get("reasoning_content") or "") if isinstance(raw, dict) else ""
-        turn = parse_turn(text, dialect=self.dialect, reasoning=reasoning, schemas=self.tool_schemas)
+        structured = raw.get("tool_calls") if isinstance(raw, dict) else None
+        if structured:
+            # The server already parsed the wire format, so re-parsing the text would be a second
+            # implementation of the same job -- and there is no text to parse anyway.
+            turn = _turn_from_tool_calls(structured, text=text, reasoning=reasoning)
+        else:
+            turn = parse_turn(text, dialect=self.dialect, reasoning=reasoning, schemas=self.tool_schemas)
         # `parse_turn` already separates malformed from abstained, and `steps_from_turn`
         # already says these are "a failure the metrics should see" -- but the failure left
         # here as prose inside a THINKING step, which no metric can distinguish from real
@@ -174,6 +180,41 @@ class ServedModelPolicy:
         # tokens, so anything scoring efficiency is scoring against the protocol.
         self.parse_failures += len(turn.malformed)
         return steps_from_turn(turn)
+
+
+def _turn_from_tool_calls(calls: list[dict[str, Any]], *, text: str, reasoning: str) -> ParsedTurn:
+    """Build a `ParsedTurn` from calls the serving layer parsed.
+
+    Arguments arrive as a JSON string, which is the OpenAI shape whatever the model's own wire
+    format was. A string that will not decode is recorded as malformed rather than dropped: it is
+    the same failure `parse_turn` reports for an unreadable call, and folding it into "no calls
+    found" would score the protocol's hardest failure as its most disciplined behaviour.
+    """
+    import json
+
+    from hermes.protocol import ParsedCall
+
+    parsed: list[ParsedCall] = []
+    malformed: list[str] = []
+    for call in calls:
+        name = str(call.get("name") or "")
+        if not name:
+            malformed.append("the server returned a tool call with no function name")
+            continue
+        raw_args = call.get("arguments")
+        if isinstance(raw_args, dict):
+            parsed.append(ParsedCall(name=name, arguments=raw_args))
+            continue
+        try:
+            decoded = json.loads(raw_args or "{}")
+        except (TypeError, ValueError) as exc:
+            malformed.append(f"{name}: the server's tool-call arguments are not readable JSON ({exc})")
+            continue
+        if not isinstance(decoded, dict):
+            malformed.append(f"{name}: tool-call arguments decoded to {type(decoded).__name__}, not an object")
+            continue
+        parsed.append(ParsedCall(name=name, arguments=decoded))
+    return ParsedTurn(calls=tuple(parsed), text=text.strip(), scratch_pad=reasoning.strip(), malformed=tuple(malformed))
 
 
 def _render_call(step: Step, dialect: Dialect) -> str:
@@ -251,6 +292,17 @@ def openai_completion(
         reasoning = getattr(choice.message, "reasoning_content", None)
         if reasoning:
             usage["reasoning_content"] = reasoning
+        # Structured calls, when the server parsed them itself. SGLang with --tool-call-parser muse
+        # returns OpenAI tool_calls and leaves `content` EMPTY -- so a policy that only reads content
+        # would see nothing said, score an abstention, and report a model that never calls a tool as
+        # a model that chose not to. Carried through so the caller can prefer them.
+        calls = getattr(choice.message, "tool_calls", None)
+        if calls:
+            usage["tool_calls"] = [
+                {"name": c.function.name, "arguments": c.function.arguments}
+                for c in calls
+                if getattr(c, "function", None) is not None
+            ]
         return choice.message.content or "", usage
 
     return complete
