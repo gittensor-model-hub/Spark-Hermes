@@ -68,7 +68,7 @@ def test_a_module_that_defines_main_can_be_invoked(path):
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     assert _has_entry_point(tree), (
-        f"{path.as_posix()} defines main() with no `if __name__ == \"__main__\"` block, so "
+        f'{path.as_posix()} defines main() with no `if __name__ == "__main__"` block, so '
         "`python -m` on it exits 0 without running anything"
     )
 
