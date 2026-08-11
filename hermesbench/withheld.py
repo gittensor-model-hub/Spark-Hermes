@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hermesbench.tasks import Task, TaskError
 
@@ -134,12 +136,130 @@ def unscorable(tasks: Iterable[Task]) -> list[str]:
     return [t.task_id for t in tasks if t.withheld_check_missing]
 
 
+@dataclass(frozen=True)
+class WithheldStatus:
+    """What this checkout can and cannot score.
+
+    A record rather than a dict: every other report in this repo is one, and the first version of
+    `main` read `len()` off a value typed `object` -- which pyright caught and a reader would not.
+    """
+
+    tasks: int
+    committed: tuple[str, ...]
+    attached: tuple[str, ...]
+    unscorable: tuple[str, ...]
+    root: str
+    salt_length: int
+    problem: str = ""
+
+    @property
+    def complete(self) -> bool:
+        return not self.unscorable and not self.problem
+
+    @property
+    def salt_long_enough(self) -> bool:
+        # The bound `salted_digest` enforces: a withheld check is a short command from a small
+        # space, so a short salt publishes a guessable digest rather than a commitment.
+        return self.salt_length >= 16
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "tasks": self.tasks,
+            "committed": list(self.committed),
+            "attached": list(self.attached),
+            "unscorable": list(self.unscorable),
+            "root": self.root,
+            "root_env": WITHHELD_ROOT_ENV,
+            "salt_env": WITHHELD_SALT_ENV,
+            # A length is a fact about a secret; the secret is not. This output is meant to be
+            # pasteable into an issue.
+            "salt_length": self.salt_length,
+            "salt_long_enough": self.salt_long_enough,
+            "complete": self.complete,
+            "problem": self.problem,
+        }
+
+
+def status(tasks: Iterable[Task], *, root: Path | None = None, salt: str = "") -> WithheldStatus:
+    """What this checkout can and cannot score, as facts rather than as an absence.
+
+    Answering "is the withheld half present" took a filesystem search, three env vars and a read
+    of two modules. It is one call now, because the state it reports is the difference between a
+    suite that measures overfitting and one that silently does not -- and the second looks like a
+    clean result.
+    """
+    listed = list(tasks)
+    resolved = withheld_root(root)
+    salt = salt or os.environ.get(WITHHELD_SALT_ENV, "")
+    problem = ""
+    # Measured after attaching, not before. Computing `unscorable` on the input would report a
+    # complete private tree as scoring nothing -- the answer would be identical whether the tree
+    # was there or not, which is the one distinction this function exists to draw.
+    resulting = listed
+    if resolved is not None:
+        try:
+            resulting = overlay(listed, root=resolved, salt=salt)
+        except WithheldError as exc:
+            problem = str(exc)
+    return WithheldStatus(
+        tasks=len(listed),
+        committed=tuple(t.task_id for t in listed if t.hidden_verify_commitment),
+        attached=tuple(t.task_id for t in resulting if t.hidden_verify),
+        unscorable=tuple(unscorable(resulting)),
+        root=str(resolved) if resolved is not None else "",
+        salt_length=len(salt),
+        problem=problem,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Exit 0 when every committed task can be scored, 1 otherwise, so a script can gate on it."""
+    import argparse
+    import json
+
+    from hermesbench.tasks import load_suite
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--suite", default="all")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    report = status(load_suite(args.suite))
+    if args.json:
+        print(json.dumps(report.to_record(), indent=2, sort_keys=True))
+    else:
+        print(f"tasks              {report.tasks}")
+        print(f"commit to withheld {len(report.committed)}")
+        print(f"withheld attached  {len(report.attached)}")
+        print(f"{WITHHELD_ROOT_ENV:<18} {report.root or '(unset)'}")
+        print(f"{WITHHELD_SALT_ENV:<18} {report.salt_length} chars" if report.salt_length else "salt (unset)")
+        if report.problem:
+            print(f"problem            {report.problem}")
+        if report.unscorable:
+            listed = ", ".join(report.unscorable[:8])
+            print(
+                f"\nUNSCORABLE {len(report.unscorable)}: {listed}{' ...' if len(report.unscorable) > 8 else ''}\n"
+                "These publish a commitment whose check is not here, so a run scores only the published\n"
+                "verifier -- the half a strategy can fit -- and reports no overfit signal."
+            )
+        else:
+            print("\nevery committed task can be scored")
+    return 0 if report.complete else 1
+
+
 __all__ = [
     "WITHHELD_ROOT_ENV",
     "WITHHELD_SALT_ENV",
     "WithheldError",
+    "WithheldStatus",
+    "main",
+    "status",
     "overlay",
     "unscorable",
     "withheld_path",
     "withheld_root",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

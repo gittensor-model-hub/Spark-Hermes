@@ -931,3 +931,91 @@ def test_the_default_is_sequential(monkeypatch, tmp_path):
     _slow_suite(monkeypatch, delay=0.01)
     run_suite(_tasks(4), lambda t: None, _NoExecutor(), tmp_path / "ws", sink=sink)
     assert sink.concurrent is False
+
+
+# --- the withheld half, which the run path never attached ---------------------------------------
+#
+# `hermesbench.withheld.overlay` existed, was tested, and was called from `suitecheck` and from
+# nothing else. So this runner loaded the public tasks, `verify_hidden` returned None for every
+# episode, and every log this harness wrote carries `hidden_passed: null`. Each number in those
+# logs is correct; what is absent is `overfit`, the one measurement separating a strategy that did
+# the job from one that learned the published check -- absent with no line saying so.
+
+
+def _list_args(tmp_path, *extra):
+    return ["--suite", "all", "--workspace-root", str(tmp_path / "ws"), *extra]
+
+
+def test_a_run_without_the_withheld_half_says_so(tmp_path, capsys, monkeypatch):
+    """The whole point. A suite of 19 committed tasks scored 19 times against the published
+    verifier only, and the log read exactly like one where the withheld checks had passed."""
+    from hermesbench.runner import main
+
+    monkeypatch.delenv("SPARKDISTILL_WITHHELD_ROOT", raising=False)
+    assert main([*_list_args(tmp_path, "--list")]) == 0
+    err = capsys.readouterr().err
+    assert "publish a withheld-check commitment whose check is not present" in err
+    assert "no overfit signal is measured" in err
+
+
+def test_the_run_path_calls_overlay(monkeypatch, tmp_path):
+    """Structural, because the defect was not a wrong call but a missing one -- and a missing call
+    is invisible to every test that only checks the numbers a run produces."""
+    import hermesbench.withheld as withheld
+    from hermesbench.runner import main
+
+    seen = []
+    real = withheld.overlay
+    monkeypatch.setattr(withheld, "overlay", lambda tasks, **kw: seen.append(len(list(tasks))) or real(tasks, **kw))
+    main([*_list_args(tmp_path, "--list")])
+    assert seen, "the runner loaded the suite without ever attaching the withheld checks"
+
+
+def test_a_configured_but_wrong_withheld_tree_refuses_rather_than_degrades(tmp_path, capsys, monkeypatch):
+    """Absent is a public checkout, which still has to be able to run. *Configured and wrong* is a
+    private tree that drifted from what was published, and scoring against it measures a different
+    benchmark than the one named."""
+    from hermesbench.runner import main
+
+    not_a_dir = tmp_path / "withheld.txt"
+    not_a_dir.write_text("", encoding="utf-8")
+    monkeypatch.setenv("SPARKDISTILL_WITHHELD_ROOT", str(not_a_dir))
+    assert main([*_list_args(tmp_path, "--list")]) == 2
+    assert "withheld checks unusable" in capsys.readouterr().err
+
+
+# --- the salt guard that could not fire -----------------------------------------------------------
+
+
+def test_writing_a_manifest_without_a_salt_is_refused(tmp_path, capsys, monkeypatch):
+    from hermesbench.runner import main
+
+    monkeypatch.delenv("HERMESBENCH_WITHHELD_SALT", raising=False)
+    monkeypatch.delenv("SPARKDISTILL_WITHHELD_ROOT", raising=False)
+    assert main([*_list_args(tmp_path, "--out", str(tmp_path / "manifest.json"))]) == 2
+    assert "HERMESBENCH_WITHHELD_SALT" in capsys.readouterr().err
+
+
+def test_a_short_salt_is_refused_like_no_salt(tmp_path, monkeypatch):
+    """`salted_digest` refuses under 16 characters because a withheld check is a short command from
+    a small space; a guard that accepted a four-character salt would publish a guessable digest."""
+    from hermesbench.runner import main
+
+    monkeypatch.setenv("HERMESBENCH_WITHHELD_SALT", "short")
+    monkeypatch.delenv("SPARKDISTILL_WITHHELD_ROOT", raising=False)
+    assert main([*_list_args(tmp_path, "--out", str(tmp_path / "m.json"))]) == 2
+
+
+def test_the_old_key_would_have_passed_on_exactly_this_suite(monkeypatch):
+    """The guard keyed on `has_hidden_tests`, which is about the *body* being present. With the
+    private tree absent no task has a body -- so a suite of 19 committed tasks looked like a suite
+    with no withheld checks, and the manifest was written unsalted for the one reason the guard
+    exists to prevent."""
+    from hermesbench.tasks import load_suite
+
+    tasks = load_suite("all")
+    assert not any(t.has_hidden_tests for t in tasks), "no bodies in a public checkout"
+    assert all(t.hidden_verify_commitment for t in tasks), "and every task commits to one"
+    assert not any(t.has_hidden_tests for t in tasks) and any(t.hidden_verify_commitment for t in tasks), (
+        "so the old key was false and the new key is true on identical input"
+    )

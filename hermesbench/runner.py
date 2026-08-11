@@ -775,11 +775,53 @@ def main(argv: list[str] | None = None) -> int:
         order = {task_id: i for i, task_id in enumerate(wanted)}
         tasks = sorted((t for t in tasks if t.task_id in order), key=lambda t: order[t.task_id])
 
+    # Attach the withheld checks, or say out loud that there are none.
+    #
+    # This call was missing. `hermesbench.withheld.overlay` existed, was tested, and was
+    # reached from `suitecheck` and from nothing else -- so this runner loaded the public
+    # tasks and ran them, `verify_hidden` returned None for every episode, and every log this
+    # harness has ever written carries `hidden_passed: null`. Nothing was wrong with any
+    # individual number; what was missing was `overfit`, which is the one measurement that
+    # separates a strategy that did the job from one that learned the published check, and it
+    # was missing silently. All 19 tasks publish a commitment and none of them was ever opened.
+    #
+    # Degrades rather than refuses when the private tree is absent, because a public checkout
+    # must still be able to run the suite -- but it degrades loudly, and the count goes into
+    # the summary so a run without the withheld half cannot be read as a clean one.
+    from hermesbench.withheld import WITHHELD_ROOT_ENV, WithheldError, overlay, unscorable
+
+    try:
+        tasks = overlay(tasks)
+    except WithheldError as exc:
+        # The private tree is configured and does not match. Refused rather than degraded: a
+        # body that disagrees with its commitment means the tree drifted from what was
+        # published, and scoring against it measures a different benchmark than the one named.
+        print(f"hermesbench: withheld checks unusable: {exc}", file=sys.stderr)
+        return 2
+
+    missing = unscorable(tasks)
+    if missing:
+        print(
+            f"hermesbench: WARNING {len(missing)} of {len(tasks)} tasks publish a withheld-check "
+            f"commitment whose check is not present, so `hidden_passed` will be null for them and "
+            f"no overfit signal is measured: {', '.join(missing[:6])}"
+            f"{' ...' if len(missing) > 6 else ''}\n"
+            f"Set {WITHHELD_ROOT_ENV} and HERMESBENCH_WITHHELD_SALT to score the withheld half. "
+            "Without it a run reports only what the published verifier can see, which is the half "
+            "a strategy can fit.",
+            file=sys.stderr,
+        )
+
     # Checked before anything is paid for. `build_manifest` refuses to fingerprint a task
     # with a withheld check and no salt, and discovering that after a suite has run means
     # the run happened and the manifest cannot be written.
+    #
+    # Keyed on the published commitment, not on `has_hidden_tests`. That property is about the
+    # *body* being present, so this guard passed for exactly the reason it should have fired:
+    # with the private tree absent no task has a body, so a suite of 19 committed tasks looked
+    # like a suite with no withheld checks at all and the manifest was written unsalted.
     salt = os.environ.get("HERMESBENCH_WITHHELD_SALT", "")
-    if args.out and any(t.has_hidden_tests for t in tasks) and len(salt) < 16:
+    if args.out and any(t.hidden_verify_commitment for t in tasks) and len(salt) < 16:
         print(
             "hermesbench: this suite has withheld checks, so writing a manifest needs "
             "HERMESBENCH_WITHHELD_SALT set to at least 16 characters.\n"

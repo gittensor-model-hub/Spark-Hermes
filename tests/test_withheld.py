@@ -245,3 +245,71 @@ def test_the_written_check_is_what_the_commitment_covers(tmp_path):
     restored = overlay(public, root=tmp_path / "w", salt=SALT)
     assert restored[0].hidden_verify.strip().endswith('= "72"')
     assert (tmp_path / "w" / "t1.notes.md").read_text().startswith("# Withheld checks")
+
+
+# --- reporting the state, because finding it out took a filesystem search ------------------------
+
+
+def test_status_reports_a_public_checkout_as_unscorable_rather_than_clean(monkeypatch):
+    """The state this whole module exists for. 19 tasks commit to a withheld check, a public
+    checkout has none of them, and the failure of the old arrangement was that this was reported
+    nowhere at all."""
+    from hermesbench.tasks import load_suite
+    from hermesbench.withheld import status
+
+    monkeypatch.delenv("SPARKDISTILL_WITHHELD_ROOT", raising=False)
+    report = status(load_suite("all"))
+    assert len(report.committed) == report.tasks == 19
+    assert report.attached == ()
+    assert len(report.unscorable) == 19
+    assert report.root == ""
+
+
+def test_status_reports_a_complete_private_tree(tmp_path):
+    """Measured after attaching. The first version of `status` computed `unscorable` on the input
+    tasks, so a complete tree and no tree at all produced the same answer -- the one distinction it
+    exists to draw."""
+    from hermesbench.tasks import load_suite
+    from hermesbench.withheld import status
+
+    root = _suite(tmp_path)
+    split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
+    report = status(load_suite("v0", root=root), root=tmp_path / "withheld", salt=SALT)
+    assert report.attached, "a complete tree attaches its bodies"
+    assert report.unscorable == ()
+    assert report.salt_long_enough is True
+
+
+def test_status_never_reports_the_salt_itself(monkeypatch):
+    """The output is meant to be pasteable into an issue. A length is a fact about a secret; the
+    secret is not."""
+    from hermesbench.tasks import load_suite
+    from hermesbench.withheld import status
+
+    monkeypatch.setenv("HERMESBENCH_WITHHELD_SALT", "a-secret-long-enough-to-pass")
+    report = status(load_suite("all"))
+    assert report.salt_length == len("a-secret-long-enough-to-pass")
+    assert "a-secret-long-enough-to-pass" not in repr(report.to_record())
+
+
+def test_status_reports_a_broken_tree_as_a_problem_not_as_an_absence(tmp_path, monkeypatch):
+    """A configured tree that does not match is a different state from no tree, and collapsing the
+    two is how a drifted private tree reads as a public checkout."""
+    from hermesbench.tasks import load_suite
+    from hermesbench.withheld import status
+
+    root = _suite(tmp_path)
+    split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
+    for path in (tmp_path / "withheld").iterdir():
+        path.write_text("echo not the committed check", encoding="utf-8")
+    report = status(load_suite("v0", root=root), root=tmp_path / "withheld", salt=SALT)
+    assert report.problem, "a mismatch has to surface as a problem"
+
+
+def test_the_cli_exit_status_can_gate_a_run(monkeypatch, capsys):
+    """1 when something committed cannot be scored, so a script can refuse to spend a suite."""
+    from hermesbench.withheld import main
+
+    monkeypatch.delenv("SPARKDISTILL_WITHHELD_ROOT", raising=False)
+    assert main(["--suite", "all"]) == 1
+    assert "UNSCORABLE" in capsys.readouterr().out
