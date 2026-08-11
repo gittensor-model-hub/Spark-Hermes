@@ -212,3 +212,87 @@ def test_the_api_never_holds_the_master_salt():
     source = inspect.getsource(api)
     assert ".reveal(" not in source
     assert "master_salt" not in source.replace("master salt", "").replace("the master", "")
+
+
+# --- the upload path, the only write on this server ----------------------------------------------
+#
+# An earlier version of this module said "this server does not accept submissions". It does now:
+# the bundle arrives privately here and the pull request carries only its digest. The read paths are
+# unchanged, and the response to an upload has to stay silent about merit -- a miner can call this
+# repeatedly and cheaply, so anything it leaked about correctness would be a free oracle on the
+# withheld check.
+
+GOOD_BUNDLE = {
+    "SOUL.md": "# Operating identity\nOne call per turn.\n",
+    "skills/p/SKILL.md": "---\nname: p\ndescription: d\n---\n# P\n\n1. Close the tag.\n",
+}
+
+
+@pytest.fixture
+def intake_at(tmp_path, monkeypatch):
+    """Point the intake at a temporary store so uploads do not touch the repository."""
+    from validator import intake as intake_module
+
+    monkeypatch.setattr(intake_module, "SUBMISSION_DIR", tmp_path / "store")
+    monkeypatch.setattr(intake_module, "RECEIPTS", tmp_path / "receipts.jsonl")
+    monkeypatch.setattr(intake_module.Intake, "root", tmp_path / "store")
+    monkeypatch.setattr(intake_module.Intake, "receipts", tmp_path / "receipts.jsonl")
+    return tmp_path
+
+
+def test_an_upload_returns_a_receipt_and_nothing_about_merit(client, intake_at):
+    api.ROUNDS["r-1"] = _round(deadline=1e12)
+    response = client.post("/v1/round/r-1/submission", json={"miner_id": "carol", "files": GOOD_BUNDLE})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "pending"
+    assert body["bundle_sha256"].startswith("sha256:")
+    assert not {"passed", "verdict", "hidden_passed", "score"} & set(body)
+
+
+def test_the_dashboard_lists_receipts_for_a_round(client, intake_at):
+    api.ROUNDS["r-1"] = _round(deadline=1e12)
+    client.post("/v1/round/r-1/submission", json={"miner_id": "carol", "files": GOOD_BUNDLE})
+    listed = client.get("/v1/submissions", params={"round_id": "r-1"}).json()["submissions"]
+    assert [r["miner_id"] for r in listed] == ["carol"]
+    assert listed[0]["status"] == "pending"
+
+
+def test_a_bundle_the_contract_refuses_is_a_400_with_the_reason(client, intake_at):
+    """A miner who learns one problem per upload stops uploading, so every reason is returned."""
+    api.ROUNDS["r-1"] = _round(deadline=1e12)
+    response = client.post(
+        "/v1/round/r-1/submission", json={"miner_id": "carol", "files": {"run_agent.py": "import os"}}
+    )
+    assert response.status_code == 400
+    assert "run_agent.py" in response.json()["detail"]
+
+
+def test_a_traversing_path_is_refused(client, intake_at):
+    api.ROUNDS["r-1"] = _round(deadline=1e12)
+    response = client.post("/v1/round/r-1/submission", json={"miner_id": "carol", "files": {"../../etc/x": "y"}})
+    assert response.status_code == 400
+    assert "escapes the bundle root" in response.json()["detail"]
+
+
+def test_an_upload_after_the_freeze_is_refused(client, intake_at):
+    """A bundle taken after the freeze would sit in the store looking like a submission with no
+    window left to judge it."""
+    window = _round(deadline=1_000.0)
+    api.ROUNDS["r-1"] = window
+    window.freeze(now=1_001.0)
+    response = client.post("/v1/round/r-1/submission", json={"miner_id": "carol", "files": GOOD_BUNDLE})
+    assert response.status_code == 409
+    assert "uploads are accepted while it is open" in response.json()["detail"]
+
+
+def test_an_upload_to_an_unknown_round_is_a_404(client, intake_at):
+    assert client.post("/v1/round/nope/submission", json={"miner_id": "x", "files": GOOD_BUNDLE}).status_code == 404
+
+
+def test_the_upload_handler_screens_its_response_like_every_other(client, intake_at):
+    """The structural guard covers writes too, or the one endpoint that takes untrusted input would
+    be the one exempt from the rule the module exists for."""
+    assert api.unscreened_handlers() == []
+    assert api.submit in api.route_handlers()
+    assert api.submissions in api.route_handlers()

@@ -2,18 +2,27 @@
 
     uv run uvicorn validator.api:app --host 127.0.0.1 --port 8080
 
-Read-mostly on purpose, and the reason is the identity decision. Miners are identified by the
-GitHub pull request they open, so GitHub is the submission transport and `rollout_track.yml`
-is the intake -- reading a submission without ever checking it out, because that job holds
-secrets. This server does not accept submissions. It publishes what a miner needs in order to
-work and what an auditor needs in order to check the result afterwards, and that is all.
+Read-mostly, with exactly one write path: a miner uploads their surface bundle privately here and
+opens a pull request carrying only its digest.
+
+That split is the design. The bundle stays private, so the surface remains the miner's edge. The
+digest is public, timestamped and attributable, so the validator cannot evaluate a different bundle
+than the one committed and the miner cannot revise after the fact. Neither half works alone: a
+private upload with no public commitment is unauditable, and a public surface is no longer an edge.
+
+An earlier version of this file said "this server does not accept submissions", and the reasoning
+then was that GitHub was the transport. It is now the commitment; the transport is here. Everything
+about the read paths is unchanged, and the upload path is validated by `validator.intake` before a
+byte reaches the filesystem.
 
 ## The one property this file exists to protect
 
-**No correctness information may leave here before the round freezes.** A submission arrives as
-a public pull request, so anything this server says about it is visible to the miner *and to
-every competitor at once*. A hidden pass/fail served during an open round turns the withheld
-verifier into a check-your-guess oracle: resubmit, read the response, bisect onto the check.
+**No correctness information may leave here before the round freezes.** A hidden pass/fail served
+during an open round turns the withheld verifier into a check-your-guess oracle: resubmit, read the
+response, bisect onto the check. The upload endpoint makes this sharper rather than softer -- a
+miner can now submit repeatedly and cheaply, so the response to an upload must say only that it
+arrived and is well-formed. It returns a receipt, and a receipt carries envelope facts and nothing
+else.
 `overfit_rate` is the only measurement that catches a strategy which learned the published
 check rather than the job, and it depends entirely on the withheld half staying withheld.
 
@@ -40,9 +49,11 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 from hermes.round import (
     GRADED,
+    OPEN,
     PUBLIC_VIEW_FIELDS,
     RECEIPT_FIELDS,
     SETTLED,
@@ -50,6 +61,14 @@ from hermes.round import (
     ScoreLeakError,
     refuse_withheld_body,
     screen_public_payload,
+)
+
+# The fields an intake receipt adds beyond `RECEIPT_FIELDS`. Named here rather than widening the
+# round's own allowlist: `RECEIPT_FIELDS` describes what a *round* receipt may carry, and merging
+# the two frozensets would let a round receipt start publishing intake fields and nobody would
+# notice. The screen still refuses anything outside the union.
+INTAKE_FIELDS = frozenset(
+    {"submission_id", "round_id", "miner_id", "bundle_sha256", "received_at", "files", "bytes", "status"}
 )
 
 # Rounds this process is serving, keyed by round_id.
@@ -286,6 +305,68 @@ def reveal(round_id: str) -> dict[str, Any]:
     return _screened_body(dict(record), where=f"GET /v1/round/{round_id}/reveal")
 
 
+class SubmissionRequest(BaseModel):
+    """One uploaded surface bundle.
+
+    A JSON map of path to text rather than an uploaded archive. A tarball or zip brings path
+    traversal, symlinks that resolve outside the extraction root, and decompression bombs; a map of
+    strings has none of those and costs a few kilobytes of encoding on a payload that is prose.
+    """
+
+    miner_id: str
+    files: dict[str, str]
+
+
+@app.post("/v1/round/{round_id}/submission")
+def submit(round_id: str, request: SubmissionRequest) -> dict[str, Any]:
+    """Accept a private bundle. Returns a receipt and nothing about its quality.
+
+    Refusals are 400 with every reason, because a miner who learns one problem per upload stops
+    uploading. They are deliberately verbose about *shape* and silent about *merit*: this endpoint
+    can be called repeatedly and cheaply, so anything it leaked about correctness would be a free
+    oracle on the withheld check.
+
+    The round must be OPEN. A bundle accepted after the freeze would sit in the store looking like a
+    submission while the window that could have judged it has closed.
+    """
+    from validator.intake import Intake, IntakeError
+
+    window = _round_or_404(round_id)
+    if window.state != OPEN:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"round {round_id} is {window.state!r}; uploads are accepted while it is open. A "
+                "bundle taken after the freeze would sit in the store looking like a submission "
+                "with no window left to judge it."
+            ),
+        )
+    try:
+        receipt = Intake().accept(round_id=round_id, miner_id=request.miner_id, files=request.files)
+    except IntakeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _screened(receipt.to_record(), allowed=RECEIPT_FIELDS | INTAKE_FIELDS, where="POST submission")
+
+
+@app.get("/v1/submissions")
+def submissions(round_id: str = "") -> dict[str, Any]:
+    """The public receipts, for the dashboard. Envelope facts only.
+
+    Served during an open round for the same reason `/receipts` is: a miner has to be able to tell
+    a rejected upload from a lost one, and where they are in the queue is not a score.
+    """
+    from validator.intake import Intake
+
+    found = [r for r in Intake().read_receipts() if not round_id or r.round_id == round_id]
+    return {
+        "round_id": round_id,
+        "submissions": [
+            _screened(r.to_record(), allowed=RECEIPT_FIELDS | INTAKE_FIELDS, where=f"receipt {r.submission_id}")
+            for r in found
+        ],
+    }
+
+
 def route_handlers() -> list[Any]:
     """Every handler this module serves, for the test that checks each one screens."""
     return [
@@ -296,6 +377,8 @@ def route_handlers() -> list[Any]:
         receipts,
         results,
         reveal,
+        submit,
+        submissions,
     ]
 
 
