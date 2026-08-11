@@ -38,14 +38,57 @@ def test_a_short_sha_is_refused(tmp_path):
         load(bad)
 
 
+# A stage may start from an earlier stage's merged output instead of from the hub -- DPO needs the
+# policy it is improving as its reference, and after the SFT stages that policy is the merged model,
+# not the raw base. Such a recipe names a local path, so there is nothing to pin it against
+# directly; what keeps it honest is that the path lies inside this model line's own output tree,
+# every hub-rooted recipe in which is pinned by the test below. The chain therefore roots at the pin.
+DERIVED_PREFIX = f"outputs/{RECIPE_DIR.name}/"
+
+
+def _is_derived(base_model: str) -> bool:
+    return base_model.startswith("outputs/")
+
+
 @pytest.mark.parametrize("recipe", _recipes(), ids=lambda p: p.name)
 def test_every_recipe_matches_the_pin(recipe):
     """A recipe drifting from the pin is the failure the pin exists to prevent, and it
     would be invisible: both files would still name a real model."""
     pin = load()
     config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
-    assert config["base_model"] == pin.repository
+    base = str(config["base_model"])
+    if _is_derived(base):
+        pytest.skip("derived base; covered by test_a_derived_base_stays_inside_this_model_line")
+    assert base == pin.repository
     assert config["base_model_revision"] == pin.revision
+
+
+@pytest.mark.parametrize("recipe", _recipes(), ids=lambda p: p.name)
+def test_a_derived_base_stays_inside_this_model_line(recipe):
+    """The escape hatch above, held shut.
+
+    `outputs/` as a prefix is not itself an assurance -- it would admit any other line's checkpoint,
+    or one built from an unpinned base, and the resulting model would still train and still serve.
+    So a derived base must sit under this recipe directory's own output tree, whose every other
+    stage is pinned.
+
+    It must also carry no `base_model_revision`: a local directory has no hub revision, and a
+    stamped one would agree with the pin while describing something the pin never produced."""
+    config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
+    base = str(config["base_model"])
+    if not _is_derived(base):
+        pytest.skip("hub base; covered by test_every_recipe_matches_the_pin")
+    assert base.startswith(DERIVED_PREFIX), f"{base!r} is outside {DERIVED_PREFIX!r}"
+    assert "base_model_revision" not in config, "a local path has no hub revision to stamp"
+
+
+def test_at_most_one_stage_starts_from_a_derived_base():
+    """Named rather than counted loosely, so a second recipe going off-pin fails here instead of
+    silently joining the exception."""
+    derived = {
+        r.name for r in _recipes() if _is_derived(str(yaml.safe_load(r.read_text(encoding="utf-8"))["base_model"]))
+    }
+    assert derived == {"stage-d-preference.yaml"}
 
 
 @pytest.mark.parametrize("recipe", _recipes(), ids=lambda p: p.name)
@@ -55,9 +98,16 @@ def test_no_recipe_trains_against_the_unpublished_model(recipe):
     cannot be pinned and would 404 for anyone who ran it.
 
     Checked on the parsed value, not the file text: the comments explain why 3.8 is not
-    used yet, and a test that forbade naming it would forbid saying so."""
+    used yet, and a test that forbade naming it would forbid saying so.
+
+    Matched on the vendor name rather than on the bare version. This project's own model line is
+    called spark-hermes-agent-3.8-27b -- the target it is aimed at, not the base it trains from --
+    so every output path under it contains "3.8", and a substring check on the version alone
+    failed the first recipe to start from one of those paths, reporting our own directory name as
+    an unpublished Qwen release."""
     config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
-    assert "3.8" not in str(config["base_model"])
+    base = str(config["base_model"])
+    assert "qwen3.8" not in base.lower()
 
 
 def test_the_dialect_is_recorded_with_its_evidence():

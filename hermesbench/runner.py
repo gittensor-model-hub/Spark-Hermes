@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -554,6 +555,7 @@ def run_suite(
     keep_workspaces: bool = False,
     repeats: int = 1,
     sink: EpisodeSink | None = None,
+    max_concurrency: int = 1,
 ) -> tuple[SuiteMetrics, list[EpisodeResult]]:
     """Run every task in its own workspace and aggregate the scores.
 
@@ -580,7 +582,13 @@ def run_suite(
     """
     if repeats < 1:
         raise ValueError("a suite must be run at least once")
-    results: list[EpisodeResult] = []
+    if max_concurrency < 1:
+        raise ValueError("max_concurrency must be at least 1")
+
+    # The whole plan first, so results come back in plan order whatever order they finish in.
+    # `suite_metrics` and `repeated_from` are order-independent, but a caller diffing two runs is
+    # not, and a list whose order depends on scheduling makes every comparison noisy.
+    plan: list[tuple[Task, Path]] = []
     for task in tasks:
         for attempt in range(repeats):
             # The suffix is dropped on the first attempt so single-shot runs keep the
@@ -588,10 +596,51 @@ def run_suite(
             workspace = workspace_root / (task.task_id if attempt == 0 else f"{task.task_id}#{attempt}")
             if workspace.exists() and not keep_workspaces:
                 shutil.rmtree(workspace)
-            episode = run_episode(task, policy_factory(task), executor, workspace)
+            plan.append((task, workspace))
+
+    def one(item: tuple[Task, Path]) -> EpisodeResult:
+        task, workspace = item
+        # A policy per episode, which `policy_factory` already provides: a policy carries
+        # per-episode state (`parse_failures`, `usage`), so sharing one across concurrent episodes
+        # would attribute one episode's malformed turns to another.
+        return run_episode(task, policy_factory(task), executor, workspace)
+
+    if max_concurrency == 1:
+        # The sequential path, unchanged. Kept as its own branch rather than a pool of size one so
+        # that the default behaviour of every existing caller does not depend on the pool being
+        # equivalent -- and so a failure here cannot be blamed on concurrency that is not running.
+        results = []
+        for item in plan:
+            episode = one(item)
             results.append(episode)
             if sink is not None:
                 sink.append(episode)
+        return suite_metrics([r.metrics for r in results]), results
+
+    # Threads rather than processes. An episode is almost entirely waiting -- HTTP to the served
+    # model and subprocesses for tools -- and both release the GIL, so threads get the overlap
+    # without paying to serialise a Task and a policy into a child.
+    #
+    # `LocalToolExecutor` is safe to share: it holds only immutable config and takes the workspace
+    # per call. Each episode has its own workspace, so nothing else is shared.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    ordered: list[EpisodeResult | None] = [None] * len(plan)
+    lock = threading.Lock()
+    with ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="episode") as pool:
+        futures = {pool.submit(one, item): index for index, item in enumerate(plan)}
+        for future in as_completed(futures):
+            index = futures[future]
+            episode = future.result()
+            ordered[index] = episode
+            if sink is not None:
+                # Serialised. `JsonlEpisodeSink.append` writes a line and bumps a counter, and two
+                # threads doing that interleave into a corrupt line -- the one failure mode the
+                # sink's whole write-then-flush design exists to prevent.
+                with lock:
+                    sink.append(episode)
+
+    results = [r for r in ordered if r is not None]
     return suite_metrics([r.metrics for r in results]), results
 
 
@@ -654,6 +703,15 @@ def main(argv: list[str] | None = None) -> int:
             "dies before the last episode produces nothing at all -- measured on a 190-episode "
             "baseline whose shard logs sat at 0 bytes until each shard completed."
         ),
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="episodes to run at once. The served model handles many concurrent sequences and this "
+        "runner has always done one at a time -- at a measured median of 124s per episode, a "
+        "190-episode baseline is ~6.5h sequential and well under an hour at 8. Defaults to 1 so no "
+        "existing run changes behaviour by upgrading",
     )
     parser.add_argument(
         "--keep-trajectories",
@@ -815,7 +873,13 @@ def main(argv: list[str] | None = None) -> int:
     sink = JsonlEpisodeSink(args.episodes_out, keep_trajectories=args.keep_trajectories) if args.episodes_out else None
     try:
         metrics, results = run_suite(
-            tasks, policy_factory, executor, args.workspace_root, repeats=args.repeats, sink=sink
+            tasks,
+            policy_factory,
+            executor,
+            args.workspace_root,
+            repeats=args.repeats,
+            sink=sink,
+            max_concurrency=args.concurrency,
         )
     finally:
         # Closed in `finally` so a crashed run still flushes the episode in flight. The whole

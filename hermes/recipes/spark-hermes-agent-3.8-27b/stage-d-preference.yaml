@@ -1,0 +1,90 @@
+# Stage D -- preference, from the competition's own losers.
+#
+# Stages A to C imitate successful trajectories. This one uses the pairs only a competition can
+# produce: on the same task, in the same round, under the same pinned model, one attempt was
+# verified and another was not. Everything except what the model did is held fixed, which is the
+# only condition under which a preference model learns about behaviour rather than about the task.
+#
+# The pairs come from `validator.aggregate`, which builds them from settled rounds:
+#
+#   python -m validator.aggregate --out var/datasets
+#     -> var/datasets/preference.jsonl   {chosen: [...], rejected: [...], chosen_tokens, ...}
+#
+#   scripts/train.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-d-preference.yaml
+#
+# ## Why this stage exists separately from C
+#
+# Stage C teaches the mechanics of a good trajectory from good trajectories. It cannot teach what
+# a *near miss* looks like, because near misses are not in it. The most useful rejected sample
+# here is the one that passed the published check and failed the withheld one: that is what fitting
+# the visible assertions looks like, and it is excluded from every SFT stage precisely so it can
+# be used here as the negative.
+#
+# ## Run it after the merge, not on top of stage C's adapter
+#
+# DPO needs a reference policy. With LoRA that comes free -- disable the adapter and the base is
+# the reference -- but only if the base *is* the reference you want. After A/B/C the policy you
+# are improving is the merged model, so merge first and start a fresh adapter here. Chaining onto
+# stage C's adapter would make the reference the raw base and quietly optimise against a policy
+# three stages out of date.
+
+base_model: outputs/spark-hermes-agent-3.8-27b/merged-sft
+trust_remote_code: true
+
+chat_template: qwen3_5
+
+rl: dpo
+rl_beta: 0.1
+
+datasets:
+  - path: var/datasets/preference.jsonl
+    type: chatml.argilla
+    field_messages: messages
+
+dataset_prepared_path: data/prepared/spark-hermes-27b-stage-d
+val_set_size: 0.05
+output_dir: outputs/spark-hermes-agent-3.8-27b/stage-d
+
+# Agentic episodes are long: the 190-episode baseline had a median of 34 turns. Both sides of a
+# pair are resident at once, so this is the stage most likely to run out of memory -- start here
+# and raise it only after measuring, the same way the SFT stages do.
+sequence_len: 8192
+pad_to_sequence_len: true
+
+# LoRA on the BF16 merged model, matching the SFT stages. A quantized base here would make the
+# implicit reference policy a quantized model while the served one is not.
+adapter: lora
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+
+gradient_accumulation_steps: 16
+micro_batch_size: 1
+num_epochs: 1
+optimizer: adamw_torch
+lr_scheduler: cosine
+# An order of magnitude below the SFT stages. DPO moves the policy fast, and the corpus here is
+# small -- four open challenges is not a lot of pairs, and a high rate on few pairs is how a
+# preference pass turns into a style transfer.
+learning_rate: 5.0e-6
+warmup_ratio: 0.1
+weight_decay: 0.0
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+logging_steps: 1
+save_strategy: epoch
+eval_strategy: epoch
+
+# `sample_packing` is deliberately absent. Packing concatenates sequences, and a packed pair is
+# two different episodes sharing a loss term -- the comparison this stage exists to make would be
+# taken against the wrong partner.

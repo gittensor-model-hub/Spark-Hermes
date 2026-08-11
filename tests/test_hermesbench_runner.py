@@ -1,3 +1,7 @@
+import threading
+import time
+from pathlib import Path
+
 import pytest
 
 from hermes.trajectory import (
@@ -740,3 +744,190 @@ def test_shards_partition_the_suite_with_no_task_lost_or_duplicated():
     flat = [i for s in shards for i in s]
     assert sorted(flat) == sorted(ids)
     assert len(flat) == len(set(flat)) == 19
+
+
+# --- running episodes concurrently ------------------------------------------------------------
+#
+# The runner did one episode at a time against a server configured for 512 concurrent sequences.
+# At a measured median of 124s per episode that made a 190-episode baseline ~6.5 hours, and it is
+# the same bottleneck behind challenge supply, corpus generation, and any later on-policy RL.
+
+
+class _CountingSink:
+    """Records what it was given, and whether two threads were ever inside it at once."""
+
+    def __init__(self):
+        self.rows = []
+        self.concurrent = False
+        self._inside = 0
+        self._guard = threading.Lock()
+
+    def append(self, result):
+        with self._guard:
+            self._inside += 1
+            if self._inside > 1:
+                self.concurrent = True
+        time.sleep(0.005)
+        self.rows.append(result.task_id)
+        with self._guard:
+            self._inside -= 1
+
+    def close(self):
+        pass
+
+
+def _slow_suite(monkeypatch, delay=0.05):
+    """Patch `run_episode` to sleep, so overlap is measurable without a model."""
+    from hermesbench import runner
+
+    seen = []
+
+    def fake(task, policy, executor, workspace, **kw):
+        seen.append(task.task_id)
+        time.sleep(delay)
+        return _episode_result(task.task_id)
+
+    monkeypatch.setattr(runner, "run_episode", fake)
+    return seen
+
+
+def _episode_result(task_id):
+    from hermesbench.metrics import EpisodeMetrics
+
+    class _Integrity:
+        disqualified = False
+
+    class _Result:
+        def __init__(self):
+            self.task_id = task_id
+            self.trajectory = None
+            self.setup_failed = False
+            self.integrity = _Integrity()
+            self.metrics = EpisodeMetrics(
+                task_id=task_id,
+                success=True,
+                tool_calls=1,
+                failed_calls=0,
+                hit_failure=False,
+                recovered=False,
+                mutated=False,
+                self_checked=False,
+                tokens_used=1_000,
+                wall_time_s=0.1,
+                steps=2,
+                public_passed=True,
+            )
+
+    return _Result()
+
+
+class _NoExecutor:
+    """`run_episode` is patched out in these tests, so nothing is ever executed -- but the
+    signature is typed and passing None here is a type error the checker is right about."""
+
+    def execute(
+        self,
+        tool: str,
+        args: dict,
+        *,
+        workspace: Path,
+        env: dict[str, str] | None = None,
+    ) -> tuple[bool, str]:  # pragma: no cover - never reached
+        raise AssertionError("run_episode is patched; no tool call should reach an executor")
+
+
+def _tasks(n):
+    from hermesbench.tasks import load_suite
+
+    pool = load_suite("all")
+    return [pool[i % len(pool)] for i in range(n)]
+
+
+def test_concurrency_actually_overlaps(monkeypatch, tmp_path):
+    """A pool that ran things one at a time would pass every other test here. The claim is wall
+    clock, so the test measures wall clock."""
+    from hermesbench.runner import run_suite
+
+    _slow_suite(monkeypatch, delay=0.05)
+    tasks = _tasks(8)
+
+    start = time.monotonic()
+    run_suite(tasks, lambda t: None, _NoExecutor(), tmp_path / "seq", max_concurrency=1)
+    sequential = time.monotonic() - start
+
+    start = time.monotonic()
+    run_suite(tasks, lambda t: None, _NoExecutor(), tmp_path / "par", max_concurrency=8)
+    parallel = time.monotonic() - start
+
+    assert parallel < sequential / 2, f"sequential {sequential:.2f}s vs concurrent {parallel:.2f}s"
+
+
+def test_results_come_back_in_plan_order_whatever_order_they_finish(monkeypatch, tmp_path):
+    """`suite_metrics` and `repeated_from` are order-independent, but a caller diffing two runs is
+    not, and a list ordered by scheduling makes every comparison noisy."""
+    from hermesbench import runner
+
+    order = []
+
+    def fake(task, policy, executor, workspace, **kw):
+        # Later tasks finish first, so completion order is the reverse of plan order.
+        time.sleep(0.02 * (len(order) == 0))
+        order.append(task.task_id)
+        return _episode_result(task.task_id)
+
+    monkeypatch.setattr(runner, "run_episode", fake)
+    tasks = _tasks(4)
+    _, results = runner.run_suite(tasks, lambda t: None, _NoExecutor(), tmp_path / "ws", max_concurrency=4)
+    assert [r.task_id for r in results] == [t.task_id for t in tasks]
+
+
+def test_the_sink_is_never_entered_by_two_threads_at_once(monkeypatch, tmp_path):
+    """`JsonlEpisodeSink.append` writes a line and bumps a counter. Two threads doing that
+    interleave into a corrupt line -- the one failure its write-then-flush design exists to
+    prevent."""
+    from hermesbench.runner import run_suite
+
+    _slow_suite(monkeypatch, delay=0.01)
+    sink = _CountingSink()
+    run_suite(_tasks(12), lambda t: None, _NoExecutor(), tmp_path / "ws", sink=sink, max_concurrency=6)
+    assert sink.concurrent is False
+    assert len(sink.rows) == 12
+
+
+def test_every_episode_reaches_the_sink_under_concurrency(monkeypatch, tmp_path):
+    from hermesbench.runner import run_suite
+
+    _slow_suite(monkeypatch, delay=0.001)
+    sink = _CountingSink()
+    _, results = run_suite(
+        _tasks(5), lambda t: None, _NoExecutor(), tmp_path / "ws", repeats=3, sink=sink, max_concurrency=4
+    )
+    assert len(results) == 15 and len(sink.rows) == 15
+
+
+def test_a_policy_is_built_per_episode_not_shared(monkeypatch, tmp_path):
+    """A policy carries per-episode state -- `parse_failures`, `usage` -- so sharing one across
+    concurrent episodes would attribute one episode's malformed turns to another."""
+    from hermesbench.runner import run_suite
+
+    _slow_suite(monkeypatch, delay=0.001)
+    built = []
+    run_suite(_tasks(6), lambda t: built.append(t.task_id), _NoExecutor(), tmp_path / "ws", max_concurrency=3)
+    assert len(built) == 6
+
+
+def test_concurrency_below_one_is_refused(tmp_path):
+    from hermesbench.runner import run_suite
+
+    with pytest.raises(ValueError, match="at least 1"):
+        run_suite([], lambda t: None, _NoExecutor(), tmp_path / "ws", max_concurrency=0)
+
+
+def test_the_default_is_sequential(monkeypatch, tmp_path):
+    """No existing run changes behaviour by upgrading."""
+    from hermesbench.runner import run_suite
+
+    sink = _CountingSink()
+    _slow_suite(monkeypatch, delay=0.01)
+    run_suite(_tasks(4), lambda t: None, _NoExecutor(), tmp_path / "ws", sink=sink)
+    assert sink.concurrent is False

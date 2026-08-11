@@ -30,12 +30,22 @@ output_dir: outputs/spark-hermes-agent-3.8-27b/stage-b
 # Longer than Stage A: a full execution trajectory with tool outputs is a much longer
 # sequence than a reasoning trace, and truncating mid-episode teaches the model that
 # episodes simply stop.
-sequence_len: 16384
+sequence_len: 8192
 sample_packing: true
 pad_to_sequence_len: true
 
-adapter: qlora
-load_in_4bit: true
+# LoRA on a BF16 base, not QLoRA on a 4-bit one.
+#
+# The canonical served model is BF16, so training against a 4-bit copy trains adapters for a base
+# that is not the base anyone runs. The adapters merge back into BF16 either way, so the mismatch
+# is silent -- it does not show up as an error, only as adapters fitted to quantization noise the
+# served model does not have.
+#
+# QLoRA is the right answer when memory is the constraint. Here it is not: 54 GB of BF16 weights
+# on a 96 GB card leaves room for rank-32 adapters, their optimizer state and checkpointed
+# activations at this sequence length. Measure before raising `sequence_len` -- the headroom is
+# real but not large, and 16K is where it gets tight.
+adapter: lora
 lora_model_dir: outputs/spark-hermes-agent-3.8-27b/stage-a
 lora_r: 32
 lora_alpha: 64
