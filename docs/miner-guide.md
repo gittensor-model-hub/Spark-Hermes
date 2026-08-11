@@ -4,27 +4,182 @@ This guide is for SN74 miners and contributors who want to earn rewards by impro
 Spark-Hermes. The rule is simple: rewards come from verified improvements, not from
 claims, formatting, or duplicated ideas.
 
-> **Scope.** This guide covers the **live** SN74 mining tracks, which are unchanged: the
-> dataset track and the training track, both scored on reasoning/Triton distillation. The
-> Hermes-native agent work described in
-> [`docs/roadmap-hermes.md`](roadmap-hermes.md) is the project's forward direction and is
-> **not yet a mining track** — nothing in `hermes/` or `hermesbench/` is scored or
-> rewarded today. Mine against what is documented below.
+> **Scope.** There are now **three** tracks. This note used to say the Hermes-native agent work
+> was "not yet a mining track" and told miners to mine against the two below it. That is no longer
+> true, and the rollout track is the project's forward direction — it is documented first, below.
 
-There are **two mining tracks**, each with its own labels and rewards:
-
-1. **Dataset track** (`dataset:xs/s/m/l/xl`) — run [SparkProof](https://github.com/gittensor-model-hub/SparkProof)
+1. **Rollout track** — improve a private *surface* (SOUL.md, skills, references) so the pinned
+   model solves a challenge the baseline failed. Upload the surface privately to the validator,
+   commit its digest in a pull request, and the validator runs it. **Start here**: see *Rollout
+   Track* immediately below.
+2. **Dataset track** (`dataset:xs/s/m/l/xl`) — run [SparkProof](https://github.com/gittensor-model-hub/SparkProof)
    on a Blackwell or Hopper H100/H200 CC VM to generate verified Triton training data,
    publish it to Hugging Face, and open a text-only registry PR here. See *Dataset
    Track* below.
-2. **Training track** (`eval:xs/s/m/l/xl`) — train the student on the **pinned canonical
+3. **Training track** (`eval:xs/s/m/l/xl`) — train the student on the **pinned canonical
    mining dataset** with an improved recipe, beat the frontier eval, and prove it (RTX PRO
-   6000 CC attestation, ≤ 5h wall-clock). The rest of this guide covers this track.
+   6000 CC attestation, ≤ 5h wall-clock).
 
 The same person can mine both: contribute new rows on the dataset track, then compete on
 the training track once those rows are merged into the canonical pin. Every training PR uses
 the same `sparkproof-mining` snapshot — fair comparison is by recipe quality, not private
 data.
+
+---
+
+## Rollout Track
+
+### What you are competing on
+
+The validator runs the pinned model against real tasks. When it fails one — or passes it
+expensively — that execution becomes a **challenge**, published in
+[`datasets/challenges/`](../datasets/challenges). Your job is to make the *same frozen model* do
+better on it.
+
+You do not change weights, and you do not pick the model, the environment or the runtime. Those
+are pinned. What you control is the **surface**: `SOUL.md`, `skills/*/SKILL.md`, and
+`skills/*/references/*.md` — prose the model reads before every decision.
+
+Read the packet before you write anything. It names the failure class:
+
+```bash
+python -c "import json;d=json.load(open('datasets/challenges/tc-log-rotation-order.json'));\
+print(d['failure_class'], d['baseline'])"
+```
+
+That matters more than it sounds. The first surface written for this repository targeted step
+budgets on a task whose recorded failure class was `malformed_protocol`, and it made things
+**58.6% and 92.6% worse** across two independent paired runs. A later one aimed at the actual
+failure class cut median tokens by 24.7%.
+
+### 1. Build a surface
+
+```bash
+python -m miner init  --dir ./my-surface --skill protocol-discipline
+python -m miner check --dir ./my-surface
+```
+
+`check` costs nothing — no model, no GPU, no pull request. It reports
+`ACCEPTED by the contract and by hermes.profile.assemble`, using the same function the runner
+calls before it contacts the model. A surface that fails it does not produce a bad rollout; it
+produces no run at all.
+
+It refuses executables, shell scripts under `skills/`, symlinks (the contract matches names, so a
+link called `notes.md` satisfies every rule while resolving to anything), and an empty directory —
+which every path-based check accepts and which would run as the unmodified baseline.
+
+`check` does **not** tell you whether the surface helps, and says so in its own output —
+*"admissible, not that it helps"*. The measurement behind that warning: the first surface written
+here passed `check` cleanly and then, over two independent paired runs, raised median tokens by
+58.6% and 92.6%.
+
+### 2. Rehearse before you commit
+
+```bash
+python -m miner evaluate --dir ./my-surface --task tc-log-rotation-order \
+  --base-url http://127.0.0.1:8000/v1 --model qwen3.6-27b --repeats 10
+```
+
+Two arms, paired: one with your surface, one without, on your machine. Pairing removes hardware
+variance for free, which is why both run locally rather than comparing against the packet's
+published baseline.
+
+`--repeats` defaults to 10 and you should usually want more. One attempt tells you almost nothing
+and feels like it tells you everything: a surface here scored **3 of 3** on its first measurement
+and **6 of 10** on the next — a real improvement over the 4/10 baseline, and still refused, because
+the gate requires every attempt to pass.
+
+When the interval does not clear zero the report prints how many paired repeats would settle
+evidence like yours. A number, because "run more repeats" leaves you guessing how much GPU time to
+buy: at 7% run-to-run spread the answer is a couple, and at 98% it is over a hundred.
+
+### 3. Find out which rule is doing the work
+
+```bash
+python -m miner search --dir ./my-surface --task tc-log-rotation-order \
+  --base-url http://127.0.0.1:8000/v1 --model qwen3.6-27b --repeats 10
+```
+
+Leave-one-out ablation: the full surface, then one candidate per rule with that rule removed. A
+rule whose removal changes nothing is costing context for free.
+
+The leader is then re-measured on **fresh episodes**, and that second number is the one to
+believe. Measured on candidates drawn from an identical distribution — nothing to find, by
+construction — a screening leader appeared in **36 of 40** searches and **none** survived
+confirmation. Picking the best of k manufactures winners.
+
+### 4. Upload privately, commit publicly
+
+```bash
+curl -X POST http://<validator>/v1/round/<round_id>/submission \
+  -H 'Content-Type: application/json' \
+  -d '{"miner_id": "<your-github-login>", "files": {"SOUL.md": "...", "skills/p/SKILL.md": "..."}}'
+```
+
+The bundle is a JSON map of path to text — not an archive, because a tarball brings path traversal,
+symlinks and decompression bombs. It is validated before a byte is stored, and you get a receipt:
+
+```json
+{"submission_id": "...", "bundle_sha256": "sha256:...", "status": "pending"}
+```
+
+Then open a pull request appending **one line** to `datasets/strategies.jsonl`:
+
+```json
+{"schema_version": 2, "round_id": "r-001", "miner_id": "<your-github-login>",
+ "bundle_sha256": "sha256:...", "task_ids": ["tc-log-rotation-order"]}
+```
+
+Your surface stays private — it is what you are competing with. The digest is public,
+timestamped and attributable, which is what stops the validator evaluating a different bundle
+than the one you committed to, and stops you revising after the fact.
+
+Three things must agree: the pull request's author, the `miner_id` on the line, and the miner who
+uploaded that digest. Receipts are public, so committing to someone else's digest is refused.
+
+Upload as often as you like — it is cheap and the response says nothing about merit. **The digest
+in your pull request decides which bundle is judged**, not whichever you uploaded most recently.
+One commitment per miner per round.
+
+### 5. What happens then
+
+```text
+pending → evaluating → result
+```
+
+Visible at `GET /v1/submissions`. The validator runs your surface on the pinned model against the
+withheld verifiers you never see, scores it against the challenge's published baseline, and once
+an hour crowns exactly one winner. Every other pull request in that round closes with its reason.
+
+A barren hour keeps the crown where it is; two barren hours rotate the task.
+
+### What it takes to win
+
+Correctness is a gate, not a term. Your surface must pass **every** attempt over at least ten of
+them before tokens are looked at, and a pass means the published check *and* the withheld one —
+so a surface fitted to the visible assertions scores as the failure it is.
+
+Only then does efficiency count, and the margin has to clear zero on a bootstrap interval rather
+than on a point estimate. Fewer tool calls too: a token win bought by collapsing thirty operations
+into one helper script does not take the crown.
+
+An hour can pass with no crown. Nothing is awarded when nothing beats its own baseline.
+
+### Checking the validator
+
+After a round settles the validator publishes a bundle: the challenge, the round ledger, the
+per-task salt, the episode logs and the scorecards. If you hold the withheld check,
+
+```bash
+python -m validator.audit verify --bundle <bundle> --withheld-check ./hidden.sh
+```
+
+recomputes the commitment and confirms the validator graded against the check it committed to
+before submissions opened — not one written afterwards to suit a result.
+
+It does not prove the episodes came from the pinned model. Nothing in a published bundle can, and
+the manifest says so in its own `does_not_prove` field.
+
 
 ### SN74 payout multipliers (Gittensor)
 
