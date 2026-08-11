@@ -1,5 +1,7 @@
 """Withheld checks split across a public suite and a private tree."""
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -23,22 +25,24 @@ def _task(**overrides) -> Task:
     return Task.from_record(record)
 
 
-def _suite(tmp_path):
-    """A one-task suite on disk, ready to split."""
+def _suite(tmp_path, task_ids=("t1",)):
+    """A suite on disk, ready to split. One task by default; more when a test is about the
+    difference between them -- a partial private tree needs at least two to be about anything."""
     d = tmp_path / "tasks" / "v0"
     d.mkdir(parents=True)
-    (d / "t1.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "task_id": "t1",
-                "prompt": "do it",
-                "verify": "true",
-                "tools": ["terminal"],
-                "hidden_verify": "test -f done.txt\n",
-            }
-        ),
-        encoding="utf-8",
-    )
+    for task_id in task_ids:
+        (d / f"{task_id}.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "task_id": task_id,
+                    "prompt": "do it",
+                    "verify": "true",
+                    "tools": ["terminal"],
+                    "hidden_verify": "test -f done.txt\n",
+                }
+            ),
+            encoding="utf-8",
+        )
     return tmp_path / "tasks"
 
 
@@ -143,7 +147,40 @@ def test_a_committed_check_missing_from_the_tree_is_refused(tmp_path):
     root = _suite(tmp_path)
     split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
     (tmp_path / "withheld" / "t1.sh").unlink()
-    with pytest.raises(WithheldError, match="does not exist"):
+    # Unattached and named, not fatal. The raise this used to make meant a partial private tree
+    # refused the whole suite -- so nineteen committed tasks could not be re-authored one at a
+    # time, because the first check written would abort every run until the last one was.
+    attached = overlay(load_suite("v0", root=root), root=tmp_path / "withheld", salt=SALT)
+    assert "t1" in unscorable(attached)
+    assert not next(t for t in attached if t.task_id == "t1").hidden_verify
+
+
+def test_a_partial_private_tree_still_attaches_what_it_has(tmp_path):
+    """The state every re-authoring pass is in. One body present, the rest not: the present one
+    must be usable and the absent ones must be named."""
+    root = _suite(tmp_path, task_ids=("t1", "t2", "t3"))
+    split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
+    present = sorted((tmp_path / "withheld").glob("*.sh"))
+    assert len(present) == 3, "this test needs more than one task to be about anything"
+    for path in present[1:]:
+        path.unlink()
+    kept = present[0].stem
+
+    attached = overlay(load_suite("v0", root=root), root=tmp_path / "withheld", salt=SALT)
+    scorable = [t.task_id for t in attached if t.hidden_verify]
+    assert scorable == [kept]
+    assert kept not in unscorable(attached)
+    assert len(unscorable(attached)) == len(present) - 1
+
+
+def test_a_mismatching_body_still_refuses_the_whole_suite(tmp_path):
+    """The case that must stay fatal. A missing body is work not done yet; a body that
+    disagrees with its commitment is a private tree that drifted from what was published, and
+    scoring against it measures a different benchmark than the one named."""
+    root = _suite(tmp_path)
+    split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
+    next(iter(sorted((tmp_path / "withheld").glob("*.sh")))).write_text("echo drifted", encoding="utf-8")
+    with pytest.raises(WithheldError, match="does not match the commitment"):
         overlay(load_suite("v0", root=root), root=tmp_path / "withheld", salt=SALT)
 
 
@@ -313,3 +350,60 @@ def test_the_cli_exit_status_can_gate_a_run(monkeypatch, capsys):
     monkeypatch.delenv("SPARKDISTILL_WITHHELD_ROOT", raising=False)
     assert main(["--suite", "all"]) == 1
     assert "UNSCORABLE" in capsys.readouterr().out
+
+
+# --- sealing a check twice, which is now the normal case -------------------------------------------
+#
+# `split` was written as a once-ever operation: author the checks inline, run it, commit the two
+# halves. Every task in the suite is already past that point, so re-authoring a withheld check and
+# sealing it again is the path -- and the sealing step appended a second `metadata:` block.
+
+
+def test_resealing_does_not_leave_two_commitments(tmp_path):
+    """PyYAML takes the last duplicate key, so the value came out right and the file was wrong.
+    Another parser takes the first, which is the stale commitment -- and a task committing to a
+    body nobody has is exactly the state this whole exercise is digging out of."""
+    from hermesbench.split_suite import split
+
+    root = _suite(tmp_path)
+    split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
+    task_file = root / "v0" / "t1.yaml"
+    first = yaml.safe_load(task_file.read_text(encoding="utf-8"))["metadata"]["hidden_verify_commitment"]
+
+    # Author a new check over the redacted task, the way a re-authoring pass does.
+    task_file.write_text(
+        task_file.read_text(encoding="utf-8") + "\nhidden_verify: |\n  test -f rewritten.txt\n",
+        encoding="utf-8",
+    )
+    split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
+
+    text = task_file.read_text(encoding="utf-8")
+    assert text.count("metadata:") == 1, "a second block leaves the stale commitment ahead of the new one"
+    second = yaml.safe_load(text)["metadata"]["hidden_verify_commitment"]
+    assert second != first, "a new body must move the commitment"
+    assert (tmp_path / "withheld" / "t1.sh").read_text(encoding="utf-8").strip() == "test -f rewritten.txt"
+
+
+def test_resealing_leaves_the_task_loadable_and_committed(tmp_path):
+    """The failure a bare `metadata:` with no children would produce: it parses as None, and
+    `Task.from_record` reads that as a task declaring no withheld check at all -- which is a
+    clean overfit rate rather than an unavailable one."""
+    from hermesbench.split_suite import split
+
+    root = _suite(tmp_path)
+    split(withheld_out=tmp_path / "withheld", tasks_root=root, salt=SALT)
+    task = next(t for t in load_suite("v0", root=root) if t.task_id == "t1")
+    assert task.hidden_verify_commitment
+    assert task.withheld_check_missing is True
+
+
+def test_dropping_the_commitment_keeps_the_comments(tmp_path):
+    """`redact_text` is a text operation because `yaml.safe_dump` dropped 39 comment lines from one
+    task, and those comments are where each trap is explained. The same constraint applies here."""
+    from hermesbench.split_suite import drop_commitment
+
+    text = Path("hermesbench/tasks/v1/migrate-and-keep-green.yaml").read_text(encoding="utf-8")
+    cleaned = drop_commitment(text)
+    assert cleaned.count("#") == text.count("#")
+    assert "hidden_verify_commitment" not in cleaned
+    assert yaml.safe_load(cleaned)["task_id"] == "migrate-and-keep-green"

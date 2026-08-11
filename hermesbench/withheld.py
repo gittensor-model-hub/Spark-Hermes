@@ -90,11 +90,24 @@ def overlay(tasks: Iterable[Task], *, root: Path | None = None, salt: str = "") 
     for task in tasks:
         path = withheld_path(task.task_id, resolved)
         if not path.is_file():
-            if task.hidden_verify_commitment:
-                raise WithheldError(
-                    f"{task.task_id} commits to a withheld check but {path} does not exist; a suite "
-                    "scored without it reports no overfit signal, which reads as a clean result"
-                )
+            # Left unattached, so `withheld_check_missing` stays true and `unscorable` names it.
+            #
+            # This used to raise, on the reasoning that a suite scored without a check it is
+            # supposed to have reports no overfit signal and reads as a clean result. That
+            # reasoning was right about the danger and wrong about where to put the guard: it
+            # made a *partial* private tree refuse the entire suite, so nineteen committed tasks
+            # could not be re-authored one at a time -- the first one written would abort every
+            # run until the last one was. Discovered by trying to do exactly that.
+            #
+            # The danger is handled where the reading happens instead. `status` reports the
+            # unscorable set and exits non-zero, the runner names every unscorable task on
+            # stderr before it runs, and `shortcut_sweep` returns UNRESOLVED rather than a pass
+            # for an expectation it could not decide. Absence is loud in all three; what it no
+            # longer is, is fatal.
+            #
+            # A body that is present and does NOT match its commitment still raises below. That
+            # is the case worth refusing: it means the private tree drifted from what was
+            # published, and scoring against it measures a different benchmark than the one named.
             out.append(task)
             continue
 

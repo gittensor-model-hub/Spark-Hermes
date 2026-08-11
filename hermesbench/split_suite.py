@@ -67,6 +67,46 @@ def redact_text(text: str) -> tuple[str, str]:
     return public, notes
 
 
+def drop_commitment(text: str) -> str:
+    """Remove an existing `metadata.hidden_verify_commitment`, and the block if that empties it.
+
+    Needed because splitting is no longer a once-ever operation. Every task in the suite is
+    already redacted and carries a commitment, so re-authoring a withheld check and sealing it
+    again appends a *second* `metadata:` block -- and the first one holds the stale commitment.
+
+    PyYAML takes the last duplicate key, so the value happens to come out right here and the
+    file is wrong: another parser, or a stricter mode, takes the first, which commits the task
+    to the body that was lost. A file that parses correctly under exactly one reader is not a
+    published artifact. The blocks also accumulate, one per re-split.
+
+    A text operation for the reason `redact_text` is: `yaml.safe_dump` reformats the whole file
+    and drops the comments that explain each trap.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("metadata:"):
+            block = index + 1
+            while block < len(lines) and (not lines[block].strip() or lines[block][0].isspace()):
+                block += 1
+            kept = [
+                inner for inner in lines[index + 1 : block] if inner.strip() and "hidden_verify_commitment" not in inner
+            ]
+            # Only re-emit `metadata:` if something other than the commitment lived under it.
+            # Today nothing does, and a bare `metadata:` with no children parses as None, which
+            # `Task.from_record` would read as a task declaring no withheld check at all.
+            if kept:
+                out.append(line)
+                out.extend(kept)
+            index = block
+            continue
+        out.append(line)
+        index += 1
+    return "".join(out).rstrip() + "\n"
+
+
 def split(
     *,
     withheld_out: Path,
@@ -122,7 +162,7 @@ def split(
             # becomes brute-forceable. See `hermes.harness.derive_task_salt`.
             commitment = salted_digest(body, derive_task_salt(salt, task_id))
             source.write_text(
-                public_text + f"\nmetadata:\n  hidden_verify_commitment: {commitment}\n",
+                drop_commitment(public_text) + f"\nmetadata:\n  hidden_verify_commitment: {commitment}\n",
                 encoding="utf-8",
             )
         moved.append(task_id)
