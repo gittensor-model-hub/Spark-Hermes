@@ -292,3 +292,7 @@ __all__ = [
     "render",
     "score",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
