@@ -842,7 +842,9 @@ def main(argv: list[str] | None = None) -> int:
         # suite nothing attempted would be a measurement of nothing.
         print(
             "hermesbench: --model and --base-url are required to run a suite.\n"
-            "Point them at any OpenAI-compatible endpoint (vLLM, SGLang, a hosted gateway).\n"
+            "Point them at any OpenAI-compatible endpoint. SGLang is what this project serves on "
+            "-- scripts/serve_agent.sh -- and the only engine the pinned model has been measured "
+            "through; vLLM and hosted gateways speak the same API.\n"
             "Use --list to inspect the suite without running it.",
             file=sys.stderr,
         )

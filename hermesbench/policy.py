@@ -7,8 +7,9 @@ already recorded, so `main()` refuses to run a suite and says so rather than rep
 tests for that one reason -- not because they are badly wired, but because the thing that
 would call them had no model to call.
 
-This is that thing. It speaks to any OpenAI-compatible chat endpoint, which covers vLLM,
-SGLang, and every hosted gateway the teachers already use.
+This is that thing. It speaks to any OpenAI-compatible chat endpoint, which covers SGLang -- what
+this project serves on, and the engine every measurement here was taken through -- along with vLLM
+and every hosted gateway the teachers already use.
 
 Three properties it does not compromise on:
 
@@ -267,9 +268,13 @@ def openai_completion(
 ) -> Completion:
     """A `Completion` over any OpenAI-compatible chat endpoint.
 
-    Covers vLLM, SGLang and every hosted gateway the teachers already use, which is why the
+    Covers SGLang, vLLM and every hosted gateway the teachers already use, which is why the
     adapter is this thin: the benchmark should not care which of them is serving, only that
     the same messages go in and the usage comes back.
+
+    It does care about one thing, and not by choice: a server that parses the wire format itself
+    returns structured `tool_calls` and an EMPTY `content`, so both are carried back. See
+    `next_steps`, and docs/serving-muse-glimmer.md for what reading only `content` would score.
 
     Sampling parameters are passed through and belong in the run manifest, not here. They
     change the result as surely as the prompt does -- two runs at different temperatures are

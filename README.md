@@ -782,10 +782,37 @@ python -m validator.audit build --round r-001 --master-salt-env SPARK_MASTER_SAL
 python -m validator.aggregate --out var/datasets
 ```
 
+### Serving the model the benchmark runs against
+
+```bash
+scripts/serve_agent.sh /path/to/model my-model 8001
+# -> http://127.0.0.1:8001/v1
+```
+
+**SGLang**, and that is a measurement rather than a preference. Serving Muse-Glimmer-30B on
+2026-08-11: vLLM 0.27.0 has no native support for the architecture, and its `--model-impl
+transformers` fallback served the model while returning ten tokens of multilingual noise. SGLang
+returned correct tool calls. Plain transformers on the same weights, revision and card agreed with
+SGLang, so the fallback was what was broken — not the model.
+[`docs/serving-muse-glimmer.md`](docs/serving-muse-glimmer.md) has the evidence, and the eight
+startup failures that preceded it, none of which were the model.
+
+The runner talks OpenAI-compatible HTTP, so any engine can serve it. What is not
+interchangeable is what comes back: a server that parses the wire format itself returns structured
+`tool_calls` and an **empty** `content`. `hermesbench.policy` prefers those and falls back to
+parsing the text, because reading only `content` would score an abstention on every turn a model
+called a tool correctly.
+
+This is not the TritonBench stack. [`scripts/install_serve.sh`](scripts/install_serve.sh) pins vLLM
+0.25.0+cu129 on purpose — the Triton domain score is comparable across miners only if every
+checkpoint is served by the same engine, and every published Triton number was measured on that
+one. The two paths serve different benchmarks and stay apart.
+
 ### Opening challenges from a baseline
 
 ```bash
 python -m hermesbench.runner --suite all --workspace-root /tmp/ws \
+  --model my-model --base-url http://127.0.0.1:8001/v1 \
   --episodes-out base.jsonl --keep-trajectories --allow-unsandboxed
 
 python -m hermes.challenge --episodes base.jsonl \
@@ -840,7 +867,7 @@ A run file names the model, how it was served, and the episode log the runner wr
 
 ```json
 {"model": "m1", "episodes_path": "m1.jsonl",
- "serving": {"precision": "bf16", "device": "RTX PRO 6000 Blackwell SE", "engine": "vllm 0.11.2",
+ "serving": {"precision": "bf16", "device": "RTX PRO 6000 Blackwell SE", "engine": "sglang 0.5.18",
              "temperature": 0.2, "top_p": 0.95, "max_model_len": 32768, "confidential_computing": false}}
 ```
 
