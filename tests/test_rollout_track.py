@@ -609,3 +609,99 @@ def test_a_full_commit_sha_is_accepted():
 def test_a_tag_or_arbitrary_string_is_refused():
     for value in ("v1.0.0", "refs/heads/main", "not-a-sha", "4F6C1B9A2D3E5F708192A3B4C5D6E7F809A1B2C3"):
         assert check_shape(_record(hf_revision=value)), value
+
+
+# --- the measured-VM leg, which could not fail ----------------------------------------------------
+#
+# `check_tdx_measurement` returns None when nothing is pinned, and this gate tested
+# `if measured is False` -- which cannot fire on None. With no allowlist it was a check incapable of
+# failing that read, in a passing report, as one that had passed.
+
+
+def test_an_unpinned_guest_measurement_is_a_caveat_not_a_silence(monkeypatch):
+    """Today's state. The submission is acceptable under the current rules *and* proves less than a
+    reader would assume, and a verdict with no room for that has to lie in one direction."""
+    from eval import rollout_track
+
+    monkeypatch.setattr(rollout_track, "APPROVED_GUEST_MEASUREMENTS", ())
+    issues, caveats = _attestation_legs(rollout_track, measurement=(None, "nothing pinned"))
+    assert not any("measured-VM" in i for i in issues)
+    assert any("not that it ran an image we approved" in c for c in caveats)
+
+
+def test_an_unmeasurable_guest_is_refused_once_a_measurement_is_pinned(monkeypatch):
+    """The point of pinning: an unmeasured guest stops being acceptable. Before this fix, adding an
+    allowlist would have changed nothing, because None never reached a refusal."""
+    from eval import rollout_track
+
+    monkeypatch.setattr(rollout_track, "APPROVED_GUEST_MEASUREMENTS", ("CD" * 48,))
+    issues, caveats = _attestation_legs(rollout_track, measurement=(None, "no MRTD in quote"))
+    assert any("cannot be shown to have booted an approved image" in i for i in issues)
+    assert caveats == []
+
+
+def test_a_measurement_outside_the_allowlist_is_refused(monkeypatch):
+    from eval import rollout_track
+
+    monkeypatch.setattr(rollout_track, "APPROVED_GUEST_MEASUREMENTS", ("CD" * 48,))
+    issues, _ = _attestation_legs(rollout_track, measurement=(False, "MRTD not approved"))
+    assert any("measured-VM check failed" in i for i in issues)
+
+
+def test_an_approved_measurement_passes_with_no_caveat(monkeypatch):
+    """The accepting case, or the three refusals above would be satisfied by a check that always
+    refuses -- which is the same defect in the other direction."""
+    from eval import rollout_track
+
+    monkeypatch.setattr(rollout_track, "APPROVED_GUEST_MEASUREMENTS", ("CD" * 48,))
+    issues, caveats = _attestation_legs(rollout_track, measurement=(True, ""))
+    assert not any("measured-VM" in i or "approved image" in i for i in issues)
+    assert caveats == []
+
+
+def test_the_allowlist_is_empty_and_that_is_deliberate():
+    """Populated from a reproducible image build, not from a submission. An allowlist filled with
+    whatever a submitter supplies is not an allowlist."""
+    from eval.rollout_track import APPROVED_GUEST_MEASUREMENTS
+
+    assert APPROVED_GUEST_MEASUREMENTS == ()
+
+
+def test_caveats_reach_the_published_record():
+    """A report copied into a pull request comment without them reads as an unqualified pass."""
+    from eval.rollout_track import ACCEPT, GateResult
+
+    record = GateResult(verdict=ACCEPT, caveats=("no approved guest measurement is pinned",)).to_record()
+    assert record["accepted"] is True
+    assert record["caveats"] == ["no approved guest measurement is pinned"]
+
+
+def _attestation_legs(module, *, measurement):
+    """Run `check_attestation` far enough to reach the measured-VM leg.
+
+    Patched on `eval.verify` rather than on `eval.rollout_track`: the names are imported inside the
+    function, so they resolve from `eval.verify` at call time and setting them on the calling module
+    does nothing. The first version of this helper did exactly that and every case failed with
+    `has no attribute`.
+
+    The earlier legs are stubbed to pass so the one under test is the only thing being measured --
+    and the one under test is precisely the leg that used to be unreachable.
+    """
+    import eval.verify as verify_module
+
+    stubs = {
+        "check_gpu_signature": lambda att: {"verified": True},
+        "check_claim_binding": lambda export_dir, att, gpu_sig=None: True,
+        "check_tdx_signature": lambda att: {"verified": True},
+        "check_tdx_binding": lambda export_dir, att: True,
+        "check_tdx_measurement": lambda att, allowed=(): measurement,
+        "signed_attestation_claims": lambda att, gpu_sig=None: {"hwmodel": ["RTX PRO 6000 Blackwell"]},
+    }
+    saved = {name: getattr(verify_module, name) for name in stubs}
+    for name, fn in stubs.items():
+        setattr(verify_module, name, fn)
+    try:
+        return module.check_attestation({"round_id": "r-1"}, {"token": "x"}, Path("."))
+    finally:
+        for name, fn in saved.items():
+            setattr(verify_module, name, fn)

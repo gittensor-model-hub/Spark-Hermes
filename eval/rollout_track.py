@@ -88,6 +88,14 @@ REQUIRED_FIELDS = (
 # not auto-merge, it is remote code execution with a review step somebody will skip.
 ALLOWED_PATHS = (ROLLOUT_REGISTRY.as_posix(),)
 
+# Measurements of guest images we approve, as hex MRTD values.
+#
+# Empty on purpose rather than absent: the expected MRTD for a reproducible guest image has to be
+# obtained by building that image, not by reading it off a submission, and an allowlist populated
+# from anything a submitter supplies is not an allowlist. While it is empty the measured-VM check
+# reports a caveat; the moment it has an entry, an unmeasured guest is refused.
+APPROVED_GUEST_MEASUREMENTS: tuple[str, ...] = ()
+
 REJECT = "rollout:REJECT"
 ACCEPT = "rollout:ACCEPT"
 
@@ -373,7 +381,9 @@ def check_exports(record: dict[str, Any], manifest: dict[str, Any], export_dir: 
     return issues
 
 
-def check_attestation(record: dict[str, Any], attestation: dict[str, Any] | None, export_dir: Path | None) -> list[str]:
+def check_attestation(
+    record: dict[str, Any], attestation: dict[str, Any] | None, export_dir: Path | None
+) -> tuple[list[str], list[str]]:
     """Whether the run was attested on a CC node, bound to *this* export.
 
     Verified against NVIDIA's NRAS JWKS and Intel's DCAP/PCS -- public roots, fetched by
@@ -396,12 +406,15 @@ def check_attestation(record: dict[str, Any], attestation: dict[str, Any] | None
     well-known; there is no key to obtain.
     """
     if attestation is None:
-        return [
-            "no attestation.json published beside the exports; a rollout must be generated on an "
-            "Intel TDX CC node with an NVIDIA CC GPU and attested, or its provenance is a claim"
-        ]
+        return (
+            [
+                "no attestation.json published beside the exports; a rollout must be generated on an "
+                "Intel TDX CC node with an NVIDIA CC GPU and attested, or its provenance is a claim"
+            ],
+            [],
+        )
     if export_dir is None:
-        return ["exports were not fetched, so no claim digest exists to bind the attestation to"]
+        return (["exports were not fetched, so no claim digest exists to bind the attestation to"], [])
 
     from eval.verify import (
         check_claim_binding,
@@ -413,6 +426,10 @@ def check_attestation(record: dict[str, Any], attestation: dict[str, Any] | None
     )
 
     issues: list[str] = []
+    # Caveats are not issues. A caveat says the submission is acceptable *and* that something it
+    # would be natural to assume has not been established; folding the two together would either
+    # reject every submission or hide the gap.
+    caveats: list[str] = []
 
     gpu_sig = check_gpu_signature(attestation)
     if not gpu_sig or not gpu_sig.get("verified"):
@@ -434,11 +451,33 @@ def check_attestation(record: dict[str, Any], attestation: dict[str, Any] | None
     elif check_tdx_binding(export_dir, attestation) is not True:
         issues.append("the TDX quote's REPORTDATA does not commit to these exports")
 
-    # Reported, not enforced: no approved guest measurements are pinned yet, so this states
-    # the gap rather than passing over it. See eval.verify.check_tdx_measurement.
-    measured, reason = check_tdx_measurement(attestation)
+    # The measured-VM leg. `check_tdx_measurement` returns None when nothing is pinned, and the
+    # first version of this tested `if measured is False` -- which cannot fire on None, so with no
+    # allowlist it was a check incapable of failing that read as one that passed.
+    #
+    # Enforced when an allowlist exists, reported when it does not, and the two are different
+    # states rather than one silence. `APPROVED_GUEST_MEASUREMENTS` is empty today: pinning an MRTD
+    # requires building a reproducible guest image and reading the measurement off *that*, not off
+    # a submission. Until it is populated a quote proves a genuine confidential VM ran and
+    # committed to this bundle, and the submission carries that caveat instead of implying more.
+    measured, reason = check_tdx_measurement(attestation, APPROVED_GUEST_MEASUREMENTS)
     if measured is False:
         issues.append(f"TDX measured-VM check failed: {reason}")
+    elif measured is None:
+        if APPROVED_GUEST_MEASUREMENTS:
+            # We asked for the check and could not get an answer. With an allowlist configured,
+            # "unknown" is a refusal: the whole point of pinning is that an unmeasured guest stops
+            # being acceptable.
+            issues.append(
+                "the TDX quote carries no guest measurement to compare against the approved list, "
+                f"so it cannot be shown to have booted an approved image: {reason}"
+            )
+        else:
+            caveats.append(
+                "no approved guest measurement is pinned, so this quote proves a genuine "
+                "confidential VM ran and committed to these exports, not that it ran an image we "
+                "approved"
+            )
 
     claims = signed_attestation_claims(attestation, gpu_sig=gpu_sig)
     if claims is None:
@@ -450,7 +489,7 @@ def check_attestation(record: dict[str, Any], attestation: dict[str, Any] | None
         if not any(is_accepted_training_gpu(m) for m in models):
             issues.append(f"attested GPU {models or ['unknown']} is not a {accepted_training_gpu_label()}")
 
-    return issues
+    return issues, caveats
 
 
 def check_novelty(record: dict[str, Any], registry_text: str) -> list[str]:
@@ -541,6 +580,13 @@ class GateResult:
     verdict: str
     issues: tuple[str, ...] = ()
     submission: Submission | None = None
+    # Things the gate could not establish that do not refuse the submission.
+    #
+    # Separate from `issues` because folding them together forces a choice between rejecting every
+    # submission and hiding the gap. An accepted submission with an unmeasured guest is genuinely
+    # acceptable under today's rules *and* proves less than a reader would assume; a verdict with
+    # no room for that has to lie in one direction or the other.
+    caveats: tuple[str, ...] = ()
 
     @property
     def accepted(self) -> bool:
@@ -551,6 +597,9 @@ class GateResult:
             "verdict": self.verdict,
             "accepted": self.accepted,
             "issues": list(self.issues),
+            # In the record as well as on the result. A report copied into a pull request comment
+            # without them reads as an unqualified pass.
+            "caveats": list(self.caveats),
             "submission": self.submission.to_record() if self.submission else None,
         }
 
@@ -594,9 +643,10 @@ def gate(
     issues.extend(check_binding(record, manifest))
     issues.extend(check_manifest_work(manifest))
     issues.extend(check_exports(record, manifest, export_dir))
-    issues.extend(check_attestation(record, attestation, export_dir))
+    attestation_issues, caveats = check_attestation(record, attestation, export_dir)
+    issues.extend(attestation_issues)
     issues.extend(check_novelty(record, base_text))
 
     if issues:
-        return GateResult(verdict=REJECT, issues=tuple(issues))
-    return GateResult(verdict=ACCEPT, submission=Submission.from_record(record))
+        return GateResult(verdict=REJECT, issues=tuple(issues), caveats=tuple(caveats))
+    return GateResult(verdict=ACCEPT, submission=Submission.from_record(record), caveats=tuple(caveats))

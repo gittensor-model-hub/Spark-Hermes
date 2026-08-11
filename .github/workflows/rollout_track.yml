@@ -118,6 +118,13 @@ jobs:
             echo "**${VERDICT}**"
             echo
             jq -r '.issues[]? | "- \(.)"' /tmp/rollout_gate_report.json
+            # Caveats on an accepted submission. Not issues -- they do not refuse it -- but a
+            # comment that omitted them would read as an unqualified pass.
+            if [ "$(jq -r '.caveats | length' /tmp/rollout_gate_report.json)" != "0" ]; then
+              echo
+              echo '_Accepted, with caveats:_'
+              jq -r '.caveats[]? | "- \(.)"' /tmp/rollout_gate_report.json
+            fi
           } > /tmp/comment.md
           gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/comment.md
           gh pr edit "${{ github.event.pull_request.number }}" --add-label "${VERDICT}" || true
