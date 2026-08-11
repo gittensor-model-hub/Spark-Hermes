@@ -36,6 +36,29 @@ tests` stays true from the commitment alone; `has_hidden_tests` goes false becau
 is absent. Anything reading only the second would turn `overfit_rate` from *unavailable*
 into a confident zero, and a confident zero on the metric that detects benchmark gaming is
 worse than no number at all.
+
+## Where the private tree is
+
+`gittensor-model-hub/Spark-Hermes-Withheld`, private: one `<task_id>.sh` per committed task, the
+`.notes.md` that explains each, and the master salt in `SALT`.
+
+    git clone git@github.com:gittensor-model-hub/Spark-Hermes-Withheld.git ../spark-hermes-withheld
+    export SPARKDISTILL_WITHHELD_ROOT=../spark-hermes-withheld
+    export HERMESBENCH_WITHHELD_SALT="$(cat "$SPARKDISTILL_WITHHELD_ROOT/SALT")"
+    python -m hermesbench.withheld      # attached 19, unscorable 0
+
+Written down because its absence was expensive. Nothing in this repository named the tree, so
+establishing that the withheld half existed at all took a filesystem search of two hosts, a scan of
+every tree in eighty commits of history, and finally a look at the organisation's other
+repositories -- which is where it was the whole time. The conclusion reached just before that last
+step was that the bodies were unrecoverable and nineteen checks would have to be rewritten.
+
+Naming the repository costs nothing. The withheld half is protected by access control, not by the
+name being unguessable, and the paragraphs above already say a private tree exists.
+
+The salt lives in that repository and nowhere else, which is one access boundary and one failure
+domain shared with the bodies it opens. It wants a copy outside GitHub; losing it makes every
+commitment permanently unopenable, and `reveal` has no other input.
 """
 
 from __future__ import annotations

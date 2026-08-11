@@ -796,6 +796,25 @@ python -m hermes.challenge --episodes base.jsonl \
 data: the episode log otherwise carries counts only, and
 [`hermes/format.py`](hermes/format.py) renders rows from a trajectory.
 
+### The withheld half
+
+Every task in the suite publishes a salted commitment to a withheld check and none of the bodies
+are here. They live in `gittensor-model-hub/Spark-Hermes-Withheld` (private), one `<task_id>.sh`
+per task plus the master salt in `SALT`:
+
+```bash
+git clone git@github.com:gittensor-model-hub/Spark-Hermes-Withheld.git ../spark-hermes-withheld
+export SPARKDISTILL_WITHHELD_ROOT=../spark-hermes-withheld
+export HERMESBENCH_WITHHELD_SALT="$(cat "$SPARKDISTILL_WITHHELD_ROOT/SALT")"
+
+python -m hermesbench.withheld    # attached 19, unscorable 0 — exits 1 if anything is unscorable
+```
+
+Without it the suite still runs, and every run says on stderr which tasks it cannot score. That is
+not a formality: `overfit` is the only measurement separating a strategy that did the job from one
+that learned the published check, and a run missing it looks exactly like a run where every
+withheld check passed.
+
 `--concurrency` defaults to 1. The served model handles many sequences at once and this runner did
 one episode at a time: at the measured median of 124 s per episode, a 190-episode baseline is about
 six and a half hours sequential and under an hour at 8.
