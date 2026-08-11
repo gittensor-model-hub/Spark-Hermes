@@ -1,28 +1,35 @@
 name: crown
 
-# Move the crown label, hourly.
+# One crown an hour.
 #
-# Not on merge. Recomputing on every merge churns the label during a burst of submissions and each
-# move notifies two miners; hourly is slow enough that the label means something and fast enough
-# that a new king is not waiting a day. Keeping it off the merge path also means a mistake here
-# mislabels a pull request rather than blocking submissions.
+# Score every evaluated submission, keep exactly one, close the rest, move the label, open the next
+# round. One miner is rewarded per hour and everyone else starts again.
 #
-# :23 rather than :00 -- the hour mark is where every scheduled job on the platform lands, and this
+# Not on merge. A merge grants nothing by itself, which keeps the crown off the submission path --
+# a mistake here mislabels or wrongly closes a pull request rather than blocking intake.
+#
+# :23 rather than :00 -- the hour mark is where every scheduled job on the platform lands and this
 # one has no reason to queue behind them.
 on:
   schedule:
     - cron: "23 * * * *"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Score and print the actions without moving labels or closing anything"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  # Enough to move a label and nothing that can advance a ref. The crown is an annotation on a
-  # pull request; it must not be able to merge one.
+  # Enough to label and close, and nothing that can advance a ref. This job decides who won; it
+  # must not be able to merge anything.
   pull-requests: write
 
 concurrency:
-  # One at a time. Two overlapping runs would each compute standings against the other's
-  # half-applied labels, and the loser's removal could land after the winner's addition.
+  # One at a time, and never cancelled mid-flight. Two overlapping runs would each score against
+  # the other's half-applied closures, and a cancelled run can leave the old crown removed with the
+  # new one never added -- an hour with no crown at all, for the wrong reason.
   group: crown
   cancel-in-progress: false
 
@@ -39,37 +46,48 @@ jobs:
       - name: Install
         run: uv sync --extra dev --frozen
 
-      - name: Compute the standings
-        id: standings
-        run: uv run python -m validator.crown standings --out /tmp/crowns.json | tee /tmp/standings.txt
+      - name: Score the field
+        run: uv run python -m validator.crown select --out /tmp/crowns.json | tee /tmp/standings.txt
 
-      - name: Work out which labels to move
-        id: labels
-        run: uv run python -m validator.crown labels --out /tmp/crowns.json > /tmp/actions.txt 2>/tmp/unlabelled.txt || true
+      - name: Work out the actions
+        run: uv run python -m validator.crown actions --out /tmp/crowns.json > /tmp/actions.txt 2>/tmp/skipped.txt || true
 
-      - name: Move the labels
+      - name: Apply
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Removals before additions: a crown only ever added is a crown several people hold at
-          # once, and the label is supposed to mean one.
-          grep '^remove ' /tmp/actions.txt | while read -r _ label pr _; do
+          set -o pipefail
+          # Label removals first: a crown only ever added is a crown two people hold at once.
+          grep '^label remove ' /tmp/actions.txt | while read -r _ _ label pr; do
             gh pr edit "${pr#\#}" --remove-label "${label}" || true
           done
-          grep '^add ' /tmp/actions.txt | while read -r _ label pr _; do
+          grep '^label add ' /tmp/actions.txt | while read -r _ _ label pr; do
             gh pr edit "${pr#\#}" --add-label "${label}" || true
           done
+          # Closures carry the reason. A pull request closed with no reason is a miner who learns
+          # nothing from losing and resubmits the same thing next hour.
+          grep '^close ' /tmp/actions.txt | while read -r _ pr reason; do
+            gh pr comment "${pr#\#}" --body "Round closed. ${reason}" || true
+            gh pr close "${pr#\#}" || true
+          done
+
+      - name: Report
+        if: always()
+        run: |
           {
-            echo '### Crown standings'
-            echo
+            echo '### Crown'
             echo '```'
             cat /tmp/standings.txt
             echo '```'
-            if [ -s /tmp/unlabelled.txt ]; then
-              echo
-              echo 'Not labelled:'
+            echo '### Actions'
+            echo '```'
+            cat /tmp/actions.txt
+            echo '```'
+            if [ -s /tmp/skipped.txt ]; then
+              echo '### Not acted on'
               echo '```'
-              cat /tmp/unlabelled.txt
+              cat /tmp/skipped.txt
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
