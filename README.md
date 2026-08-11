@@ -1,9 +1,11 @@
 ![Spark-Hermes banner](docs/images/banner.png)
 
-<sub>Two things in the artwork above do not match the system and are being redrawn. The rollout
-host is an **RTX PRO 6000 Blackwell Server Edition (96 GB)**, not a GeForce RTX 5090 32 GB. And
-"lower latency" is not a thing a miner is scored on — wall time is reported and never gates the
-crown, for the reason given under [Pareto frontier](#pareto-frontier).</sub>
+<sub>The RTX 5090 in the artwork is the **distribution** target, not the training host: training
+and scoring happen in bf16 on an RTX PRO 6000 Blackwell Server Edition (96 GB), and what ships is a
+GGUF quantization that fits a 32 GB card. See [Two tiers](#two-tiers-bf16-to-train-gguf-to-ship).
+One thing in the artwork is still wrong: "lower latency" is not something a miner is scored on —
+wall time is reported and never gates the crown, for the reason given under
+[Pareto frontier](#pareto-frontier).</sub>
 
 # SPARK-HERMES
 
@@ -11,6 +13,8 @@ crown, for the reason given under [Pareto frontier](#pareto-frontier).</sub>
 
 **Target:** `Spark-Hermes-3.8-27B`
 **Development baseline:** pinned `Qwen3.6-27B` @ `6a9e13bd`, served bf16
+**Train and score on:** RTX PRO 6000 Blackwell Server Edition, 96 GB, bf16
+**Ship as:** GGUF, sized for a 32 GB card
 **Runtime:** Hermes 4
 **Competition:** verified rollout optimization
 **Execution:** NVIDIA Confidential Computing enabled; Intel TDX quote verification implemented,
@@ -209,12 +213,37 @@ same bytes on every miner
 "Same model" means identical weights, tokenizer, runtime configuration and Hermes protocol —
 not merely the same model name.
 
-**Nothing is quantized.** This section was titled "One canonical quantized model" and put a
-quantization step in that chain. [`hermes/base_model.json`](hermes/base_model.json) pins
+**Nothing in that chain is quantized.** [`hermes/base_model.json`](hermes/base_model.json) pins
 `Qwen/Qwen3.6-27B` at revision `6a9e13bd` with no quantization field, and the measured baseline
-served it in bf16 — which is why the KV figure in that file is `kv_bytes_measured` rather than
-one computed from an assumed precision. Quantization and kernel work would belong in a separate
-inference-optimization track; no such track exists.
+served it in bf16 — which is why the KV figure in that file is `kv_bytes_measured` rather than one
+computed from an assumed precision. The competition is decided on those bytes.
+
+<a id="two-tiers-bf16-to-train-gguf-to-ship"></a>
+
+### Two tiers: bf16 to train, GGUF to ship
+
+Quantization is a **distribution** step that happens after the competition, not a step inside it:
+
+| | train and score | distribute |
+|---|---|---|
+| precision | bf16 | GGUF |
+| card | RTX PRO 6000 Blackwell, 96 GB | 32 GB class, e.g. RTX 5090 |
+| why | 30 B parameters at two bytes each is ~60 GB of weights before optimizer state, adapters or KV — it does not fit 32 GB, and a 4-bit *training* base fits adapters to a model nobody serves | four-ish bits a parameter puts the same 30 B model inside 32 GB with room for context |
+| who runs it | validators, and miners reproducing a round | whoever wants to run the thing |
+
+The reason to keep them apart is that a score does not survive the crossing.
+
+**A number measured at bf16 is not a claim about the GGUF build.** `hermes.promotion` refuses to
+compare two runs whose `Serving.precision` differs, and refuses harder when either leaves it
+blank — so the quantized build's success rate, token cost and protocol conformance have to be
+**re-measured**, never inherited. Quantization changes logits; whether it changes *outcomes* on
+agentic tasks is an empirical question about that specific quantization, and answering it is one
+run of the same suite. Publishing a bf16 score beside a GGUF download without saying which was
+measured is the one thing this split exists to stop.
+
+So the honest sequence is: compete and promote in bf16, then quantize, then re-run the suite on the
+quantized artifact and publish that number too — with `Serving.precision` recorded on both, which
+is what makes the pair comparable at all.
 
 ---
 
