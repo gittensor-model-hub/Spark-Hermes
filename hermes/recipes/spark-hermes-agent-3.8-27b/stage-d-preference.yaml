@@ -27,8 +27,15 @@
 # are improving is the merged model, so merge first and start a fresh adapter here. Chaining onto
 # stage C's adapter would make the reference the raw base and quietly optimise against a policy
 # three stages out of date.
+#
+#   scripts/merge_lora.sh hermes/recipes/spark-hermes-agent-3.8-27b/stage-c-tools.yaml
+#
+# The path below is stage C's `output_dir` with `merged` appended, which is where Axolotl writes
+# and is not configurable. Naming it directly rather than renaming the result afterwards: a rename
+# is a step that can half-succeed and leave a directory whose name stops describing what is in it.
+# `tests/test_base_model.py` holds the two in step.
 
-base_model: outputs/spark-hermes-agent-3.8-27b/merged-sft
+base_model: outputs/spark-hermes-agent-3.8-27b/stage-c/merged
 trust_remote_code: true
 
 chat_template: qwen3_5

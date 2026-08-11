@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from hermes.base_model import PIN_PATH, BaseModelError, load
+from hermes.merge import MERGED_DIRNAME
 
 RECIPE_DIR = Path("hermes/recipes/spark-hermes-agent-3.8-27b")
 
@@ -41,13 +42,20 @@ def test_a_short_sha_is_refused(tmp_path):
 # A stage may start from an earlier stage's merged output instead of from the hub -- DPO needs the
 # policy it is improving as its reference, and after the SFT stages that policy is the merged model,
 # not the raw base. Such a recipe names a local path, so there is nothing to pin it against
-# directly; what keeps it honest is that the path lies inside this model line's own output tree,
-# every hub-rooted recipe in which is pinned by the test below. The chain therefore roots at the pin.
-DERIVED_PREFIX = f"outputs/{RECIPE_DIR.name}/"
-
-
+# directly; what keeps it honest is that the path is one some other stage in this line actually
+# produces, and every one of those is pinned. The chain therefore roots at the pin.
 def _is_derived(base_model: str) -> bool:
     return base_model.startswith("outputs/")
+
+
+def _merge_outputs() -> set[str]:
+    """Every path a merge of a stage in this line would write to."""
+    out = set()
+    for recipe in _recipes():
+        config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
+        if config.get("output_dir") and not _is_derived(str(config["base_model"])):
+            out.add(f"{config['output_dir'].rstrip('/')}/{MERGED_DIRNAME}")
+    return out
 
 
 @pytest.mark.parametrize("recipe", _recipes(), ids=lambda p: p.name)
@@ -69,8 +77,9 @@ def test_a_derived_base_stays_inside_this_model_line(recipe):
 
     `outputs/` as a prefix is not itself an assurance -- it would admit any other line's checkpoint,
     or one built from an unpinned base, and the resulting model would still train and still serve.
-    So a derived base must sit under this recipe directory's own output tree, whose every other
-    stage is pinned.
+    So the path must be one that merging a pinned stage of this same line actually produces:
+    that stage's `output_dir` with Axolotl's `merged` appended. A path nothing produces is a
+    recipe that cannot run, and one produced by an unpinned stage is off the pin by a hop.
 
     It must also carry no `base_model_revision`: a local directory has no hub revision, and a
     stamped one would agree with the pin while describing something the pin never produced."""
@@ -78,7 +87,8 @@ def test_a_derived_base_stays_inside_this_model_line(recipe):
     base = str(config["base_model"])
     if not _is_derived(base):
         pytest.skip("hub base; covered by test_every_recipe_matches_the_pin")
-    assert base.startswith(DERIVED_PREFIX), f"{base!r} is outside {DERIVED_PREFIX!r}"
+    produced = _merge_outputs()
+    assert base in produced, f"{base!r} is not produced by any pinned stage here; those write {sorted(produced)}"
     assert "base_model_revision" not in config, "a local path has no hub revision to stamp"
 
 
