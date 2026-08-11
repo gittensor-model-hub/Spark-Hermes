@@ -290,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("action", choices=["check", "init", "evaluate"])
+    parser.add_argument("action", choices=["check", "init", "evaluate", "search"])
     parser.add_argument("--dir", type=Path, required=True, dest="root", help="the submission directory")
     parser.add_argument("--skill", default="my-strategy", help="skill directory name (init only)")
     parser.add_argument("--task", default="", help="the task id to evaluate on (evaluate only)")
@@ -323,6 +323,27 @@ def main(argv: list[str] | None = None) -> int:
         help="a file holding the harness base prompt, to show the composed result at its real size",
     )
     args = parser.parse_args(argv)
+
+    if args.action == "search":
+        from miner.search import main as search_main
+
+        forwarded = [
+            "--dir",
+            str(args.root),
+            "--task",
+            args.task,
+            "--model",
+            args.model,
+            "--base-url",
+            args.base_url,
+            "--api-key-env",
+            args.api_key_env,
+            "--repeats",
+            str(args.repeats),
+        ]
+        if args.allow_unsandboxed:
+            forwarded.append("--allow-unsandboxed")
+        return search_main(forwarded)
 
     if args.action == "evaluate":
         return _evaluate(args)
