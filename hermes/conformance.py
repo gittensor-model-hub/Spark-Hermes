@@ -69,7 +69,35 @@ REFERENCE_TOOLS = [
 ]
 
 
+# Markers `hermes.atem` parses. Pinning these against the model's own committed template is what
+# a rendered-prompt pin does for Hermes: it makes a format change require editing a checked-in
+# artifact in the same commit. If a later revision of the model renames a tag, this fails and the
+# parser is revisited -- rather than the parser quietly returning zero calls forever.
+ATEM_MARKERS = (
+    "<atem:function_calls>",
+    "</atem:function_calls>",
+    '<atem:invoke name="',
+    '<atem:parameter name="',
+    "</atem:parameter>",
+    '<tool_output name="',
+    "</tool_output>",
+    "to=self",
+    "# Valid recipients:",
+    "Reasoning strength:",
+)
+
+
 def template_path(dialect_name: str) -> Path:
+    """Where a dialect's pinned artifact lives.
+
+    For Hermes that is the system prompt this repo renders, because the repo is what writes it.
+    For ATEM it is the model's own `chat_template.jinja` at the pinned revision, because the repo
+    writes no tool block at all -- the template does, and it is the thing the model is actually
+    conditioned on. This module's own docstring named that as the check belonging with the model
+    decision; this is that decision.
+    """
+    if DIALECTS.get(dialect_name) is not None and not DIALECTS[dialect_name].tools_in_prompt:
+        return TEMPLATE_DIR / f"chat-template-{dialect_name}.jinja"
     return TEMPLATE_DIR / f"system-{dialect_name}.txt"
 
 
@@ -94,6 +122,21 @@ def drift(dialect_name: str) -> str:
     expected = pinned(dialect_name)
     if expected is None:
         return f"no pinned template for {dialect_name}; run `python -m hermes.conformance --update`"
+
+    dialect = DIALECTS.get(dialect_name)
+    if dialect is not None and not dialect.tools_in_prompt:
+        # Nothing of ours to render, so the check is the other way round: every marker the parser
+        # depends on must still be in the model's template. A comparison of the committed file
+        # against itself would be a check that cannot fail.
+        absent = [m for m in ATEM_MARKERS if m not in expected]
+        if absent:
+            return (
+                f"{dialect_name}: the pinned chat template no longer contains {absent!r}, which "
+                f"hermes.{dialect_name} parses. A renamed tag makes the parser return zero calls on "
+                "every turn, which reads as a model that never calls tools."
+            )
+        return ""
+
     actual = render(dialect_name)
     if actual == expected:
         return ""
@@ -112,6 +155,11 @@ def update() -> list[str]:
     TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
     changed = []
     for name in sorted(DIALECTS):
+        if not DIALECTS[name].tools_in_prompt:
+            # Not generated from this repo's code. The artifact is the model's own template, fetched
+            # once at a pinned revision and committed; regenerating it here would overwrite an
+            # upstream file with something this repo made up.
+            continue
         text = render(name)
         if pinned(name) != text:
             template_path(name).write_text(text, encoding="utf-8")

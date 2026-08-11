@@ -233,19 +233,27 @@ def parse_turn(content: str, *, reasoning: str = "", schemas: dict[str, dict[str
 
     remainder = _strip(content, spans)
 
-    if _UNCLOSED_RE.search(remainder):
+    # An unclosed block ends the turn, so everything from it onward is the truncated call. Cut it
+    # away before the near-miss scan rather than after: the truncated text still contains
+    # `<atem:function_calls>`, `<atem:invoke ...>` and an `<atem:parameter ...>`, so scanning it
+    # reported ONE broken turn as four malformed entries. `parse_failures` feeds `malformed_turns`,
+    # which the promotion gate bounds -- so the over-count made this dialect look worse than Hermes
+    # for the identical failure, in the metric that decides whether a model ships.
+    truncated = _UNCLOSED_RE.search(remainder)
+    if truncated:
         malformed.append(
             f"{CALLS_OPEN} was opened and never closed, so the call is truncated. An ATEM call is "
             "several times longer than the JSON equivalent, which makes this the likeliest way a "
             "turn breaks under a token limit."
         )
+        remainder = remainder[: truncated.start()]
     for loose in _LOOSE_RE.finditer(remainder):
         malformed.append(
             f"{loose.group(0)[:40]!r} is call-shaped but not a call. The namespace prefix is part of "
             "the tag: `<function_calls>` and `<atem :invoke>` are both unparseable."
         )
 
-    text = _LOOSE_RE.sub("", _UNCLOSED_RE.sub("", remainder)).strip()
+    text = _LOOSE_RE.sub("", remainder).strip()
     return ParsedTurn(calls=tuple(calls), text=text, scratch_pad=reasoning.strip(), malformed=tuple(malformed))
 
 

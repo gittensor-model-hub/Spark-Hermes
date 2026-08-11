@@ -96,6 +96,21 @@ class Dialect:
     # preamble between them would train a Hermes 4 worker on a system turn it never saw.
     preamble: str = ""
     call_instruction: str = ""
+    # Which markup family the wire format belongs to. `hermes` is `<tool_call>` JSON; `atem` is
+    # the nested-element format Muse-Glimmer speaks, implemented in `hermes.atem`. Held here so
+    # the dispatch reads off data rather than off the dialect's name, which would make `atem-2`
+    # silently take the Hermes path.
+    family: str = "hermes"
+    # Whether the tool definitions belong in the system prompt.
+    #
+    # False for ATEM, and this is not a style choice. That template appends
+    # `render_system_meta(tools)` to EVERY system message, and with no native tools it emits
+    # `# Valid recipients: "self", "user".` -- while a tool call there is an assistant turn
+    # addressed `to=<tool namespace>`. So a prompt-embedded tool block tells the model about
+    # tools and the line right after it tells the model those recipients are invalid. The
+    # symptom is a model that never calls a tool, which is the failure shape this repo already
+    # warns about: zero tool calls, zero malformed turns, and a clean protocol score.
+    tools_in_prompt: bool = True
 
     def __post_init__(self) -> None:
         if self.tool_result_role not in ("tool", "user"):
@@ -154,7 +169,23 @@ HERMES_4 = Dialect(
     call_instruction=_H4_CALL_INSTRUCTION,
 )
 
-DIALECTS = {d.name: d for d in (HERMES_3, HERMES_4)}
+# Not a Hermes generation. Registered here so `DIALECTS` is the one place that answers "which
+# formats does this repo implement", while the render and parse sides live in `hermes.atem`:
+# one JSON object per call becomes one element per parameter, which no field on `Dialect` can
+# express. `reasoning_tag` is empty because there is no inline tag -- deliberation arrives on a
+# separate channel addressed to `self`, so anything looking for a tag would find nothing and
+# report every turn as having skipped it.
+ATEM = Dialect(
+    name="atem",
+    tool_result_role="tool",
+    reasoning_tag="",
+    supports_scratch_pad=False,
+    pydantic_line=False,
+    family="atem",
+    tools_in_prompt=False,
+)
+
+DIALECTS = {d.name: d for d in (HERMES_3, HERMES_4, ATEM)}
 
 _PYDANTIC_SCHEMA = (
     '{"title": "FunctionCall", "type": "object", "properties": {"name": {"title": "Name", '
@@ -215,6 +246,17 @@ def render_system(
     and then advertises none teaches the model to invent names, which is the failure
     `format.py` already guards on the other side.
     """
+    if not dialect.tools_in_prompt:
+        # Refused rather than ignored. Silently dropping the tools would produce a prompt that
+        # looks right and a model that cannot see its tools at all, and silently keeping them
+        # produces the recipient contradiction described on `Dialect.tools_in_prompt`. The caller
+        # has to pass tools natively instead, so it has to know.
+        raise ProtocolError(
+            f"{dialect.name} takes its tool definitions from the serving template, not the system "
+            "prompt: pass them as the request's `tools` so the template renders the definitions, "
+            "the valid-recipient list and the reasoning line consistently. Embedding them here "
+            "advertises tools while the template's own recipient list forbids calling them."
+        )
     if not tools:
         raise ProtocolError(
             "no tools to advertise; a prompt that explains the call format but offers "
@@ -427,7 +469,13 @@ def _check_call(payload: Any) -> tuple[ParsedCall | None, str]:
     return ParsedCall(name=name, arguments=arguments), ""
 
 
-def parse_turn(content: str) -> ParsedTurn:
+def parse_turn(
+    content: str,
+    *,
+    dialect: Dialect | None = None,
+    reasoning: str = "",
+    schemas: dict[str, dict[str, Any]] | None = None,
+) -> ParsedTurn:
     """Read tool calls out of assistant text.
 
     Calls are found by decoding JSON from just after each `<tool_call>`, not by matching
@@ -451,6 +499,13 @@ def parse_turn(content: str) -> ParsedTurn:
     show `arguments` first, so both are in the training distribution and a parser insisting
     on one would reject half of Nous's own examples.
     """
+    if dialect is not None and dialect.family == "atem":
+        # Imported here rather than at module scope: `hermes.atem` reads `ParsedTurn` and
+        # `ProtocolError` from this module, so a top-level import would be a cycle.
+        from hermes.atem import parse_turn as parse_atem
+
+        return parse_atem(content, reasoning=reasoning, schemas=schemas)
+
     calls: list[ParsedCall] = []
     malformed: list[str] = []
     spans: list[tuple[int, int]] = []

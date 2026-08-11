@@ -278,3 +278,152 @@ def test_a_call_surrounded_by_prose_keeps_both():
     parsed = parse_turn(content)
     assert len(parsed.calls) == 1
     assert "First I will look" in parsed.text and "Then decide" in parsed.text
+
+
+# --- driving an episode in ATEM through the policy -------------------------------------------------
+#
+# The wiring, and the one part of it that is not obvious: the tool definitions must be passed with
+# the request rather than embedded in the system prompt. That template appends
+# `render_system_meta(tools)` to EVERY system message, and with no native tools it emits
+# `# Valid recipients: "self", "user".` -- while a tool call is an assistant turn addressed
+# `to=<tool namespace>`. Embedding the definitions therefore advertises tools and forbids calling
+# them in the same prompt, and the symptom is a model that never calls one.
+
+
+def _policy(reply, *, dialect_name="atem", system=""):
+    from hermes.protocol import DIALECTS
+    from hermesbench.policy import ServedModelPolicy
+
+    seen = {}
+
+    def complete(messages, *, tools=None):
+        seen["messages"] = messages
+        seen["tools"] = tools
+        return reply, {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+    policy = ServedModelPolicy(
+        complete=complete,
+        dialect=DIALECTS[dialect_name],
+        tool_schemas={
+            "terminal": {
+                "description": "Run a command.",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            }
+        },
+        system=system,
+    )
+    return policy, seen
+
+
+def _task():
+    from hermesbench.tasks import Task
+
+    return Task.from_record({"task_id": "t1", "prompt": "count the log lines", "verify": "true", "tools": ["terminal"]})
+
+
+def test_the_tools_go_with_the_request_not_into_the_prompt():
+    policy, seen = _policy("done")
+    policy.next_steps(_task(), [])
+    assert seen["tools"], "the definitions must reach the request, or the template renders none"
+    assert seen["tools"][0]["function"]["name"] == "terminal"
+    prompt = "".join(m["content"] for m in seen["messages"])
+    assert "<atem:function_calls>" not in prompt, "the template writes the call format, not us"
+    assert "terminal" not in prompt or "count the log lines" in prompt
+
+
+def test_hermes_still_embeds_its_tools_and_sends_none_natively():
+    """The other half of the dispatch. Hermes advertises inside `<tools>` and the request carries
+    no tool field, which is what every existing run did."""
+    policy, seen = _policy("done", dialect_name="hermes-4")
+    policy.next_steps(_task(), [])
+    assert seen["tools"] is None
+    assert "<tools>" in seen["messages"][0]["content"]
+
+
+def test_an_empty_system_turn_is_omitted_rather_than_sent_blank():
+    """The template injects its own default system message when none is present -- reasoning
+    strength, tool definitions, valid recipients. A blank system message suppresses that and leaves
+    the model with no tool definitions at all."""
+    policy, seen = _policy("done")
+    policy.next_steps(_task(), [])
+    assert [m["role"] for m in seen["messages"]] == ["user"]
+
+
+def test_operator_framing_still_reaches_the_system_turn():
+    policy, seen = _policy("done", system="One call per turn.")
+    policy.next_steps(_task(), [])
+    assert seen["messages"][0]["role"] == "system"
+    assert seen["messages"][0]["content"] == "One call per turn."
+
+
+def test_a_call_the_model_emits_is_parsed_and_becomes_steps():
+    from hermes.trajectory import TOOL_CALL
+
+    reply = render_tool_call("terminal", {"command": "wc -l logs/*.log"})
+    policy, _ = _policy(reply)
+    steps = policy.next_steps(_task(), [])
+    calls = [s for s in steps if s.kind == TOOL_CALL]
+    assert len(calls) == 1 and calls[0].tool == "terminal"
+    assert calls[0].args == {"command": "wc -l logs/*.log"}
+    assert policy.parse_failures == 0
+
+
+def test_a_truncated_call_counts_as_a_parse_failure():
+    """`malformed_turns` is what protects the wire format, and it has to mean the same thing in
+    both dialects or a conformance comparison across them is meaningless."""
+    policy, _ = _policy('<atem:function_calls>\n<atem:invoke name="terminal">\n<atem:parameter name="command">ls')
+    policy.next_steps(_task(), [])
+    # Exactly one. The truncated text still contains three call-shaped tags, and the first version
+    # of the parser reported all of them -- four malformed entries for one broken turn, in the
+    # metric the promotion gate bounds.
+    assert policy.parse_failures == 1
+
+
+def test_reasoning_content_is_read_off_the_response():
+    """It arrives beside the content, not inside it. Looking for a tag in the text would find
+    nothing and report every turn as having skipped deliberation."""
+    from hermes.protocol import DIALECTS
+    from hermesbench.policy import ServedModelPolicy
+
+    def complete(messages, *, tools=None):
+        # Realistic usage plus the reasoning key. `hermes.cost` refuses a usage object with none
+        # of the OpenAI keys, which is the guard that caught the first version of this stub.
+        return "Running it.", {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "reasoning_content": "I should list the files first.",
+        }
+
+    policy = ServedModelPolicy(
+        complete=complete,
+        dialect=DIALECTS["atem"],
+        tool_schemas={"terminal": {"description": "d", "parameters": {}}},
+    )
+    steps = policy.next_steps(_task(), [])
+    assert any("list the files" in (s.content or "") for s in steps)
+
+
+def test_history_is_replayed_in_the_dialect_the_model_speaks():
+    """A model reading its own prior turns in a foreign format is being taught mid-episode that
+    the format is negotiable."""
+    from hermes.trajectory import TOOL_CALL, TOOL_RESULT, Step
+
+    history = [
+        Step(kind=TOOL_CALL, tool="terminal", args={"command": "ls"}, call_id="c1"),
+        Step(kind=TOOL_RESULT, call_id="c1", content="one.log", ok=True),
+    ]
+    policy, seen = _policy("done")
+    policy.next_steps(_task(), history)
+    replayed = "".join(m["content"] for m in seen["messages"])
+    assert "<atem:invoke" in replayed and "<tool_output" in replayed
+    assert "<tool_call>" not in replayed and "<tool_response>" not in replayed
+
+
+def test_render_system_refuses_to_embed_tools_for_this_dialect():
+    """Refused rather than ignored: dropping them silently produces a prompt that looks right and
+    a model that cannot see its tools, and keeping them produces the recipient contradiction."""
+    from hermes.protocol import DIALECTS, ProtocolError, render_system, tool_schema
+
+    with pytest.raises(ProtocolError, match="serving template"):
+        render_system([tool_schema("terminal", "d", {})], dialect=DIALECTS["atem"])

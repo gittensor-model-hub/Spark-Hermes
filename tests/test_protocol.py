@@ -93,7 +93,27 @@ def test_the_reasoning_tag_differs_between_dialects():
 
 
 def test_dialects_are_addressable_by_name():
-    assert set(DIALECTS) == {"hermes-3", "hermes-4"}
+    assert set(DIALECTS) == {"hermes-3", "hermes-4", "atem"}
+
+
+def test_only_the_hermes_dialects_carry_their_tools_in_the_prompt():
+    """The flag the dispatch reads. ATEM's definitions come from the serving template, so a
+    prompt-embedded block would advertise tools while the template's own recipient list forbids
+    calling them -- see `Dialect.tools_in_prompt`."""
+    assert [n for n, d in DIALECTS.items() if not d.tools_in_prompt] == ["atem"]
+    assert all(DIALECTS[n].family == "hermes" for n in ("hermes-3", "hermes-4"))
+
+
+def test_the_dispatch_reads_the_family_not_the_name():
+    """A dialect named `atem-2` must take the ATEM path. Keying on the name would send it down
+    the Hermes one and report every call as unparseable prose."""
+    import dataclasses
+
+    from hermes.atem import render_tool_call as render_atem
+
+    future = dataclasses.replace(DIALECTS["atem"], name="atem-2")
+    turn = parse_turn(render_atem("terminal", {"command": "ls"}), dialect=future)
+    assert len(turn.calls) == 1 and turn.malformed == ()
 
 
 # --- parsing -------------------------------------------------------------------------

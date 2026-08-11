@@ -44,7 +44,11 @@ from hermesbench.tasks import Task
 # A chat completion: messages in, (text, raw usage dict) out. Deliberately this small --
 # anything that can be adapted to it can drive the benchmark, including a local process,
 # a hosted gateway, or a stub in a test.
-Completion = Callable[[list[dict[str, str]]], tuple[str, dict[str, Any]]]
+# `tools` is optional and only supplied for dialects whose definitions belong to the serving
+# template rather than the system prompt -- see `Dialect.tools_in_prompt`. Kept as a keyword with
+# a default so every existing caller and test stub is unaffected: a stub written for Hermes is
+# never handed the argument.
+Completion = Callable[..., tuple[str, dict[str, Any]]]
 
 
 class PolicyError(RuntimeError):
@@ -88,7 +92,21 @@ class ServedModelPolicy:
             )
             for name in task.tools
         ]
+        if not self.dialect.tools_in_prompt:
+            # The definitions go with the request instead, so the serving template renders them,
+            # the valid-recipient list and the reasoning line as one consistent block. What is
+            # left for the system turn is the operator's own framing, which is what `system` is.
+            return self.system.strip()
         return render_system(tools, dialect=self.dialect, scratch_pad=self.scratch_pad, extra=self.system)
+
+    def _tool_payload(self, task: Task) -> list[dict[str, Any]]:
+        """The tool definitions, in the shape an OpenAI-compatible request takes."""
+        return [
+            tool_schema(
+                name, self.tool_schemas[name].get("description", ""), self.tool_schemas[name].get("parameters", {})
+            )
+            for name in task.tools
+        ]
 
     def _messages(self, task: Task, history: list[Step]) -> list[dict[str, str]]:
         """Rebuild the conversation from the trajectory so far.
@@ -98,7 +116,13 @@ class ServedModelPolicy:
         from the recorded history, and then the episode that was graded is not the one the
         model saw.
         """
-        messages = [{"role": "system", "content": self._system_turn(task)}, {"role": "user", "content": task.prompt}]
+        system = self._system_turn(task)
+        # Omitted when empty rather than sent blank. The ATEM template injects its own default
+        # system message when none is present -- knowledge cutoff, reasoning strength, tool
+        # definitions, valid recipients -- and an empty system message would suppress that and
+        # leave the model with no tool definitions at all.
+        messages = [{"role": "system", "content": system}] if system else []
+        messages.append({"role": "user", "content": task.prompt})
         call_names: dict[str, str] = {}
         pending: list[str] = []
         for step in history:
@@ -107,15 +131,17 @@ class ServedModelPolicy:
             elif step.kind == TOOL_CALL:
                 if step.call_id:
                     call_names[step.call_id] = step.tool or ""
-                pending.append(_render_call(step))
+                pending.append(_render_call(step, self.dialect))
             elif step.kind == TOOL_RESULT:
                 if pending:
                     messages.append({"role": "assistant", "content": "\n".join(p for p in pending if p)})
                     pending = []
                 name = call_names.get(step.call_id or "", "")
-                content = render_tool_response(name, step.content if step.ok else f"ERROR: {step.content}")
+                body = step.content if step.ok else f"ERROR: {step.content}"
+                content = _render_response(name, body, self.dialect)
                 role = self.dialect.tool_result_role
-                if messages and messages[-1]["role"] == role and messages[-1]["content"].startswith("<tool_response>"):
+                merge_prefix = "<tool_output" if self.dialect.family == "atem" else "<tool_response>"
+                if messages and messages[-1]["role"] == role and messages[-1]["content"].startswith(merge_prefix):
                     messages[-1]["content"] += "\n" + content
                 else:
                     messages.append({"role": role, "content": content})
@@ -126,12 +152,20 @@ class ServedModelPolicy:
         return messages
 
     def next_steps(self, task: Task, history: list[Step]) -> list[Step]:
-        text, raw = self.complete(self._messages(task, history))
+        messages = self._messages(task, history)
+        if self.dialect.tools_in_prompt:
+            text, raw = self.complete(messages)
+        else:
+            text, raw = self.complete(messages, tools=self._tool_payload(task))
         if raw:
             turn_usage = usage_from_provider(raw, shape=OPENAI)
             self.usage = self.usage + turn_usage
             self._tokens += turn_usage.total
-        turn = parse_turn(text)
+        # Reasoning arrives beside the content rather than inside it for a dialect with no inline
+        # tag, so it is read off the response and handed to the parser. Looking for a tag in the
+        # text would find nothing and report every turn as having skipped deliberation.
+        reasoning = str(raw.get("reasoning_content") or "") if isinstance(raw, dict) else ""
+        turn = parse_turn(text, dialect=self.dialect, reasoning=reasoning, schemas=self.tool_schemas)
         # `parse_turn` already separates malformed from abstained, and `steps_from_turn`
         # already says these are "a failure the metrics should see" -- but the failure left
         # here as prose inside a THINKING step, which no metric can distinguish from real
@@ -142,10 +176,28 @@ class ServedModelPolicy:
         return steps_from_turn(turn)
 
 
-def _render_call(step: Step) -> str:
+def _render_call(step: Step, dialect: Dialect) -> str:
+    """Rebuild an assistant turn's call in the dialect the model speaks.
+
+    The history sent back has to be in the same format the model emits, or it is being shown a
+    conversation it did not have -- and a model reading its own prior turns in a foreign format
+    is being taught, mid-episode, that the format is negotiable.
+    """
+    if dialect.family == "atem":
+        from hermes.atem import render_tool_call as render_atem
+
+        return render_atem(step.tool or "", step.args)
     from hermes.protocol import render_tool_call
 
     return render_tool_call(step.tool or "", step.args)
+
+
+def _render_response(name: str, content: str, dialect: Dialect) -> str:
+    if dialect.family == "atem":
+        from hermes.atem import render_tool_response as render_atem_response
+
+        return render_atem_response(name, content)
+    return render_tool_response(name, content)
 
 
 def steps_from_turn(turn: ParsedTurn) -> list[Step]:
@@ -186,10 +238,19 @@ def openai_completion(
 
     client = OpenAI(base_url=base_url, api_key=api_key or "not-needed", timeout=timeout_s)
 
-    def complete(messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
-        response = client.chat.completions.create(model=model, messages=messages, **params)  # type: ignore[arg-type]
+    def complete(
+        messages: list[dict[str, str]], *, tools: list[dict[str, Any]] | None = None
+    ) -> tuple[str, dict[str, Any]]:
+        extra = {"tools": tools} if tools else {}
+        response = client.chat.completions.create(model=model, messages=messages, **extra, **params)  # type: ignore[arg-type]
         choice = response.choices[0]
         usage = response.usage.model_dump() if response.usage else {}
+        # Carried beside the usage because a dialect that reasons on its own channel returns it
+        # here rather than in the content. `usage_from_provider` reads the keys it knows and
+        # ignores this one; dropping it would blank the reasoning for every ATEM turn.
+        reasoning = getattr(choice.message, "reasoning_content", None)
+        if reasoning:
+            usage["reasoning_content"] = reasoning
         return choice.message.content or "", usage
 
     return complete
