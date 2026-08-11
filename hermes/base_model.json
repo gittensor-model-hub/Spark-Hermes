@@ -45,6 +45,19 @@
   },
   "safetensors_shards": 2,
   "kv_bytes_per_token_note": "Over the 13 FULL-ATTENTION layers only: 2 * 13 * 2 kv_heads * 128 head_dim * 2 bytes. This model is hybrid -- layer_types is 39 sliding_attention + 13 full_attention -- and the 39 sliding layers hold at most `sliding_window` (2048) tokens each rather than growing with context, so they belong in a bounded per-sequence budget and not in a figure multiplied by a context length. Counting all 52 layers would give 53248 and overstate the per-token cost by 4x, which is how a card that runs this model comfortably gets ruled out on paper. Two KV heads is aggressive GQA and is most of why this figure is small for a 30B.",
-  "kv_bytes_measured": null,
-  "kv_bytes_measured_note": "Not yet measured on this model. The previous pin carried a measured figure from vLLM 0.26.0 on an RTX PRO 6000; that number described Qwen3.6-27B and is not transferable, so it is null rather than carried over. Deriving it is arithmetic; measuring it needs a serving run that reports its KV pool, and SGLang's accounting has not been read yet."
+  "kv_bytes_measured": {
+    "source": "SGLang 0.5.18.dev387 (muse-glimmer branch) on RTX PRO 6000 Blackwell Server Edition, 2026-08-11",
+    "full_attention_pool": {
+      "tokens": 606251,
+      "gib": 7.52,
+      "implied_bytes_per_token": 13319
+    },
+    "sliding_window_pool": {
+      "tokens": 485000,
+      "gib": 18.04,
+      "implied_bytes_per_token": 39939
+    },
+    "total_resident_gib": 25.56,
+    "note": "The derived figure is confirmed to the byte: 7.52 GiB over 606,251 tokens is 13,319 B/token against 13,312 derived, and the difference is the rounding in SGLang's own printout. The server also accounts for the two halves SEPARATELY, which is the arithmetic in kv_bytes_per_token_note made visible -- the sliding pool is 39,936 B/token over 39 layers and is bounded by the 2048-token window per sequence rather than growing with context, so it belongs in a per-sequence budget and not in a figure multiplied by a context length. Summing the two would give 53,248 B/token, which is exactly the wrong all-52-layers number."
+  }
 }

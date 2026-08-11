@@ -197,14 +197,33 @@ def test_kv_bytes_count_only_the_full_attention_layers():
     assert pin.kv_bytes_per_token["bf16"] != all_layers
 
 
-def test_an_unmeasured_kv_figure_is_null_rather_than_inherited():
-    """The previous pin carried a figure measured on a live vLLM server -- 33.36 GiB of KV pool
-    holding 507,539 tokens. That described Qwen3.6-27B. Carrying it forward would have made a
-    measurement of one model read as a measurement of another, which is worse than having none:
-    a stale number is indistinguishable from a fresh one and nothing downstream can tell."""
+def test_the_measurement_confirms_the_derivation_rather_than_replacing_it():
+    """Measured on SGLang against this base, and it agrees to the byte: 7.52 GiB over 606,251
+    tokens is 13,319 B/token against 13,312 derived, the gap being the rounding in the server's own
+    printout.
+
+    It was null until this was taken, rather than carrying the previous pin's figure -- 33.36 GiB
+    holding 507,539 tokens, measured on Qwen3.6-27B. A measurement of one model reading as a
+    measurement of another is worse than having none, because stale and fresh look identical.
+    """
     pin = load()
-    assert pin.raw["kv_bytes_measured"] is None
-    assert "not transferable" in pin.raw["kv_bytes_measured_note"]
+    measured = pin.raw["kv_bytes_measured"]
+    full = measured["full_attention_pool"]
+    derived = pin.kv_bytes_per_token["bf16"]
+    assert abs(full["implied_bytes_per_token"] - derived) / derived < 0.001
+
+    # The server accounts for the two halves separately, which is the whole point of the note: the
+    # sliding pool is bounded per sequence, so summing them would reproduce the wrong
+    # all-52-layers figure.
+    swa = measured["sliding_window_pool"]
+    t = pin.raw["text_config"]
+    sliding = t["layer_types_counts"]["sliding_attention"]
+    assert swa["implied_bytes_per_token"] == pytest.approx(
+        2 * sliding * t["num_key_value_heads"] * t["head_dim"] * 2, rel=0.001
+    )
+    all_layers = 2 * t["num_hidden_layers"] * t["num_key_value_heads"] * t["head_dim"] * 2
+    assert full["implied_bytes_per_token"] + swa["implied_bytes_per_token"] == pytest.approx(all_layers, rel=0.001)
+    assert derived != all_layers, "which is the figure this pin exists to not report"
 
 
 def test_kv_bytes_for_a_peak_context():
