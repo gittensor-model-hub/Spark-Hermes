@@ -46,7 +46,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -212,10 +212,22 @@ def canonical_path(bundle_dir: Path) -> Path:
 
 @dataclass
 class Intake:
-    """Stores accepted bundles privately and appends public receipts."""
+    """Stores accepted bundles privately and appends public receipts.
 
-    root: Path = SUBMISSION_DIR
-    receipts: Path = RECEIPTS
+    The default paths are resolved through `default_factory`, at instantiation, rather than being
+    written as plain defaults. A plain default is captured into the generated `__init__` when the
+    class is created, so reassigning `SUBMISSION_DIR` afterwards changes nothing for new instances.
+
+    That is not hypothetical tidiness. `validator.api`'s upload endpoint constructs `Intake()`
+    itself, and its tests isolate by monkeypatching these module globals -- a fixture whose
+    docstring says "so uploads do not touch the repository" and which, with plain defaults, did
+    not. Running the API tests wrote real bundles into `var/submissions` and appended to the real
+    `datasets/receipts.jsonl`, and every test still passed, because they assert on responses and
+    nothing asserted on where the files landed.
+    """
+
+    root: Path = field(default_factory=lambda: SUBMISSION_DIR)
+    receipts: Path = field(default_factory=lambda: RECEIPTS)
 
     def canonical_path_for(self, receipt: Receipt) -> Path:
         """Where the canonical serialisation of a stored bundle lives."""
@@ -223,10 +235,10 @@ class Intake:
 
     def accept(self, *, round_id: str, miner_id: str, files: dict[str, str], now: float | None = None) -> Receipt:
         """Validate, store, and record. Raises `IntakeError` with every reason on refusal."""
-        for field, value in (("round_id", round_id), ("miner_id", miner_id)):
+        for name, value in (("round_id", round_id), ("miner_id", miner_id)):
             if not value or "/" in value or value in (".", ".."):
                 # Both become directory components below.
-                raise IntakeError(f"{field} {value!r} must be a single path segment")
+                raise IntakeError(f"{name} {value!r} must be a single path segment")
 
         problems = validate(files)
         if problems:

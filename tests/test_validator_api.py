@@ -8,6 +8,8 @@ where the first version of this module was broken: it re-screened `RoundWindow.p
 as an unexpected field and every call would have 500'd.
 """
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("fastapi", reason="the validator API is an optional extra")
@@ -230,14 +232,57 @@ GOOD_BUNDLE = {
 
 @pytest.fixture
 def intake_at(tmp_path, monkeypatch):
-    """Point the intake at a temporary store so uploads do not touch the repository."""
+    """Point the intake at a temporary store so uploads do not touch the repository.
+
+    This fixture said that and did not do it. The upload endpoint builds its own `Intake()`, whose
+    path defaults were plain dataclass defaults -- captured into the generated `__init__` when the
+    class was created, so reassigning the module globals afterwards changed nothing. Two more lines
+    patched `Intake.root` and `Intake.receipts` as class attributes, which a dataclass instance
+    never consults either.
+
+    So every API test wrote real bundles into `var/submissions` and appended to the real
+    `datasets/receipts.jsonl`, and all of them passed: they assert on responses, and nothing
+    asserted on where the files landed. `Intake` resolves its defaults through `default_factory`
+    now, which makes these two patches the whole mechanism -- and the class-attribute patches an
+    AttributeError rather than a no-op, which is how this was finally noticed.
+    """
     from validator import intake as intake_module
 
     monkeypatch.setattr(intake_module, "SUBMISSION_DIR", tmp_path / "store")
     monkeypatch.setattr(intake_module, "RECEIPTS", tmp_path / "receipts.jsonl")
-    monkeypatch.setattr(intake_module.Intake, "root", tmp_path / "store")
-    monkeypatch.setattr(intake_module.Intake, "receipts", tmp_path / "receipts.jsonl")
     return tmp_path
+
+
+def test_an_upload_does_not_touch_the_real_store(client, intake_at, tmp_path):
+    """The assertion the fixture's docstring implied and nothing made.
+
+    Checked by what is on disk afterwards rather than by trusting the patch: the previous version of
+    this isolation was a no-op, every test still passed, and the evidence was a `carol` submission
+    sitting in the operator's `var/submissions` from a test run months of commits later.
+    """
+    # The repository's real paths, written out rather than imported. Importing them here would read
+    # the values the fixture just patched, so the test would compare the temporary store against
+    # itself and pass no matter what -- which is the same shape of mistake as the fixture's own.
+    DEFAULT_STORE = Path("var/submissions")
+    DEFAULT_RECEIPTS = Path("datasets/receipts.jsonl")
+
+    from validator import intake as intake_module
+
+    assert intake_module.SUBMISSION_DIR != DEFAULT_STORE, "the fixture is not patching anything"
+
+    real_before = DEFAULT_RECEIPTS.read_bytes() if DEFAULT_RECEIPTS.is_file() else None
+    api.ROUNDS["r-iso"] = _round(deadline=1e12)
+    assert (
+        client.post("/v1/round/r-iso/submission", json={"miner_id": "carol", "files": GOOD_BUNDLE}).status_code == 200
+    )
+
+    # It landed in the temporary store...
+    assert (tmp_path / "store" / "r-iso" / "carol").is_dir()
+    assert (tmp_path / "receipts.jsonl").is_file()
+    # ...and nowhere near the real one.
+    assert not (DEFAULT_STORE / "r-iso").exists()
+    real_after = DEFAULT_RECEIPTS.read_bytes() if DEFAULT_RECEIPTS.is_file() else None
+    assert real_after == real_before, "the suite appended to the operator's receipts file"
 
 
 def test_an_upload_returns_a_receipt_and_nothing_about_merit(client, intake_at):
