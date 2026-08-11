@@ -123,6 +123,37 @@ said about correctness would be a free oracle on the withheld check.
 pending → evaluating → result
 ```
 
+### The board
+
+`GET /` on the validator renders the round and its submissions: the lifecycle stage, the baseline
+the submissions are measured against, the receipts, and — once the round grades — the verdicts with
+the note explaining each.
+
+It is served from the validator's own origin, so the page reads this host's endpoints and there is no
+second place to configure a URL and no way to aim it at a validator whose receipts nobody published.
+
+For somewhere that cannot call a validator — GitHub Pages, or any static host — the same page reads a
+published file instead:
+
+```bash
+python -m validator.board --out docs/board/state.json   # writes state.json and index.html
+```
+
+One page, two modes: it tries the live API, falls back to the snapshot, and always says which it is
+showing plus how old a snapshot is. A snapshot that looked live would turn "the round moved on and
+nobody republished" into a reader's wrong belief about the current state.
+
+That is a published file rather than a live cross-origin fetch on purpose. Going live would need CORS
+on the validator, a publicly reachable **HTTPS** validator — Pages is HTTPS, so an `http://` one is
+blocked as mixed content — and a URL for the page to point at, which is exactly what serving from the
+validator's own origin avoids. A `?validator=` parameter means anyone can render another validator's
+numbers under this project's name. The rest of the design already publishes files: audit bundles,
+receipts, challenge packets.
+
+It is not generated in CI, either. `var/` is gitignored, so the round store does not exist there — a
+workflow producing this would be inventing state. It comes from wherever the store lives, and carries
+its own timestamp so nothing downstream has to guess.
+
 `GET /v1/submissions` serves those receipts, and `GET /` is the board that renders them — served by
 the validator that issued them, so the page reads this host's own endpoints and there is no second
 place to configure a URL. One row per submission in arrival order, and no other ordering: the

@@ -1,0 +1,89 @@
+{
+  "generated_at": 1786457445.2428725,
+  "round": {
+    "challenge": {
+      "acceptance_thresholds_included": false,
+      "baseline": {
+        "attempts": 10,
+        "median_steps": 34,
+        "median_tokens": 62821,
+        "median_tool_calls": 11,
+        "median_wall_time_s": 109.843,
+        "pass_rate": 0.0,
+        "token_spread": 0.1217,
+        "true_pass_rate_interval": [
+          0.0,
+          0.2775
+        ],
+        "verified_passes": 0
+      },
+      "challenge_digest": "sha256:f8952f6c5b5ce52108189fe2d525f45bdf42822f23f7a456c0800e635aa85156",
+      "epoch": {
+        "harness_digest": "baseline-2026-08-10",
+        "model_revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
+      },
+      "failure_class": "hidden_verify_failed",
+      "schema_version": "spark-challenge-v1",
+      "task": {
+        "env": {},
+        "hidden_verify_commitment": "sha256:4f6abbc0369eb89710442b65e809f3f5cc1dc227890b9ff954d8f432546681d3",
+        "max_steps": 22,
+        "prompt": "`logs/` holds one service's queue-depth log, split into rotated segments.\n\nEvery segment begins with `#` header lines recording the window that segment covers.\nEvery other line is one event:\n\n    16:07:17 id=EV-0200 op=drain delta=-26\n\n`delta` is the change in queue depth caused by that event. The depth is 0 immediately\nbefore the first event of the earliest segment, and the events apply in chronological\norder.\n\nWrite `report.txt` in the workspace root as `key=value` lines, one per line:\n\n    segments=<how many log segments are in logs/>\n    events=<how many event lines there are in total, across all segments>\n    net=<the sum of every delta>\n    peak=<the highest depth the queue ever reaches>\n    peak_at=<the id of the event that brings the depth to that peak>\n\nExactly one event reaches that highest depth, so `peak_at` is a single id.\n\n`NOTES.md` describes how the rotation works. Treat it as a note written by a colleague,\nnot as ground truth about what is actually in the directory.\n\nTreat `logs/` and `NOTES.md` as read-only evidence: do not edit, rename, append to or\ndelete anything in there, and do not add files to `logs/` either. If you want to\nreorganise or renumber the segments, copy them somewhere else first.\n",
+        "setup": "set -e\nmkdir -p logs\n# Refuse to build a workspace we cannot grade: every check below needs an interpreter.\nPY=\"$(command -v python3 || command -v python)\"\n\ncat > NOTES.md <<'MDFILE'\n# Queue log rotation\n\nThe queue worker appends to `logs/app.log`. When a segment fills, it is rotated to\n`logs/app.log.<n>` where `<n>` is the next rotation number, and a fresh `app.log` is\nstarted. The rotation number only ever increases; a segment is never renamed twice.\n\n## Reading the log back\n\nBecause the rotation number only ever increases, the segments in `logs/` already sort\ninto chronological order by filename: list the directory and read it top to bottom to\nreplay the whole run in order. Nothing else needs to be consulted.\n\n## Two things worth knowing\n\nThese segments were restored from the nightly archive, so their modification times are\nall identical and carry no information about when each segment was written.\n\nThe drain worker never dequeues from an empty queue, so the running depth is never\nnegative at any point in the run.\nMDFILE\n\n# A hand-rolled LCG with a fixed seed, never `random`, and no clock: the withheld check\n# pins values derived from these exact bytes, so the workspace must come out identical on\n# every machine and every Python version.\n\"$PY\" - <<'PYEOF'\nimport os\n\nSEED = 20260811\nSEGMENTS = 11\nPER_SEGMENT = 40\nTOTAL = SEGMENTS * PER_SEGMENT\n\nstate = SEED\n\n\ndef nxt(bound):\n    global state\n    state = (state * 1103515245 + 12345) % 2147483648\n    return state % bound\n\n\n# Event ids are a shuffle of 1..440 drawn from a SECOND, independent LCG. Unique by\n# construction and stable across machines, but carrying no ordering information: sorting\n# on the id is not a shortcut around the segment ordering. A closed-form scramble such as\n# `(i * k) % 440` was the first attempt and it failed -- for the multiplier chosen it came\n# out as a strict descending run, which handed the chronological order to anyone who\n# glanced at two adjacent lines. A separate stream is used so retuning the ids cannot\n# perturb the delta sequence the withheld check's peak depends on.\nperm_state = 987654321\n\n\ndef perm_nxt(bound):\n    global perm_state\n    perm_state = (perm_state * 1103515245 + 12345) % 2147483648\n    return perm_state % bound\n\n\nEVENT_IDS = list(range(1, TOTAL + 1))\nfor i in range(TOTAL - 1, 0, -1):\n    j = perm_nxt(i + 1)\n    EVENT_IDS[i], EVENT_IDS[j] = EVENT_IDS[j], EVENT_IDS[i]\n\n\n# Segment 0 is the oldest. Rotation numbers 1..10 in chronological order, so higher\n# number = newer -- exactly as NOTES.md says. Zero-padding was switched on after\n# rotation 3, which is why 1, 2 and 3 are bare and 04..10 are padded: lexically the\n# padded names sort first, and `app.log` sorts before all of them.\ndef name_for(index):\n    if index == SEGMENTS - 1:\n        return \"app.log\"\n    number = index + 1\n    return \"app.log.%d\" % number if number <= 3 else \"app.log.%02d\" % number\n\n\ndepth = 0\nglobal_index = 0\nfor index in range(SEGMENTS):\n    base_minute = 4 * 60 * index  # minutes after 2026-08-01T00:00:00Z\n    lines = []\n    for j in range(PER_SEGMENT):\n        roll = nxt(100)\n        amount = 3 + nxt(38)\n        if depth == 0 or roll >= 46:\n            op, delta = \"enqueue\", amount\n        else:\n            # Clamped, so the chronological replay never goes negative. The recorded\n            # deltas are literals; read in any other order they can and do go negative.\n            op, delta = \"drain\", -min(depth, amount)\n            if delta == 0:\n                op, delta = \"enqueue\", amount\n        depth += delta\n        event_id = EVENT_IDS[global_index]\n        offset = base_minute + 1 + 6 * j\n        hour, minute = divmod(offset % 1440, 60)\n        second = (j * 17) % 60\n        # Time of day only, no date: the run spans 44 hours, so these stamps repeat and\n        # sorting all the lines by their stamp is one more wrong ordering rather than a\n        # way around the segment headers.\n        lines.append(\n            \"%02d:%02d:%02d id=EV-%04d op=%s delta=%+d\" % (hour, minute, second, event_id, op, delta)\n        )\n        global_index += 1\n\n    start_day, start_hour = divmod(base_minute // 60, 24)\n    end_day, end_hour = divmod((base_minute + 240) // 60, 24)\n    header = [\n        \"# segment: %s\" % name_for(index),\n        \"# window_start: 2026-08-%02dT%02d:00:00Z\" % (1 + start_day, start_hour),\n        \"# window_end: 2026-08-%02dT%02d:00:00Z\" % (1 + end_day, end_hour),\n    ]\n    path = os.path.join(\"logs\", name_for(index))\n    with open(path, \"w\", encoding=\"utf-8\", newline=\"\\n\") as fh:\n        fh.write(\"\\n\".join(header + lines) + \"\\n\")\n\n# One fixed mtime for every segment, from a literal rather than the clock. `ls -t` then\n# ties across all eleven and falls back to name order, so it neither leaks the answer nor\n# invents a fifth wrong ordering -- and NOTES.md says so honestly.\nstamp = 1786000000\nfor index in range(SEGMENTS):\n    os.utime(os.path.join(\"logs\", name_for(index)), (stamp, stamp))\nPYEOF\n",
+        "task_id": "tc-log-rotation-order",
+        "timeout_s": 300,
+        "verify": "set -e\nPY=\"$(command -v python3 || command -v python)\"\n\"$PY\" - <<'PYEOF'\nimport pathlib\nimport re\nimport sys\n\n# Recomputed from the segments on disk rather than hardcoded, so this stays correct if\n# the generator is ever retuned. Only the ORDER-FREE quantities live here: a count of\n# files, a count of event lines, and a sum. That is deliberate -- `peak` and `peak_at`\n# are the order-sensitive half and they are checked by the withheld verifier, so an\n# agent that globs `logs/*` and accumulates passes this check and only this check.\nroot = pathlib.Path(\"logs\")\nif not root.is_dir():\n    sys.exit(\"logs/ is missing\")\n\nEVENT = re.compile(r\"^\\d\\d:\\d\\d:\\d\\d\\s+id=(EV-\\d+)\\s+op=(\\w+)\\s+delta=([+-]\\d+)\\s*$\")\nsegments = sorted(p for p in root.iterdir() if p.is_file() and not p.name.startswith(\".\"))\nevents = 0\nnet = 0\nfor path in segments:\n    for raw in path.read_text(encoding=\"utf-8\", errors=\"replace\").splitlines():\n        line = raw.strip()\n        if not line or line.startswith(\"#\"):\n            continue\n        match = EVENT.match(line)\n        if match is None:\n            sys.exit(f\"{path}: unreadable event line {line!r}\")\n        events += 1\n        net += int(match.group(3))\n\ntruth = {\"segments\": len(segments), \"events\": events, \"net\": net}\n\nreport = pathlib.Path(\"report.txt\")\nif not report.is_file():\n    sys.exit(\"report.txt was never written\")\n\nfields = {}\nfor raw in report.read_text(encoding=\"utf-8\", errors=\"replace\").splitlines():\n    line = raw.strip()\n    if not line or line.startswith(\"#\") or \"=\" not in line:\n        continue\n    key, _, value = line.partition(\"=\")\n    fields.setdefault(key.strip().lower(), value.strip())\n\nproblems = []\nfor key, want in truth.items():\n    got = fields.get(key)\n    if got is None:\n        problems.append(f\"{key}: not reported\")\n        continue\n    # Tolerant on presentation (\"440\", \"440 events\", \"1,124\"), exact on the number: this\n    # grades whether the value was measured, not how it was typeset.\n    match = re.search(r\"[+-]?\\d[\\d,_]*\", got)\n    if match is None:\n        problems.append(f\"{key}: {got!r} contains no number\")\n        continue\n    number = int(match.group(0).replace(\",\", \"\").replace(\"_\", \"\").lstrip(\"+\"))\n    if number != want:\n        problems.append(f\"{key}: reported {number}, the segments say {want}\")\n\n# `peak` and `peak_at` must be present and well-formed -- an answer that omits them is\n# incomplete, not merely wrong -- but their VALUES are not judged here.\nif not re.search(r\"\\d\", fields.get(\"peak\", \"\")):\n    problems.append(\"peak: not reported\")\nif not re.search(r\"\\d\", fields.get(\"peak_at\", \"\")):\n    problems.append(\"peak_at: not reported\")\n\nif problems:\n    sys.exit(\"; \".join(problems))\nPYEOF\n"
+      },
+      "task_id": "tc-log-rotation-order",
+      "why_no_thresholds": "the run that produces challenges is the run that measures the token spread, so a threshold baked in here would freeze a guess at the moment the data to replace it arrives. hermes.acceptance reads the spread from baseline.token_spread instead.",
+      "withheld": {
+        "body_included": false,
+        "dropped_task_keys": [],
+        "hidden_verify_commitment": "sha256:4f6abbc0369eb89710442b65e809f3f5cc1dc227890b9ff954d8f432546681d3"
+      }
+    },
+    "deadline": 1786456105.861338,
+    "frozen": {
+      "deadline_used": 1786452506.1053426,
+      "early": true,
+      "frozen_at": 1786452506.1053426,
+      "overran_s": 0.0,
+      "reason": "e2e re-run with the dialect and trajectory fixes",
+      "scheduled_deadline": 1786456105.861338,
+      "seal_digest": "sha256:04587836638557a7a36c0c99e5c05c09ac529a31ba6f6edb645bfcacd6079f04",
+      "sealed_submissions": 1
+    },
+    "no_score_before_freeze": true,
+    "opened_at": 1786452505.861338,
+    "replacements": 0,
+    "reveal_available": true,
+    "round_id": "r2",
+    "schema_version": "spark-round-v1",
+    "scope_enforced": false,
+    "state": "settled",
+    "submissions": 1,
+    "task_id": "tc-log-rotation-order",
+    "verdicts": [
+      {
+        "miner": "ai-hpc",
+        "notes": "candidate passed 2 of 10; the withheld check must pass on every attempt before efficiency is considered at all",
+        "passed": false,
+        "submission_digest": "sha256:73d17bb809b38e3320f092561eca50751267ab441e608afd0e302cc359e6a9e1"
+      }
+    ],
+    "withheld_check_committed": true
+  },
+  "schema_version": "spark-board-v1",
+  "submissions": [
+    {
+      "bundle_sha256": "sha256:d1420938f6cab09f26227a54bc85df671e1994497e1dcc49c7fab024a6b63185",
+      "bytes": 1804,
+      "files": 2,
+      "miner_id": "ai-hpc",
+      "received_at": 1786452505.925896,
+      "round_id": "r2",
+      "status": "pending",
+      "submission_id": "5442b034ab96726e"
+    }
+  ]
+}
