@@ -1,13 +1,5 @@
 ![Spark-Hermes-Glimmer-30B banner](docs/images/spark-hermes-glimmer.png)
 
-<sub>The RTX 5090 in the artwork is the **distribution** target, not the training host: training
-and scoring happen in bf16 on an RTX PRO 6000 Blackwell Server Edition (96 GB), and what ships is a
-GGUF quantization that fits a 32 GB card. See [Two tiers](#two-tiers-bf16-to-train-gguf-to-ship).
-One claim in the artwork is not one this project makes: "lower latency" is not something a miner is
-scored on — wall time is reported and never gates the crown, for the reason given under
-[Pareto frontier](#pareto-frontier). The other two, higher success rate and fewer tokens, are
-exactly what the acceptance gate measures.</sub>
-
 # SPARK-HERMES
 
 ### Verified agent intelligence, continuously improved by SN74 Gittensor
@@ -651,9 +643,15 @@ unmeasurable, not because the corpus is clean.
 |---|---|
 | **Spark-Hermes** (this repo) | challenge generation, rollout competition, corpus construction and training |
 | [**SparkProof**](https://github.com/gittensor-model-hub/SparkProof) | verified Triton training corpus, and its export/dedupe primitives |
-| [**SparkInfer**](https://github.com/gittensor-ai-lab/sparkinfer) | canonical fast inference for the frozen model |
+| [**SparkInfer**](https://github.com/gittensor-ai-lab/sparkinfer) | canonical fast inference for the frozen model — where the latency guarantee lives |
 | **Hermes Agent** | agent runtime, tools, sessions and execution semantics |
 | **SN74 Gittensor** | open competition and rewards for verified marginal improvement |
+
+Latency is a property of the runtime, and SparkInfer is what delivers it. It is deliberately not a
+competition axis: wall time is reported on every episode and never gates the crown, because the
+same strategy on a different card — or on the same card with confidential computing enabled, which
+encrypts host-device traffic — produces a different number. Rewarding it would pay for hardware.
+See [wall time is reported and never gates the crown](#wall-time-is-reported-and-never-gates-the-crown).
 
 ---
 
