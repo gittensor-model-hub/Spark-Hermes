@@ -68,15 +68,21 @@ class Scorecard:
             "round_id": self.round_id,
             "miner_id": self.miner_id,
             "task_id": self.task_id,
+            # `tool_calls` travels with the tokens because the crown compares both. Without it
+            # `validator.crown` read zeros, and `dominates`' tool-call guard -- the one stopping a
+            # challenger from buying a token win by collapsing thirty operations into one helper
+            # call -- compared 0 against 0 and passed every time. A guard that cannot fire.
             "candidate": {
                 "verified_passes": self.candidate.passes,
                 "attempts": self.candidate.attempts,
                 "tokens": list(self.candidate.tokens),
+                "tool_calls": list(self.candidate.tool_calls),
             },
             "baseline": {
                 "verified_passes": self.baseline.passes,
                 "attempts": self.baseline.attempts,
                 "tokens": list(self.baseline.tokens),
+                "tool_calls": list(self.baseline.tool_calls),
             },
             "decision": self.decision.to_record(),
             "reduction_interval": list(self.interval),

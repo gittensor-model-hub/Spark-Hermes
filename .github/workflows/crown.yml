@@ -1,0 +1,75 @@
+name: crown
+
+# Move the crown label, hourly.
+#
+# Not on merge. Recomputing on every merge churns the label during a burst of submissions and each
+# move notifies two miners; hourly is slow enough that the label means something and fast enough
+# that a new king is not waiting a day. Keeping it off the merge path also means a mistake here
+# mislabels a pull request rather than blocking submissions.
+#
+# :23 rather than :00 -- the hour mark is where every scheduled job on the platform lands, and this
+# one has no reason to queue behind them.
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Enough to move a label and nothing that can advance a ref. The crown is an annotation on a
+  # pull request; it must not be able to merge one.
+  pull-requests: write
+
+concurrency:
+  # One at a time. Two overlapping runs would each compute standings against the other's
+  # half-applied labels, and the loser's removal could land after the winner's addition.
+  group: crown
+  cancel-in-progress: false
+
+jobs:
+  crown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --extra dev --frozen
+
+      - name: Compute the standings
+        id: standings
+        run: uv run python -m validator.crown standings --out /tmp/crowns.json | tee /tmp/standings.txt
+
+      - name: Work out which labels to move
+        id: labels
+        run: uv run python -m validator.crown labels --out /tmp/crowns.json > /tmp/actions.txt 2>/tmp/unlabelled.txt || true
+
+      - name: Move the labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Removals before additions: a crown only ever added is a crown several people hold at
+          # once, and the label is supposed to mean one.
+          grep '^remove ' /tmp/actions.txt | while read -r _ label pr _; do
+            gh pr edit "${pr#\#}" --remove-label "${label}" || true
+          done
+          grep '^add ' /tmp/actions.txt | while read -r _ label pr _; do
+            gh pr edit "${pr#\#}" --add-label "${label}" || true
+          done
+          {
+            echo '### Crown standings'
+            echo
+            echo '```'
+            cat /tmp/standings.txt
+            echo '```'
+            if [ -s /tmp/unlabelled.txt ]; then
+              echo
+              echo 'Not labelled:'
+              echo '```'
+              cat /tmp/unlabelled.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
