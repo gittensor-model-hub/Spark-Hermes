@@ -91,6 +91,33 @@ def withheld_path(task_id: str, root: Path) -> Path:
     return root / f"{task_id}.sh"
 
 
+def solution_path(task_id: str, root: Path) -> Path:
+    """Where a task's reference solution lives, beside its withheld check."""
+    return root / f"{task_id}.solution.sh"
+
+
+def solution_for(task_id: str, *, root: Path | None = None) -> str | None:
+    """A known-good solution for one task, from the private tree. `None` when there is none.
+
+    In the private tree and not in the task file, because a reference solution is the answer:
+    publishing it beside a public prompt ends the task. It is not part of the graded contract
+    either -- nothing scores against it and no commitment covers it -- so unlike `hidden_verify`
+    it is read straight off disk rather than checked against a digest.
+
+    What it is for: `suitecheck` asserts that a verifier FAILS an unsolved workspace, which is the
+    damaging direction, and its own docstring notes it cannot assert the other one without a
+    solution. That gap has a cost on the record. `verify-speedup-claim` ended a `&&` chain with an
+    interpreter lookup, so on a clean workspace the earlier `test` failed first and the verifier
+    exited 1 -- passing the fresh-workspace assertion while being incapable of ever passing. It
+    scored 0/10 on the first real baseline and read as a capability gap in the model.
+    """
+    resolved = withheld_root(root)
+    if resolved is None:
+        return None
+    path = solution_path(task_id, resolved)
+    return path.read_text(encoding="utf-8") if path.is_file() else None
+
+
 def overlay(tasks: Iterable[Task], *, root: Path | None = None, salt: str = "") -> list[Task]:
     """Attach each task's withheld check from the private tree.
 
@@ -289,6 +316,8 @@ __all__ = [
     "WithheldError",
     "WithheldStatus",
     "main",
+    "solution_for",
+    "solution_path",
     "status",
     "overlay",
     "unscorable",

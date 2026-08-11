@@ -117,3 +117,113 @@ def test_every_shipped_verifier_can_run_on_this_machine():
         if absent:
             broken[task.task_id] = absent
     assert not broken, f"verifiers invoking absent commands: {broken}"
+
+
+# --- the other direction: a verifier that can never pass -------------------------------------------
+#
+# `suitecheck` asserted that a verifier FAILS an unsolved workspace, which is the damaging
+# direction, and its docstring said the opposite one needed a known-good solution the tasks did not
+# ship. A grader that can never pass ALSO fails an unsolved workspace, so it satisfied the whole
+# gate. That is not hypothetical: `verify-speedup-claim` ended a `&&` chain with an interpreter
+# lookup, exited 1 on a clean workspace, and exited 127 the moment an agent created the file it
+# looked for. Ten failures on a task the model had solved.
+
+
+def _task_with(verify, *, hidden="", setup="", timeout_s=30):
+    from hermesbench.tasks import Task
+
+    record = {
+        "task_id": "t-solution",
+        "prompt": "do it",
+        "verify": verify,
+        "tools": ["terminal"],
+        "setup": setup,
+        "timeout_s": timeout_s,
+    }
+    if hidden:
+        record["hidden_verify"] = hidden
+    return Task.from_record(record)
+
+
+def test_the_short_circuit_grader_is_caught(tmp_path, monkeypatch):
+    """The exact shape that reached a live baseline, reconstructed. `test -f` fails first on a
+    clean workspace so the whole command exits 1 -- the fresh-workspace assertion passes -- and the
+    interpreter lookup behind the `&&` exits 127 once the file exists."""
+    from hermesbench.suitecheck import check_solution
+
+    monkeypatch.setenv("SPARKDISTILL_WITHHELD_ROOT", str(tmp_path / "private"))
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "t-solution.solution.sh").write_text("touch winner.txt\n", encoding="utf-8")
+
+    ungradeable = _task_with("test -f winner.txt && definitely-not-a-real-interpreter winner.txt")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    problems = check_solution(ungradeable, workspace)
+    assert problems and "published verifier FAILS the reference solution" in problems[0]
+
+
+def test_a_working_grader_passes_its_solution(tmp_path, monkeypatch):
+    from hermesbench.suitecheck import check_solution
+
+    monkeypatch.setenv("SPARKDISTILL_WITHHELD_ROOT", str(tmp_path / "private"))
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "t-solution.solution.sh").write_text("echo 6 > report.txt\n", encoding="utf-8")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert check_solution(_task_with('test "$(cat report.txt)" = "6"'), workspace) == []
+
+
+def test_a_withheld_check_that_fails_a_correct_solution_is_caught(tmp_path, monkeypatch):
+    """The worst version. Every correct episode would be recorded as overfit -- passed the
+    published check, failed the withheld one -- which is the signal that decides the competition."""
+    from hermesbench.suitecheck import check_solution
+
+    monkeypatch.setenv("SPARKDISTILL_WITHHELD_ROOT", str(tmp_path / "private"))
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "t-solution.solution.sh").write_text("echo 6 > report.txt\n", encoding="utf-8")
+
+    task = _task_with('test "$(cat report.txt)" = "6"', hidden="test -f a-file-no-solution-writes")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    problems = check_solution(task, workspace)
+    assert problems and "withheld verifier FAILS the reference solution" in problems[0]
+    assert "recorded as overfit" in problems[0]
+
+
+def test_a_broken_reference_solution_is_reported_as_such(tmp_path, monkeypatch):
+    """Not as a broken verifier. The solution is the only thing asserting these graders can pass,
+    so a solution that does not run leaves that unasserted while looking asserted."""
+    from hermesbench.suitecheck import check_solution
+
+    monkeypatch.setenv("SPARKDISTILL_WITHHELD_ROOT", str(tmp_path / "private"))
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "t-solution.solution.sh").write_text("exit 3\n", encoding="utf-8")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    problems = check_solution(_task_with("true"), workspace)
+    assert problems and "reference solution does not run" in problems[0]
+
+
+def test_no_solution_is_not_a_problem_but_is_not_silence_either(tmp_path, monkeypatch):
+    """Absence cannot be a failure -- it would fail the whole suite the day this landed. It is
+    counted and printed instead, and the per-task marker is `?` rather than `ok`."""
+    from hermesbench.suitecheck import check_solution
+    from hermesbench.withheld import solution_for
+
+    monkeypatch.setenv("SPARKDISTILL_WITHHELD_ROOT", str(tmp_path / "private"))
+    (tmp_path / "private").mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert check_solution(_task_with("true"), workspace) == []
+    assert solution_for("t-solution") is None
+
+
+def test_a_public_checkout_has_no_solutions_and_says_nothing_false(monkeypatch):
+    """With no private tree there is nothing to prove either way, and the report must not imply
+    the verifiers were shown to pass."""
+    from hermesbench.withheld import solution_for
+
+    monkeypatch.delenv("SPARKDISTILL_WITHHELD_ROOT", raising=False)
+    assert solution_for("migrate-and-keep-green") is None

@@ -31,8 +31,14 @@ from pathlib import Path
 
 from hermesbench import BENCH_VERSION
 from hermesbench.tasks import Task, load_suite
-from hermesbench.verify import setup_task, verify_hidden, verify_task
-from hermesbench.withheld import WITHHELD_ROOT_ENV, WITHHELD_SALT_ENV, overlay, unscorable
+from hermesbench.verify import resolve_env, run_command, setup_task, verify_hidden, verify_task
+from hermesbench.withheld import (
+    WITHHELD_ROOT_ENV,
+    WITHHELD_SALT_ENV,
+    overlay,
+    solution_for,
+    unscorable,
+)
 
 # Interpreters a grader might invoke. Only these are reported -- see `missing_commands` for why
 # the general "find every command" version was abandoned. `python` is the one that has actually
@@ -143,6 +149,56 @@ def check_task(task: Task, root: Path) -> list[str]:
                 "withheld verifier passes an untouched workspace; it is measuring nothing, and "
                 "overfit_rate computed from it would be meaningless"
             )
+
+    problems.extend(check_solution(task, workspace))
+    return problems
+
+
+def check_solution(task: Task, workspace: Path) -> list[str]:
+    """The other direction: a verifier that can never pass.
+
+    Asserted last and in the same workspace, which is already set up and unsolved, so the
+    fresh-workspace assertions above have already been made against it.
+
+    This is the assertion the module docstring said it could not make. It closes the class that
+    reached a live baseline: a grader whose interpreter lookup sat behind a `&&`, so it exited 1 on
+    a clean workspace -- satisfying "must fail unsolved" -- and exited 127 the moment an agent
+    created the file it was looking for. Ten failures on a task the model had solved.
+
+    A task with no solution in the private tree is not a problem here; it is unproven, and
+    `main` counts those separately. Making absence a failure would fail the whole suite on the day
+    this landed and the honest report is the one that says how many are still unproven.
+    """
+    solution = solution_for(task.task_id)
+    if solution is None:
+        return []
+
+    applied = run_command(
+        solution, cwd=workspace, timeout_s=task.timeout_s, env=resolve_env(task.env, workspace=workspace)
+    )
+    if not applied.passed:
+        return [
+            f"the reference solution does not run: {(applied.stderr or applied.stdout)[:200]}. It is "
+            "the only thing asserting these verifiers can pass at all, so a broken one leaves that "
+            "unasserted while looking asserted."
+        ]
+
+    problems = []
+    public = verify_task(task, workspace)
+    if not public.passed:
+        problems.append(
+            f"published verifier FAILS the reference solution: {(public.stderr or public.stdout)[:200]}. "
+            "It can never pass, so every episode on this task scores 0 and reads as a capability gap "
+            "in the model rather than a broken grader."
+        )
+    if task.has_hidden_tests:
+        hidden = verify_hidden(task, workspace)
+        if hidden is not None and not hidden.passed:
+            problems.append(
+                f"withheld verifier FAILS the reference solution: {(hidden.stderr or hidden.stdout)[:200]}. "
+                "Every correct episode would be recorded as overfit -- passed the published check, failed "
+                "the withheld one -- which is the signal that decides the competition."
+            )
     return problems
 
 
@@ -162,9 +218,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for task in tasks:
             problems = check_task(task, root)
-            marker = "FAIL" if problems else "ok  "
+            proven = solution_for(task.task_id) is not None
+            marker = "FAIL" if problems else ("ok  " if proven else "?   ")
             hidden = " [withheld]" if task.has_hidden_tests else ""
-            print(f"{marker} {task.task_id}{hidden}")
+            # `?` rather than `ok`: the fresh-workspace assertions passed and nothing has shown
+            # these verifiers can pass at all. That is most of the check, not all of it.
+            print(f"{marker} {task.task_id}{hidden}{'' if proven else ' [unproven: no reference solution]'}")
             for problem in problems:
                 print(f"       {problem}")
             failures += bool(problems)
@@ -172,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)
 
+    unproven = [t.task_id for t in tasks if solution_for(t.task_id) is None]
     runnable = sum(1 for t in tasks if t.has_hidden_tests)
     declared = sum(1 for t in tasks if t.declares_hidden_tests)
     missing = unscorable(tasks)
@@ -180,6 +240,17 @@ def main(argv: list[str] | None = None) -> int:
         f"{failures} with problems",
         file=sys.stderr,
     )
+    if unproven:
+        # Counted, because "every verifier fails an unsolved workspace" is the damaging half of
+        # the property and reads as the whole of it. A verifier that can never pass also fails an
+        # unsolved workspace, which is how one reached a live baseline and scored 0/10 for ten
+        # episodes the model had actually solved.
+        print(
+            f"note: {len(unproven)} task(s) have no reference solution in the private tree, so nothing "
+            f"asserts their verifiers can PASS -- only that they fail an unsolved workspace, which a "
+            f"grader that can never pass also does: {', '.join(unproven[:4])}" + (" ..." if len(unproven) > 4 else ""),
+            file=sys.stderr,
+        )
     if missing:
         # The distinction the split exists for. "0 with withheld checks" and "16 declared,
         # none available" are the same number if you only ask `has_hidden_tests`, and the
