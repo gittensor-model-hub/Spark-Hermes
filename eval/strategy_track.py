@@ -1,50 +1,43 @@
-"""Accepting a miner's surface by pull request, so the validator can run it.
+"""Accepting a miner's commitment: a digest in a pull request, a bundle already held privately.
 
-    strategy_track:ACCEPT   the surface may merge; the validator will run it
-    strategy_track:REJECT   with every reason, not the first
+    strategy:ACCEPT   the commitment stands; the validator will run that bundle
+    strategy:REJECT   with every reason, not the first
 
-At the first stage the miner submits their surface -- `SOUL.md`, `skills/*/SKILL.md`,
-`skills/*/references/*.md` -- and the **validator runs it**: pinned model, pinned environment,
-pinned runtime, its own hardware, its own withheld verifiers. Nothing about the execution is taken
-on the miner's word, because the miner does not perform it.
+A miner uploads their surface to the validator API and opens a pull request appending one line to
+`datasets/strategies.jsonl` naming the digest of what they uploaded. This decides whether that line
+may merge.
 
-## Why this is a different record from the rollout track
+## This replaced a gate that expected the files themselves
 
-`eval.rollout_track.Submission` requires `hf_url`, `hf_revision`, `export_digests` and `rows`: it
-accepts *rollouts a miner generated and published*, and its whole apparatus exists to prove which
-hardware produced files the validator never watched being made. A surface submission has none of
-those and needs none of them. Reusing that record would have meant inventing an `hf_url` for a
-submission that has no export -- a field that validates and means nothing.
+An earlier version of this module took the surface *in the pull request* and checked the committed
+files against the contract. That made the surface public, which destroys the thing a miner is
+competing with. The bundle is private now and the pull request carries only its digest, so every
+file-shaped check here has moved to `validator.intake`, which validates a bundle before storing it.
 
-The two tracks answer different questions. There, "did this data come from the hardware you
-claim". Here, "may the validator run these files", which it then does.
+What is left is the part that only a public, timestamped, attributable record can do: bind a miner
+to a specific bundle before anything runs.
 
-## What this makes verifiable that miner-side generation cannot
+## The attack this exists to stop
 
-Because the validator executes the surface, three things stop being promises:
+Receipts are public. Every digest the validator has accepted is visible, including other people's.
+So the obvious move is to open a pull request naming someone else's digest and have their work
+evaluated under your name.
 
-**The files are inspectable.** They are in the pull request. `hermes.miner_contract` is enforced
-against what was actually committed, and it is prose-only -- so the same property that lets the
-rollout track auto-merge data holds here: a `.md` surface cannot carry code.
+Three identities therefore have to agree: the pull request's author, the `miner_id` on the line,
+and the `miner_id` on the receipt that digest belongs to. Any disagreement is a rejection.
+`check_author` is the only check here that cannot be inferred from the repository alone -- it needs
+the author GitHub reports -- which is why it takes it as an argument rather than reading it from
+the record, where a submitter could write anything.
 
-**The model, environment and runtime are the pinned ones** because the validator supplies them.
-There is no guest image to measure and no attestation gap: `check_tdx_measurement` returns `None`
-for want of a pinned MRTD, and at this stage nothing depends on it.
+## A commitment names a bundle that already exists
 
-**The verifiers stay withheld.** The miner never holds the withheld half, so `overfit_rate` means
-what it says.
-
-## The security spine, unchanged
-
-The workflow checks out the trusted base and fetches the pull request head as a git object it
-never executes. Reading a `.md` file is not executing it. The gate below reads the committed
-surface, digests it, and checks the digests against what the registry line claims -- so a
-submission cannot cite one surface and ship another.
+The digest must match a receipt the validator published. A pull request naming a digest nothing was
+ever uploaded for is not a commitment; it is a claim on a bundle that may be produced later to fit
+whatever result would have been convenient.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,16 +46,14 @@ from typing import Any
 from eval.rollout_track import check_scope
 
 STRATEGY_REGISTRY = Path("datasets/strategies.jsonl")
-SUBMISSIONS_ROOT = Path("submissions")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 REQUIRED_FIELDS = (
     "schema_version",
     "round_id",
     "miner_id",
-    "task_ids",
-    "surface_digests",
+    "bundle_sha256",
 )
 
 REJECT = "strategy:REJECT"
@@ -70,182 +61,117 @@ ACCEPT = "strategy:ACCEPT"
 
 
 class StrategyError(ValueError):
-    """A surface submission is malformed."""
+    """A commitment is malformed."""
 
 
 @dataclass(frozen=True)
-class StrategySubmission:
-    """One miner's surface, offered for one round."""
+class Commitment:
+    """One line: this miner, this round, this bundle."""
 
     round_id: str
     miner_id: str
-    task_ids: tuple[str, ...]
-    surface_digests: dict[str, str]
+    bundle_sha256: str
+    task_ids: tuple[str, ...] = ()
     schema_version: int = SCHEMA_VERSION
     notes: str = field(default="")
-
-    @property
-    def surface_dir(self) -> Path:
-        """Where the files live. Derived, never taken from the record.
-
-        A path read out of the submission is a path the submitter chose, and the one thing this
-        gate must not let a miner choose is which files the validator is about to load.
-        """
-        return SUBMISSIONS_ROOT / self.round_id / self.miner_id
 
     def to_record(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "round_id": self.round_id,
             "miner_id": self.miner_id,
+            "bundle_sha256": self.bundle_sha256,
             "task_ids": sorted(self.task_ids),
-            "surface_digests": dict(sorted(self.surface_digests.items())),
             "notes": self.notes,
         }
 
     @classmethod
-    def from_record(cls, record: dict[str, Any]) -> StrategySubmission:
+    def from_record(cls, record: dict[str, Any]) -> Commitment:
         missing = [f for f in REQUIRED_FIELDS if not record.get(f)]
         if missing:
-            raise StrategyError(f"submission is missing {', '.join(missing)}")
-        digests = record["surface_digests"]
-        if not isinstance(digests, dict):
-            raise StrategyError("surface_digests must be a mapping of path to sha256")
+            raise StrategyError(f"commitment is missing {', '.join(missing)}")
         return cls(
             round_id=str(record["round_id"]),
             miner_id=str(record["miner_id"]),
-            task_ids=tuple(str(t) for t in record["task_ids"]),
-            surface_digests={str(k): str(v) for k, v in digests.items()},
+            bundle_sha256=str(record["bundle_sha256"]),
+            task_ids=tuple(str(t) for t in record.get("task_ids") or ()),
             schema_version=int(record.get("schema_version") or SCHEMA_VERSION),
             notes=str(record.get("notes") or ""),
         )
 
 
-def digest_file(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def digest_surface(root: Path) -> dict[str, str]:
-    """Digest every file in a surface, as posix paths relative to its root.
-
-    Symlinks are digested as links rather than followed. Following one would digest whatever it
-    points at, so the recorded digest would describe a file that is not in the submission -- and
-    the contract check refuses symlinks anyway, so this only has to avoid reading them.
-    """
-    digests: dict[str, str] = {}
-    for path in sorted(root.rglob("*")):
-        rel = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            digests[rel] = "symlink:" + hashlib.sha256(str(path.readlink()).encode("utf-8")).hexdigest()
-        elif path.is_file():
-            digests[rel] = digest_file(path)
-    return digests
-
-
 def check_shape(record: dict[str, Any]) -> list[str]:
     try:
-        submission = StrategySubmission.from_record(record)
+        commitment = Commitment.from_record(record)
     except StrategyError as exc:
         return [str(exc)]
     issues: list[str] = []
-    if submission.schema_version != SCHEMA_VERSION:
-        issues.append(f"schema_version {submission.schema_version} is not {SCHEMA_VERSION}")
-    if "/" in submission.miner_id or submission.miner_id in (".", ".."):
-        # The miner id becomes a directory component. `..` would place the surface outside the
-        # submissions root, and the validator loads whatever is at that path.
-        issues.append(f"miner_id {submission.miner_id!r} must be a single path segment")
-    if "/" in submission.round_id or submission.round_id in (".", ".."):
-        issues.append(f"round_id {submission.round_id!r} must be a single path segment")
-    for path, digest in submission.surface_digests.items():
-        if not digest.startswith(("sha256:", "symlink:")):
-            issues.append(f"{path}: digest {digest!r} is not a sha256")
-    return issues
-
-
-def check_surface_present(submission: StrategySubmission, head_root: Path) -> list[str]:
-    """Whether the committed files are exactly the ones the record claims, byte for byte.
-
-    Both directions matter and they catch different things. A claimed file that is absent is a
-    submission citing work it did not ship. A present file the record does not claim is worse: it
-    would be loaded by the validator without ever having been digested, so the registry line
-    would be an incomplete description of what actually ran.
-    """
-    root = head_root / submission.surface_dir
-    if not root.is_dir():
-        return [f"{submission.surface_dir.as_posix()} is not in this pull request; there is nothing to run"]
-
-    found = digest_surface(root)
-    issues: list[str] = []
-    for path, claimed in sorted(submission.surface_digests.items()):
-        actual = found.get(path)
-        if actual is None:
-            issues.append(f"{path}: claimed in the registry line and not present in the submission")
-        elif actual != claimed:
-            issues.append(f"{path}: committed file digests {actual}, the registry line claims {claimed}")
-    for path in sorted(set(found) - set(submission.surface_digests)):
+    if commitment.schema_version != SCHEMA_VERSION:
         issues.append(
-            f"{path}: present in the submission and not claimed in the registry line. The validator "
-            "loads the directory, so an unclaimed file would run undeclared."
+            f"schema_version {commitment.schema_version} is not {SCHEMA_VERSION}. Version 1 carried the "
+            "surface files themselves; the surface is private now and the line carries a digest."
         )
+    if not commitment.bundle_sha256.startswith("sha256:") or len(commitment.bundle_sha256) != 71:
+        issues.append(f"bundle_sha256 {commitment.bundle_sha256!r} is not a sha256 digest")
     return issues
 
 
-def check_contract(submission: StrategySubmission, head_root: Path) -> list[str]:
-    """Whether the committed surface is one the pinned runtime may load.
+def check_author(commitment: Commitment, pull_request_author: str | None) -> list[str]:
+    """Whether the person opening the pull request is the miner claiming the bundle.
 
-    Load-bearing in a way it is not on the rollout track: the validator is about to run these
-    files. `hermes.miner_contract` is prose-only, which is the same property that lets a data-only
-    registry line auto-merge -- a `.md` surface cannot carry code.
+    Taken as an argument rather than read from the record: the record is written by the submitter,
+    so a `miner_id` field alone proves nothing about who opened the pull request. GitHub is the
+    only party that can say, and this is the one check that depends on it.
+
+    `None` means the caller could not determine an author, which is reported rather than passed.
+    An unauthenticated commitment is exactly the case this check exists for.
     """
-    from hermes.miner_contract import load as load_contract
-
-    root = head_root / submission.surface_dir
-    if not root.is_dir():
-        return []
-
-    paths, links = [], []
-    for path in sorted(root.rglob("*")):
-        rel = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            links.append(rel)
-        elif path.is_file():
-            paths.append(rel)
-
-    issues = [
-        f"{link}: is a symlink. The contract matches names, so a link called `notes.md` satisfies "
-        "every rule while resolving to anything the validator's filesystem holds."
-        for link in links
-    ]
-    if not paths and not links:
-        issues.append(
-            f"{submission.surface_dir.as_posix()} contains no files. An empty surface runs as the "
-            "unmodified baseline while occupying a submission slot."
-        )
-    issues.extend(str(v) for v in load_contract().check(paths + links))
-    return issues
+    if pull_request_author is None:
+        return [
+            "no pull request author was supplied, so this commitment cannot be attributed. The "
+            "receipt is public, so an unattributed line could name any bundle the validator holds."
+        ]
+    if pull_request_author != commitment.miner_id:
+        return [
+            f"the pull request is opened by {pull_request_author!r} and the line claims "
+            f"{commitment.miner_id!r}. A miner commits to their own bundle."
+        ]
+    return []
 
 
-def allowed_paths(submission: StrategySubmission) -> tuple[str, ...]:
-    """The only paths this submission may change: the registry, and its own surface directory."""
-    return (STRATEGY_REGISTRY.as_posix(), submission.surface_dir.as_posix() + "/")
+def check_commitment(commitment: Commitment, receipts: list[Any]) -> list[str]:
+    """Whether the digest names a bundle this validator actually holds, uploaded by this miner.
 
-
-def check_paths(submission: StrategySubmission, changed_paths: list[str] | None) -> list[str]:
-    """A surface PR touches the registry and one directory, and nothing else.
-
-    Scoped to *this* submission's directory rather than to `submissions/` as a whole, because a PR
-    that edits another miner's surface is not a submission, it is an attack on theirs.
+    Two failures with one shape and different meanings. A digest nothing was uploaded for is a
+    claim on a bundle that could be produced afterwards to fit whatever result would have been
+    convenient. A digest belonging to *someone else* is an attempt to have their work scored under
+    your name, and receipts being public is what makes that worth defending against.
     """
+    from validator.intake import receipt_for_digest
+
+    receipt = receipt_for_digest(receipts, round_id=commitment.round_id, digest=commitment.bundle_sha256)
+    if receipt is None:
+        return [
+            f"no bundle with digest {commitment.bundle_sha256[:23]}... was uploaded for round "
+            f"{commitment.round_id}. A commitment names something the validator already holds; a "
+            "digest with nothing behind it is a claim on a bundle that could be written later."
+        ]
+    if receipt.miner_id != commitment.miner_id:
+        return [
+            f"digest {commitment.bundle_sha256[:23]}... was uploaded by {receipt.miner_id!r}, and this "
+            f"line claims it for {commitment.miner_id!r}. Receipts are public; a bundle is not."
+        ]
+    return []
+
+
+def check_paths(changed_paths: list[str] | None) -> list[str]:
+    """A commitment PR touches one file. Data-only, so auto-merge can never carry code."""
     if changed_paths is None:
         return []
     registry = STRATEGY_REGISTRY.as_posix()
-    own = submission.surface_dir.as_posix() + "/"
-    unexpected = sorted({p for p in changed_paths if p != registry and not p.startswith(own)})
+    unexpected = sorted({p for p in changed_paths if p != registry})
     if unexpected:
-        return [
-            f"a strategy PR may only change {registry} and {own}; unexpected paths: {unexpected!r}. "
-            "Editing another miner's surface is not a submission."
-        ]
+        return [f"a strategy PR may only change {registry}; unexpected paths: {unexpected!r}"]
     return []
 
 
@@ -273,12 +199,12 @@ def added_lines(base_text: str, head_text: str) -> list[dict[str, Any]]:
     return out
 
 
-def check_one_submission_per_round(submission: StrategySubmission, base_text: str) -> list[str]:
-    """One standing surface per miner per round.
+def check_one_commitment_per_round(commitment: Commitment, base_text: str) -> list[str]:
+    """One standing commitment per miner per round.
 
-    A second line for the same pair is a resubmission, and the round window is what decides
-    whether a replacement is allowed -- not this gate. Refusing here keeps the registry a record
-    of what stood rather than a log of what was tried.
+    A second line is a miner changing which bundle they are judged on after the first was public.
+    Uploading twice is allowed and cheap -- the digest decides which is evaluated -- so the moment
+    that choice becomes binding has to be a single, dated, public one.
     """
     for line in base_text.splitlines():
         line = line.strip()
@@ -289,12 +215,12 @@ def check_one_submission_per_round(submission: StrategySubmission, base_text: st
         except json.JSONDecodeError:
             continue
         if (
-            str(existing.get("round_id") or "") == submission.round_id
-            and str(existing.get("miner_id") or "") == submission.miner_id
+            str(existing.get("round_id") or "") == commitment.round_id
+            and str(existing.get("miner_id") or "") == commitment.miner_id
         ):
             return [
-                f"{submission.miner_id!r} already has a surface standing in round {submission.round_id}. "
-                "Replacements go through the round window, which records what replaced what."
+                f"{commitment.miner_id!r} already has a commitment standing in round "
+                f"{commitment.round_id}. Which bundle you are judged on is fixed once it is public."
             ]
     return []
 
@@ -303,32 +229,31 @@ def gate(
     *,
     record: dict[str, Any],
     round_record: dict[str, Any],
-    head_root: Path,
+    receipts: list[Any],
     base_text: str,
     head_text: str,
     changed_paths: list[str] | None = None,
+    pull_request_author: str | None = None,
 ) -> list[str]:
-    """Every reason this surface may not merge. Empty means ACCEPT.
+    """Every reason this commitment may not merge. Empty means ACCEPT.
 
-    All of them, not the first: a miner who learns one problem per pull request stops opening
-    them, and the reasons cost nothing to collect.
+    All of them, not the first: a miner who learns one problem per pull request stops opening them.
 
-    Shape is checked before anything else because every later check reads fields off the record,
-    and a check that runs on a malformed record reports the malformation as its own kind of
-    failure.
+    Shape is checked before anything else because every later check reads fields off the record, and
+    a check running on a malformed record reports the malformation as its own kind of failure.
     """
     shape = check_shape(record)
     if shape:
         return shape
 
-    submission = StrategySubmission.from_record(record)
+    commitment = Commitment.from_record(record)
     return [
-        *check_paths(submission, changed_paths),
+        *check_paths(changed_paths),
         *check_append_only(base_text, head_text),
-        *check_one_submission_per_round(submission, base_text),
+        *check_one_commitment_per_round(commitment, base_text),
+        *check_author(commitment, pull_request_author),
         *check_scope(record, round_record),
-        *check_surface_present(submission, head_root),
-        *check_contract(submission, head_root),
+        *check_commitment(commitment, receipts),
     ]
 
 
@@ -338,18 +263,14 @@ __all__ = [
     "REQUIRED_FIELDS",
     "SCHEMA_VERSION",
     "STRATEGY_REGISTRY",
-    "SUBMISSIONS_ROOT",
+    "Commitment",
     "StrategyError",
-    "StrategySubmission",
     "added_lines",
-    "allowed_paths",
     "check_append_only",
-    "check_contract",
-    "check_one_submission_per_round",
+    "check_author",
+    "check_commitment",
+    "check_one_commitment_per_round",
     "check_paths",
     "check_shape",
-    "check_surface_present",
-    "digest_file",
-    "digest_surface",
     "gate",
 ]

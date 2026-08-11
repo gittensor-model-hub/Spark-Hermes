@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from eval.strategy_track import SUBMISSIONS_ROOT, digest_surface
+from validator.intake import Intake, Receipt
 from validator.score import Scorecard, ScoreError, score
 from validator.store import RoundStore
 
@@ -68,61 +68,71 @@ class Judgement:
         return self.scorecard is not None and not self.problem
 
 
-def surface_dir(round_id: str, miner_id: str, *, root: Path | None = None) -> Path:
-    return (root or Path(".")) / SUBMISSIONS_ROOT / round_id / miner_id
+def surface_dir(round_id: str, miner_id: str, *, root: Path | None = None, intake: Intake | None = None) -> Path:
+    """Where the bundle a miner committed to actually lives.
 
+    The intake store, not a directory in the repository. The surface is uploaded privately and the
+    pull request carries only its digest, so there is nothing in the tree to run -- an earlier
+    version of this module read `submissions/<round>/<miner>/` from a checkout, which was the shape
+    when the files themselves were in the pull request.
 
-def surface_digest(root: Path) -> str:
-    """One digest over the whole surface, order-independent and content-addressed.
-
-    A digest of the digests rather than of a concatenation: the per-file map is already canonical,
-    and hashing its sorted JSON means a file added, removed or edited all move the result, which a
-    concatenation of contents in directory order would not reliably do.
+    `root` overrides the store's location for tests. It is not a path a submitter can influence:
+    round and miner ids are single path segments, checked at intake.
     """
-    import hashlib
+    store = intake or Intake()
+    base = root if root is not None else store.root
+    return base / round_id / miner_id
 
-    payload = json.dumps(digest_surface(root), sort_keys=True).encode("utf-8")
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+def bundle_dir_for(receipt: Receipt, *, root: Path | None = None, intake: Intake | None = None) -> Path:
+    """The exact bundle a receipt names, which is what gets run."""
+    return surface_dir(receipt.round_id, receipt.miner_id, root=root, intake=intake) / receipt.submission_id
 
 
 def accept(
     *,
     round_id: str,
     miner_id: str,
+    receipt: Receipt,
     store: RoundStore | None = None,
-    repo_root: Path | None = None,
+    intake: Intake | None = None,
     now: float | None = None,
 ) -> Any:
-    """Record a merged surface into an open window. Returns the receipt.
+    """Record a committed bundle into an open window. Returns the round receipt.
 
-    The receipt's `payload_digest` is the surface digest, not a digest of the registry line. The
-    line describes the submission; the surface is what will be executed, and it is what `judge`
-    has to be able to check it is still running.
+    Takes the intake receipt rather than a directory: the digest on it is the one the miner
+    published in their pull request, and recording anything else would let the thing that runs
+    differ from the thing that was committed to.
     """
     store = store or RoundStore()
     window = store.load(round_id)
-    root = surface_dir(round_id, miner_id, root=repo_root)
-    if not root.is_dir():
-        raise JudgeError(f"{root.as_posix()} is not in the tree; there is no surface to accept")
-
-    paths = sorted(digest_surface(root))
-    if not paths:
-        raise JudgeError(f"{root.as_posix()} contains no files")
-
-    receipt = window.submit(
+    if receipt.miner_id != miner_id or receipt.round_id != round_id:
+        raise JudgeError(
+            f"receipt {receipt.submission_id} belongs to {receipt.miner_id!r} in {receipt.round_id!r}, "
+            f"not {miner_id!r} in {round_id!r}"
+        )
+    # The bundle's own file paths, read from the store. `RoundWindow.submit` checks them against
+    # the contract, which is defence in depth rather than duplication: intake validated them on the
+    # way in, and this re-checks what is actually on disk at the moment it is accepted into a round.
+    # Passing the submission id here instead -- a hex string -- made every accept come back
+    # `refused`, correctly, because a hex string is not an allowed miner file.
+    root = bundle_dir_for(receipt, intake=intake)
+    paths = sorted(f.relative_to(root).as_posix() for f in root.rglob("*") if f.is_file() and f.name != "bundle.json")
+    round_receipt = window.submit(
         miner_id,
         paths=paths,
-        payload_digest=surface_digest(root),
-        received_at=time.time() if now is None else now,
+        payload_digest=receipt.bundle_sha256,
+        received_at=receipt.received_at if now is None else now,
     )
     store.save(window)
-    return receipt
+    return round_receipt
 
 
 def judge_one(
     *,
     window: Any,
     miner_id: str,
+    intake: Intake | None = None,
     run: Callable[[str, Path], Path],
     model_revision: str,
     harness_digest: str,
@@ -133,18 +143,32 @@ def judge_one(
     from hermes.challenge import episode_metrics_of
     from hermesbench.sink import read_episodes
 
-    root = surface_dir(window.round_id, miner_id, root=repo_root)
-    if not root.is_dir():
-        return Judgement(miner_id, None, f"{root.as_posix()} is no longer in the tree")
-
-    current = surface_digest(root)
-    # `Submission.payload_digest` is the surface digest `accept` recorded. The first version read
-    # `Receipt.submission_digest`, which is a digest of the submission *record* -- a different
-    # value entirely -- so the comparison could never match and the tamper check fired on every
-    # legitimate run. An always-refusing guard is as broken as an always-passing one and looks
-    # more responsible.
     standing = window.submissions.get(miner_id)
     expected = getattr(standing, "payload_digest", "") if standing else ""
+    intake = intake or Intake()
+    match = next(
+        (r for r in intake.read_receipts() if r.round_id == window.round_id and r.bundle_sha256 == expected),
+        None,
+    )
+    if match is None:
+        return Judgement(miner_id, None, f"no stored bundle digests to {expected[:23]}...; nothing to run")
+
+    root = bundle_dir_for(match, root=repo_root, intake=intake)
+    if not root.is_dir():
+        return Judgement(miner_id, None, f"{root.as_posix()} is missing from the intake store")
+
+    # The bundle on disk must still digest to what the miner committed to. The store is the
+    # validator's own, so this catches corruption and local tampering rather than a miner -- but an
+    # unchecked store is one where "the digest was published" and "this is what ran" are two claims
+    # joined by an assumption.
+    from validator.intake import bundle_digest
+
+    files = {
+        p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and p.name != "bundle.json"
+    }
+    current = bundle_digest(files)
     if expected and current != expected:
         # The gate checked the pull request head; this runs the merged tree. A later commit can
         # touch a directory an earlier gate approved, and then "the gate approved this" and "this
@@ -152,8 +176,9 @@ def judge_one(
         return Judgement(
             miner_id,
             None,
-            f"the surface changed after it was accepted: receipt records {expected[:23]}... and the "
-            f"tree now digests {current[:23]}.... Refusing to run files the gate did not see.",
+            f"the stored bundle no longer digests to what was committed: the commitment names "
+            f"{expected[:23]}... and the store holds {current[:23]}.... Refusing to run something "
+            "other than what was published.",
         )
 
     try:
@@ -182,6 +207,7 @@ def judge_round(
     model_revision: str,
     harness_digest: str = "",
     store: RoundStore | None = None,
+    intake: Intake | None = None,
     repo_root: Path | None = None,
     workspace: Path | None = None,
     scorecard_dir: Path | None = None,
@@ -221,6 +247,7 @@ def judge_round(
         result = judge_one(
             window=window,
             miner_id=miner_id,
+            intake=intake,
             run=run,
             model_revision=model_revision,
             harness_digest=harness,
@@ -276,6 +303,7 @@ def runner_for(
     repeats: int,
     repo_root: Path | None,
     allow_unsandboxed: bool,
+    intake: Intake | None = None,
 ) -> Callable[[str, Path], Path]:
     """A `run` callable that invokes the real runner.
 
@@ -304,7 +332,7 @@ def runner_for(
                 workspace_root=workspace / f"ws-{miner_id}",
                 episodes_out=log,
                 repeats=repeats,
-                miner_dir=surface_dir(round_id, miner_id, root=repo_root),
+                miner_dir=_bundle_for(round_id, miner_id, repo_root, intake),
                 allow_unsandboxed=allow_unsandboxed,
             )
         )
@@ -313,6 +341,20 @@ def runner_for(
         return log
 
     return run
+
+
+def _bundle_for(round_id: str, miner_id: str, repo_root: Path | None, intake: Intake | None = None) -> Path:
+    """The stored bundle for a miner's standing commitment in this round.
+
+    Looked up by (round, miner) rather than derived from a path. An earlier version read the round
+    id off `workspace.name`, which happened to be right and would have pointed at the wrong bundle
+    the moment anyone passed a different workspace.
+    """
+    intake = intake or Intake()
+    match = next((r for r in intake.read_receipts() if r.round_id == round_id and r.miner_id == miner_id), None)
+    if match is None:
+        raise JudgeError(f"no stored bundle for {miner_id!r} in round {round_id!r}")
+    return bundle_dir_for(match, root=repo_root, intake=intake)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -404,7 +446,7 @@ __all__ = [
     "judge_round",
     "main",
     "runner_for",
-    "surface_digest",
+    "bundle_dir_for",
     "surface_dir",
 ]
 
