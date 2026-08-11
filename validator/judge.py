@@ -383,9 +383,34 @@ def main(argv: list[str] | None = None) -> int:
             if not args.miner_id:
                 print("validator.judge: accept needs --miner", file=sys.stderr)
                 return 2
-            receipt = accept(round_id=args.round_id, miner_id=args.miner_id, store=store, repo_root=args.repo_root)
-            print(f"{receipt.outcome}  {receipt.miner}  {receipt.submission_digest[:23]}...")
-            return 0 if receipt.outcome == "accepted" else 1
+            # The CLI resolves the miner's standing upload; `accept` takes the receipt itself so
+            # the digest recorded on the round is the one the miner published, not one re-derived
+            # from whatever is on disk at accept time.
+            intake = Intake()
+            standing = [
+                r for r in intake.read_receipts() if r.round_id == args.round_id and r.miner_id == args.miner_id
+            ]
+            if not standing:
+                print(
+                    f"validator.judge: {args.miner_id!r} has uploaded nothing for round {args.round_id!r}",
+                    file=sys.stderr,
+                )
+                return 2
+            if len(standing) > 1:
+                # Which bundle is judged is decided by the digest in the pull request, not by
+                # recency. Guessing here would evaluate something the miner did not commit to.
+                print(
+                    f"validator.judge: {args.miner_id!r} has {len(standing)} uploads in round "
+                    f"{args.round_id!r}; the pull request's digest decides which is judged, so accept "
+                    "it through the gate rather than from the command line",
+                    file=sys.stderr,
+                )
+                return 2
+            round_receipt = accept(
+                round_id=args.round_id, miner_id=args.miner_id, receipt=standing[0], store=store, intake=intake
+            )
+            print(f"{round_receipt.outcome}  {round_receipt.miner}  {standing[0].bundle_sha256[:23]}...")
+            return 0 if round_receipt.outcome == "accepted" else 1
 
         if not args.model:
             print("validator.judge: judge needs --model", file=sys.stderr)
