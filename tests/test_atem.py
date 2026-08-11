@@ -779,3 +779,45 @@ def test_reasoning_with_no_markup_is_untouched():
     turn = parse_atem("", reasoning=prose)
     assert turn.scratch_pad == prose
     assert turn.calls == ()
+
+
+def test_a_recovered_call_is_not_fed_back_to_the_model_as_its_own_prose():
+    """The third consequence of the same defect, and the one that compounds.
+
+    `_messages` rebuilds the conversation from the trajectory on every turn, so a thinking step
+    holding raw call markup is re-sent to the model as something it said -- an unexecuted call with no
+    result, re-sent again on every later turn. Measured on the pre-fix log: 2 of 2 rebuilt assistant
+    messages carried it.
+
+    So the cleaning that keeps markup out of the corpus keeps it out of the context too. Asserted here
+    as well as in the corpus tests because these are two different consumers of one field, and a fix to
+    either alone leaves the other broken.
+    """
+    from pathlib import Path as _Path
+
+    from hermes.pin import load_tool_schemas
+    from hermes.protocol import DIALECTS
+    from hermes.trajectory import THINKING
+    from hermesbench.policy import ServedModelPolicy, steps_from_turn
+    from hermesbench.tasks import Task
+
+    atem = DIALECTS["atem"]
+    schemas = load_tool_schemas(_Path("hermesbench/harness/tools.json"))
+    policy = ServedModelPolicy(
+        complete=lambda messages, *, tools=None: ("", {}),
+        dialect=atem,
+        tool_schemas=schemas,
+    )
+    task = Task(task_id="t", prompt="p", tools=("terminal",), verify="true", tags=())
+
+    history = steps_from_turn(parse_turn("", reasoning=REAL_LEFTOVER, schemas=schemas))
+    assistant = [m for m in policy._messages(task, history) if m["role"] == "assistant"]
+    assert assistant, "the turn is replayed at all"
+    replayed = "\n".join(m["content"] for m in assistant)
+
+    assert "We have logs directory" in replayed, "the model still sees what it was reasoning about"
+    # Exactly one: the call the harness renders because it EXECUTED it. Two would mean the reasoning
+    # kept its own copy, which is the state that fed the model an unexecuted call.
+    assert replayed.count("<atem:function_calls>") == 1, replayed
+    reasoning_step = next(s for s in history if s.kind == THINKING)
+    assert "<atem:" not in reasoning_step.content, "and the recorded reasoning is clean at the source"
