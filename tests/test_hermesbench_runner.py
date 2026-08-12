@@ -1019,3 +1019,131 @@ def test_the_old_key_would_have_passed_on_exactly_this_suite(monkeypatch):
     assert not any(t.has_hidden_tests for t in tasks) and any(t.hidden_verify_commitment for t in tasks), (
         "so the old key was false and the new key is true on identical input"
     )
+
+
+def test_thinking_does_not_draw_on_the_action_budget(tmp_path):
+    """`max_steps` is an action budget, and a THINKING step used to cost exactly as much as a call.
+
+    Measured over a 19-task run: 300 thinking steps against 318 tool calls, so 49% of every budget
+    went on reasoning and a nominal `max_steps: 15` was about 7 actions. Every failing episode in that
+    run ended on `step budget exhausted`, and 5 of the 9 capped episodes had already passed.
+
+    This is the same argument the harness already accepted for verification: sharing one budget makes
+    it penalise the behaviour it also rewards. It is sharper here, because the pinned model's own
+    template sets `Reasoning strength: high` and returns deliberation on a separate channel -- it
+    cannot choose to spend the budget like a non-reasoning model.
+    """
+    from hermes.trajectory import THINKING, TOOL_CALL, Step
+    from hermesbench.runner import run_episode
+    from hermesbench.tasks import Task
+
+    calls_made: list[str] = []
+
+    class Thinker:
+        """One thinking step and one call per turn, which is what this dialect always produces."""
+
+        tokens_used = 0
+
+        def next_steps(self, task, history):
+            n = len(calls_made)
+            return [
+                Step(kind=THINKING, content=f"considering step {n}"),
+                Step(kind=TOOL_CALL, tool="terminal", args={"command": f"echo {n}"}, call_id=f"c{n}"),
+            ]
+
+    class Executor:
+        def execute(self, tool, args, *, workspace, env=None):
+            calls_made.append(args.get("command", ""))
+            return True, "ok"
+
+    task = Task(
+        task_id="budget",
+        prompt="p",
+        verify="true",
+        tools=("terminal",),
+        max_steps=6,
+        max_reasoning_steps=100,
+    )
+    run_episode(task, Thinker(), Executor(), tmp_path)
+    assert len(calls_made) == 6, (
+        f"6 actions from a 6-action budget, not 3; got {len(calls_made)}. Thinking must not be charged "
+        "against max_steps"
+    )
+
+
+def test_a_policy_that_only_thinks_still_terminates(tmp_path):
+    """The allowance is bounded, not free. Without a cap a policy that never acts spins forever, and
+    the stall check cannot tell deliberating from hanging -- each turn does produce a step."""
+    from hermes.trajectory import THINKING, Step
+    from hermesbench.runner import run_episode
+    from hermesbench.tasks import Task
+
+    class OnlyThinks:
+        tokens_used = 0
+
+        def next_steps(self, task, history):
+            return [Step(kind=THINKING, content="still considering")]
+
+    class Executor:
+        def execute(self, tool, args, *, workspace, env=None):
+            raise AssertionError("no call should ever be made")
+
+    task = Task(
+        task_id="thinker",
+        prompt="p",
+        verify="true",
+        tools=("terminal",),
+        max_steps=50,
+        max_reasoning_steps=4,
+    )
+    result = run_episode(task, OnlyThinks(), Executor(), tmp_path)
+    assert result.metrics.max_steps_hit, "it has to stop, and stop for the reason it actually stopped"
+    assert sum(1 for s in result.trajectory.steps if s.kind == THINKING) == 4
+
+
+def test_a_miner_is_not_told_to_go_and_get_the_withheld_checks():
+    """The advice printed when withheld bodies are absent depends on who is running.
+
+    For an operator it is a configuration hint. Printed to a MINER the same text instructs them to
+    obtain the one thing the competition depends on them not having -- and a miner who somehow
+    followed it would be tuning against the very check that exists to catch tuning. Measured by
+    running `miner.cli evaluate` against a live model: both arms printed the operator's hint.
+    """
+    from hermesbench.runner import withheld_absence_notice
+
+    miner = withheld_absence_notice(["t1"], 1, for_miner=True)
+    assert "SPARKDISTILL_WITHHELD_ROOT" not in miner
+    assert "HERMESBENCH_WITHHELD_SALT" not in miner
+    assert "not yours to hold" in miner
+
+
+def test_the_miner_advice_says_what_the_absence_COSTS_them():
+    """ "Expected" alone leaves a miner thinking the absence is harmless. It is not: it means their
+    local numbers cannot distinguish a surface that solves the task from one that fits the published
+    assertions, which is the most useful thing they could know before submitting."""
+    from hermesbench.runner import withheld_absence_notice
+
+    miner = withheld_absence_notice(["t1"], 1, for_miner=True)
+    assert "published half" in miner
+    assert "overfit" in miner
+
+
+def test_the_operator_still_gets_the_configuration_hint():
+    """The operator holds the private tree and a missing withheld half is a misconfiguration they
+    can fix. Removing the hint to protect miners would break the people who need it."""
+    from hermesbench.runner import withheld_absence_notice
+
+    operator = withheld_absence_notice(["t1", "t2"], 5, for_miner=False)
+    assert "SPARKDISTILL_WITHHELD_ROOT" in operator
+    assert "HERMESBENCH_WITHHELD_SALT" in operator
+
+
+def test_both_notices_name_the_tasks_and_the_denominator():
+    """A warning that says "some tasks" is a warning nobody can act on, and the denominator is what
+    says whether this is one stale task or the whole suite."""
+    from hermesbench.runner import withheld_absence_notice
+
+    for for_miner in (True, False):
+        notice = withheld_absence_notice(["alpha", "beta"], 9, for_miner=for_miner)
+        assert "2 of 9" in notice
+        assert "alpha, beta" in notice

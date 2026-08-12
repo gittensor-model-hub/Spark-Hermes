@@ -42,7 +42,17 @@ def _trajectory(task="t1", answer="done", ok=True):
     )
 
 
-def _ep(*, task="t1", verified=True, overfit=False, tokens=50_000, traj=True, miner="carol", round_id="r-1"):
+def _ep(
+    *,
+    task="t1",
+    verified=True,
+    overfit=False,
+    tokens=50_000,
+    traj=True,
+    miner="carol",
+    round_id="r-1",
+    truncated=False,
+):
     return Episode(
         task_id=task,
         round_id=round_id,
@@ -51,6 +61,7 @@ def _ep(*, task="t1", verified=True, overfit=False, tokens=50_000, traj=True, mi
         overfit=overfit,
         tokens=tokens,
         trajectory=_trajectory(task).to_record() if traj else {},
+        truncated=truncated,
     )
 
 
@@ -272,3 +283,132 @@ def test_only_settled_rounds_are_collected(tmp_path):
     window.settle(now=2_002.0)
     store.save(window)
     assert len(collect(store=store, episode_root=tmp_path / "judge")) == 1
+
+
+# --- pairs when every attempt passes --------------------------------------------------------------
+
+
+def test_a_task_every_attempt_passes_still_yields_an_efficiency_pair():
+    """At a 94.7% suite pass rate most tasks have no failing attempt, so the correctness rule -- which
+    needs a rejected episode -- produced ZERO pairs from a whole 19-task run. What is left is the
+    signal the promotion gate actually scores: the same task solved correctly for far fewer tokens.
+    """
+    group = [
+        _ep(tokens=20_000),
+        _ep(tokens=22_000),
+        _ep(tokens=24_000),
+        _ep(tokens=90_000),
+    ]
+    pairs, _ = preference_pairs(group)
+    assert len(pairs) == 1
+    assert pairs[0]["kind"] == "efficiency"
+    assert pairs[0]["chosen_tokens"] == 20_000
+    assert pairs[0]["rejected_tokens"] == 90_000
+
+
+def test_a_task_whose_attempts_all_cost_the_same_yields_nothing():
+    """The trap this guards. Two verified solutions on this suite differ by 1.02x to 2.01x, so a fixed
+    ratio would either fire on noise or never fire; the bar is the task's own interquartile spread. A
+    task with no real spread has no lesson in it, and inventing a pair there trains sampling noise."""
+    flat = [_ep(tokens=50_000), _ep(tokens=50_400), _ep(tokens=50_800), _ep(tokens=51_000)]
+    pairs, _ = preference_pairs(flat)
+    assert pairs == []
+
+
+def test_too_few_verified_episodes_yields_no_efficiency_pair():
+    """A "spread" over two samples is arbitrary. Refusing is what keeps a one-attempt round from
+    minting a preference from a coin flip."""
+    pairs, _ = preference_pairs([_ep(tokens=10_000), _ep(tokens=99_000)])
+    assert pairs == []
+
+
+def test_unpriced_episodes_yield_no_efficiency_pair():
+    """Every token count 0 makes every gap 0 and every pair look infinitely good. `mean_tokens` was a
+    column of zeros in this repo once, so a ranking built on an unpopulated field is a real risk."""
+    pairs, _ = preference_pairs([_ep(tokens=0) for _ in range(6)])
+    assert pairs == []
+
+
+# --- truncated episodes ---------------------------------------------------------------------------
+
+
+def test_a_truncated_episode_is_never_the_chosen_side():
+    """It stopped at the step budget, mid-work. Imitating it teaches an agent to stop before it
+    finishes -- and 5 of 9 capped episodes in a real run had already passed, so `verified` and
+    `complete` are not the same thing."""
+    pairs, _ = preference_pairs(
+        [
+            _ep(tokens=10_000, truncated=True),
+            _ep(tokens=80_000),
+            _ep(tokens=90_000, verified=False),
+        ]
+    )
+    assert len(pairs) == 1
+    assert pairs[0]["kind"] == "correctness"
+    assert pairs[0]["chosen_tokens"] == 80_000, "the cheap one was cut off; it is not the example"
+
+
+def test_a_correctness_pair_still_beats_an_efficiency_pair():
+    """Ordering matters: a task with a genuine failure should teach correctness, not thrift. The
+    efficiency branch only runs when there is nothing to reject."""
+    pairs, _ = preference_pairs(
+        [_ep(tokens=20_000), _ep(tokens=22_000), _ep(tokens=24_000), _ep(tokens=90_000, verified=False)]
+    )
+    assert {p["kind"] for p in pairs} == {"correctness"}
+
+
+def test_read_episodes_records_truncation(tmp_path):
+    """It has to reach the Episode, or every filter above is dead code."""
+    log = tmp_path / "e.jsonl"
+    log.write_text(
+        json.dumps(
+            {
+                "task_id": "t1",
+                "metrics": {
+                    "task_id": "t1",
+                    "public_passed": True,
+                    "hidden_passed": True,
+                    "tokens_used": 1234,
+                    "max_steps_hit": True,
+                    "dialect": "atem",
+                },
+                "trajectory": _trajectory("t1").to_record(),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    episode = read_episodes(log, round_id="r-1", miner_id="carol")[0]
+    assert episode.truncated is True
+    assert episode.dialect == "atem"
+
+
+def test_a_truncated_episode_is_not_an_sft_row_either():
+    """SFT is pure imitation, so this matters more than the pair filter, not less.
+
+    A trajectory the harness cut off at the step budget ends mid-work, and its last recorded step is
+    the harness saying so rather than the model finishing. Measured on a 152-episode run: 18 of 143
+    verified episodes were truncated. Barring them from the chosen side of a pair while still emitting
+    them here was an inconsistency -- and the imitation signal is the stronger of the two.
+    """
+    rows = sft_rows([_ep(task="t1"), _ep(task="t2", truncated=True)])
+    assert [r["task_id"] for r in rows] == ["t1"]
+
+
+def test_the_summary_says_how_many_were_held_back():
+    """A corpus smaller than the verified count has to say why. A rising number here is the signal
+    that the action budgets are too tight -- which is exactly what those four tasks showed."""
+    import tempfile
+    from pathlib import Path
+
+    from validator.aggregate import aggregate
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "corpus"
+        summary = aggregate(
+            [_ep(task="t1"), _ep(task="t2", truncated=True), _ep(task="t3", truncated=True)],
+            out=out,
+        )
+        record = summary.to_record()
+    assert record["sft_rows"] == 1
+    assert record["truncated_skipped"] == 2

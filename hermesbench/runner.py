@@ -32,7 +32,7 @@ from typing import Any, Protocol
 
 from hermes.pin import load_tool_schemas
 from hermes.protocol import DIALECTS
-from hermes.trajectory import FINAL, TOOL_CALL, TOOL_RESULT, AgentTrajectory, Step
+from hermes.trajectory import FINAL, THINKING, TOOL_CALL, TOOL_RESULT, AgentTrajectory, Step
 from hermesbench import BENCH_VERSION
 from hermesbench.integrity import IntegrityReport, check_integrity, digest_paths, enforce
 from hermesbench.metrics import EpisodeMetrics, SuiteMetrics, episode_metrics, suite_metrics
@@ -386,6 +386,7 @@ def run_episode(
     verification_tools = set(task.verification_tools)
     finished = False
     max_steps_hit = False
+    reasoning_steps = 0
     stalled = False
     agent_steps = 0
     verification_steps = 0
@@ -399,7 +400,7 @@ def run_episode(
         checkpoint_timeline.append(_sample_checkpoints(task, workspace, baselines=baselines))
 
     while not finished and not max_steps_hit:
-        before = agent_steps + verification_steps
+        before = agent_steps + verification_steps + reasoning_steps
         for step in policy.next_steps(task, list(steps)):
             # A policy does not get to author observations. If it emits a tool_result,
             # that is a fabricated one -- drop it and keep only what the executor saw.
@@ -410,8 +411,20 @@ def run_episode(
             # would mean the harness penalises exactly the behavior `self_check_rate`
             # rewards, and could cut an episode off mid-verification.
             is_verification = step.kind == TOOL_CALL and step.tool in verification_tools
+            # Deliberation draws on its own allowance, for the same reason verification does:
+            # `max_steps` is an ACTION budget, and charging a THINKING step against it makes the
+            # harness penalise thinking. Measured over a 19-task run, 49% of the budget went on
+            # reasoning, so a nominal 15 steps was about 7 actions -- and this model's own template
+            # sets `Reasoning strength: high`, so it cannot choose to spend the budget otherwise.
+            is_reasoning = step.kind == THINKING
             if is_verification:
                 if verification_steps >= task.max_verification_steps:
+                    max_steps_hit = True
+                    break
+            elif is_reasoning:
+                # Bounded, not free. A policy that only ever thinks still has to terminate, and the
+                # stall check below cannot tell deliberating from hanging.
+                if reasoning_steps >= task.max_reasoning_steps:
                     max_steps_hit = True
                     break
             # Checked per step, not per turn: a policy that returns fifty calls in one
@@ -423,6 +436,8 @@ def run_episode(
             steps.append(step)
             if is_verification:
                 verification_steps += 1
+            elif is_reasoning:
+                reasoning_steps += 1
             else:
                 agent_steps += 1
             if step.kind == TOOL_CALL:
@@ -456,7 +471,7 @@ def run_episode(
             if task.checkpoints and (agent_steps + verification_steps) % task.checkpoint_every == 0:
                 checkpoint_timeline.append(_sample_checkpoints(task, workspace, baselines=baselines))
 
-        if not finished and not max_steps_hit and (agent_steps + verification_steps) == before:
+        if not finished and not max_steps_hit and (agent_steps + verification_steps + reasoning_steps) == before:
             # The turn produced nothing -- an empty response, or a batch of only
             # fabricated tool_results. The step budget can never be reached from here,
             # so without this the loop spins forever on a single stuck episode.
@@ -662,6 +677,46 @@ def repeated_from(results: list[EpisodeResult], *, repeats: int) -> RepeatedSuit
     )
 
 
+def withheld_absence_notice(missing: list[str], total: int, *, for_miner: bool) -> str:
+    """What to say when tasks commit to a withheld check whose body is not here.
+
+    Whose run this is decides what the advice should be. For an operator it is a configuration hint.
+    Printed to a MINER the same text instructs them to obtain the one thing the competition depends
+    on them not having -- and a miner who somehow followed it would be tuning against the very check
+    that exists to catch tuning. Measured by running `miner.cli evaluate` against a live model: both
+    arms printed the operator's hint.
+
+    The miner text says what the absence COSTS them rather than only that it is expected. "Expected"
+    alone leaves them thinking it is harmless; what it actually means is that their local numbers
+    cannot tell a surface that solves the task from one that fits the published assertions, which is
+    the most useful thing they could know before submitting.
+    """
+    from hermesbench.withheld import WITHHELD_ROOT_ENV
+
+    named = f"{', '.join(missing[:6])}{' ...' if len(missing) > 6 else ''}"
+    header = (
+        f"hermesbench: WARNING {len(missing)} of {total} tasks publish a withheld-check commitment "
+        f"whose check is not present, so `hidden_passed` will be null for them and no overfit "
+        f"signal is measured: {named}"
+    )
+    if for_miner:
+        advice = (
+            "This is expected: the withheld check is not yours to hold, and a run you can see the "
+            "answer to is not a test. What it means for your numbers is that this evaluation scores "
+            "only the published half -- the half a strategy can fit -- so a surface that raises the "
+            "published pass rate by fitting its assertions looks identical here to one that actually "
+            "solves the task. The validator scores both halves, and that difference is exactly what "
+            "`overfit` reports."
+        )
+    else:
+        advice = (
+            f"Set {WITHHELD_ROOT_ENV} and HERMESBENCH_WITHHELD_SALT to score the withheld half. "
+            "Without it a run reports only what the published verifier can see, which is the half a "
+            "strategy can fit."
+        )
+    return f"{header}\n{advice}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--suite", default=BENCH_VERSION, help="bench versions: 'v1', 'v0,v1', or 'all'")
@@ -788,7 +843,7 @@ def main(argv: list[str] | None = None) -> int:
     # Degrades rather than refuses when the private tree is absent, because a public checkout
     # must still be able to run the suite -- but it degrades loudly, and the count goes into
     # the summary so a run without the withheld half cannot be read as a clean one.
-    from hermesbench.withheld import WITHHELD_ROOT_ENV, WithheldError, overlay, unscorable
+    from hermesbench.withheld import WithheldError, overlay, unscorable
 
     try:
         tasks = overlay(tasks)
@@ -801,16 +856,7 @@ def main(argv: list[str] | None = None) -> int:
 
     missing = unscorable(tasks)
     if missing:
-        print(
-            f"hermesbench: WARNING {len(missing)} of {len(tasks)} tasks publish a withheld-check "
-            f"commitment whose check is not present, so `hidden_passed` will be null for them and "
-            f"no overfit signal is measured: {', '.join(missing[:6])}"
-            f"{' ...' if len(missing) > 6 else ''}\n"
-            f"Set {WITHHELD_ROOT_ENV} and HERMESBENCH_WITHHELD_SALT to score the withheld half. "
-            "Without it a run reports only what the published verifier can see, which is the half "
-            "a strategy can fit.",
-            file=sys.stderr,
-        )
+        print(withheld_absence_notice(missing, len(tasks), for_miner=bool(args.miner_dir)), file=sys.stderr)
 
     # Checked before anything is paid for. `build_manifest` refuses to fingerprint a task
     # with a withheld check and no salt, and discovering that after a suite has run means

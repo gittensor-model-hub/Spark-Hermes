@@ -155,6 +155,22 @@ class Task:
     # tokens on checking their work are exactly the ones that would be penalised.
     verification_tools: tuple[str, ...] = ()
     max_verification_steps: int = 40
+    # Deliberation draws on its own allowance, for the same reason verification does.
+    #
+    # `agent_steps` used to be incremented for every step that was not a tool_result, so a THINKING
+    # step cost exactly as much as an action. Measured over a 19-task run: 300 thinking steps against
+    # 318 tool calls -- 49% of the budget spent on reasoning, so `max_steps: 15` meant about 7
+    # actions. Every failing episode in that run ended on `step budget exhausted`, and 5 of the 9
+    # capped episodes had already passed.
+    #
+    # That charges a model for thinking, which is worse here than it looks: the pinned model's own
+    # chat template sets `Reasoning strength: high` and returns deliberation on a separate channel, so
+    # it *always* emits a THINKING step before a call. It cannot spend the budget the way a
+    # non-reasoning model can.
+    #
+    # Bounded rather than free: a model that only ever thinks has to terminate, and the loop's stall
+    # detection cannot see the difference between deliberating and hanging.
+    max_reasoning_steps: int = 40
     # Files the agent must not touch: tests, baselines, fixtures. Hashed before and
     # after the episode, and any change disqualifies the run outright. This is the
     # general form of "fix the source, not the test" -- a grader that greps for the
@@ -271,6 +287,7 @@ class Task:
             setup=record.get("setup"),
             timeout_s=int(record.get("timeout_s", 600)),
             max_steps=int(record.get("max_steps", 40)),
+            max_reasoning_steps=int(record.get("max_reasoning_steps", record.get("max_steps", 40) * 2)),
             tags=tuple(str(t) for t in record.get("tags", ())),
             # `is None`, not falsiness: an explicit `mutating_tools: []` means "nothing
             # this task offers mutates", which must not silently get the default back.

@@ -186,6 +186,23 @@ class SuiteMetrics:
     # releases is being trained against rather than solved.
     overfit_rate: float = 0.0
     hidden_test_episodes: int = 0
+    # Episodes the harness cut off at the step budget, and how many of those also failed.
+    #
+    # `max_steps_hit` has always been on every episode and was never aggregated, so the headline
+    # reported `success_rate` and `mean_tokens` with no sign that most of the run was censored.
+    # Measured on two real 19-task runs: 53% and 56% of episodes ended with the harness cutting in
+    # rather than the model finishing. That breaks two things at once.
+    #
+    # `mean_tokens` and `mean_tool_calls` are *upper-censored* for those episodes -- an agent that
+    # would have used more is recorded at the cap -- so comparing two runs' efficiency compares
+    # truncated distributions, and efficiency is what the promotion gate scores.
+    #
+    # And a task that ran out of budget is not a task the model cannot do. `truncated_failures` is
+    # the number that says how much of `1 - success_rate` might be budget rather than capability.
+    # Same principle as `recovery_eligible`: report the denominator rather than let a rate stand in
+    # for a measurement it does not describe.
+    truncated_episodes: int = 0
+    truncated_failures: int = 0
     per_episode: tuple[EpisodeMetrics, ...] = field(default=())
     # Summed over the episodes that had a price, with the count reported alongside. A
     # total whose denominator is hidden reads as the cost of the whole suite when it may
@@ -225,6 +242,8 @@ class SuiteMetrics:
             "category_support": dict(sorted(self.category_support.items())),
             "overfit_rate": round(self.overfit_rate, 4),
             "hidden_test_episodes": self.hidden_test_episodes,
+            "truncated_episodes": self.truncated_episodes,
+            "truncated_failures": self.truncated_failures,
             "per_episode": [e.to_record() for e in self.per_episode],
         }
 
@@ -472,5 +491,7 @@ def suite_metrics(episodes: list[EpisodeMetrics]) -> SuiteMetrics:
         category_support={name: len(group) for name, group in categories.items()},
         overfit_rate=_rate(sum(1 for e in public_passers if e.overfit), len(public_passers)),
         hidden_test_episodes=len(with_hidden),
+        truncated_episodes=sum(1 for e in ran if e.max_steps_hit),
+        truncated_failures=sum(1 for e in ran if e.max_steps_hit and not e.success),
         per_episode=tuple(episodes),
     )

@@ -96,9 +96,11 @@
 
   <div class="cards">
     <div class="card">
-      <b>73.7<span style="font-size:1rem">%</span></b>
+      <b>94.7<span style="font-size:1rem">%</span></b>
       <span>suite success</span>
-      <small>14 of 19 tasks, one attempt each.</small>
+      <small>18 of 19 tasks, one attempt each. Was 73.7% until the harness stopped charging a
+      model's reasoning against its action budget — every one of those five failures had run out of
+      steps mid-work, not answered wrongly.</small>
     </div>
     <div class="card">
       <b class="good">0</b>
@@ -126,7 +128,7 @@
     <table>
       <thead><tr><th>Stage</th><th>What happened</th></tr></thead>
       <tbody>
-        <tr><td class="mono">open</td><td>challenge published, baseline <strong>0/10</strong> on the task, 12.2% token spread</td></tr>
+        <tr><td class="mono">open</td><td>challenge published, baseline <strong>0/10</strong> on the task, 12.2% token spread — <em>measured before the step-budget fix; see the note below</em></td></tr>
         <tr><td class="mono">submit</td><td>surface uploaded privately; the digest committed publicly</td></tr>
         <tr><td class="mono">freeze</td><td>submissions sealed — verdicts cannot exist before this</td></tr>
         <tr><td class="mono">judge</td><td>validator ran the surface: <strong>2/10</strong> verified, <span class="warn">refused</span></td></tr>
@@ -136,6 +138,13 @@
       </tbody>
     </table>
   </div>
+
+  <p class="dim"><strong>That baseline no longer holds.</strong> The round was opened on
+  <code>tc-log-rotation-order</code> when the pinned model scored 0/10 — but that was measured while
+  the harness charged every reasoning step against the action budget, and all ten attempts ended on
+  <code>step budget exhausted</code>. With that corrected the model passes the task unaided on the
+  first attempt. The stage-by-stage record above is still exactly what the pipeline did; the
+  challenge's premise needs re-establishing on a task the model actually fails.</p>
 
   <p>Two of those are the point. A prose-only surface moved a task the model failed <em>ten times
   out of ten</em> — and it was still <strong>refused</strong>, because the withheld check must pass on

@@ -42,11 +42,26 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 SFT_FILE = "sft.jsonl"
 PREFERENCE_FILE = "preference.jsonl"
 MAX_PAIRS_PER_TASK = 32
+
+# Verified episodes a task needs before an efficiency pair means anything. Below four, the "typical"
+# cost is a couple of samples and any bar derived from it is arbitrary.
+MIN_VERIFIED_FOR_EFFICIENCY = 4
+
+# How much more than a typical correct solution the rejected side must cost. Measured on this suite,
+# two verified solutions to one task differ by 1.02x to 2.01x, so this cut keeps roughly the upper
+# half of the observed range and drops the rest as sampling noise.
+#
+# Compared against the MEDIAN, not against the cheapest episode. An earlier version of this compared
+# the min-to-max range against the interquartile spread, which fires on almost any task: the extremes
+# sit outside the quartiles by construction, and the range grows with the number of samples while the
+# quartile band does not. A flat task whose attempts all cost within 2% of each other produced a pair.
+EFFICIENCY_MARGIN = 0.5
 
 
 class AggregateError(RuntimeError):
@@ -70,6 +85,10 @@ class Episode:
     # rendered in the wrong shape does not look wrong -- it raises in the trainer's chat template, or
     # silently drops every reasoning block. See `hermes.protocol.Dialect`.
     dialect: str = ""
+    # Whether the harness cut this episode off at a step budget. Load-bearing for pair construction:
+    # a truncated trajectory is censored mid-work, so it is neither a model to imitate nor an honest
+    # measurement of what the attempt cost. See `preference_pairs`.
+    truncated: bool = False
 
     @property
     def usable(self) -> bool:
@@ -85,6 +104,7 @@ class Summary:
     overfit_skipped: int = 0
     capped: list[str] = field(default_factory=list)
     reasoning_markup_stripped: int = 0
+    truncated_skipped: int = 0
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -99,6 +119,10 @@ class Summary:
             # dialect's private-deliberation channel. Non-zero means the episodes predate the
             # harness fix that stopped recording them; the rows are clean, the logs are not.
             "reasoning_markup_stripped": self.reasoning_markup_stripped,
+            # Verified episodes held back because the harness cut them off mid-work. Reported rather
+            # than silently dropped: a corpus that is smaller than the verified count needs to say
+            # why, and a rising number here means the action budgets are too tight.
+            "truncated_skipped": self.truncated_skipped,
             # Excluded from SFT and *kept* as rejected examples. An episode that passed the
             # published check and failed the withheld one is the sharpest negative there is: it is
             # what fitting the visible assertions looks like. Training on it teaches that; training
@@ -131,6 +155,7 @@ def read_episodes(path: Path, *, round_id: str, miner_id: str) -> list[Episode]:
                 tokens=int(metrics.get("tokens_used") or 0),
                 trajectory=row.get("trajectory") or {},
                 dialect=str(metrics.get("dialect") or ""),
+                truncated=bool(metrics.get("max_steps_hit")),
             )
         )
     return out
@@ -182,6 +207,16 @@ def sft_rows(episodes: list[Episode], *, system_policy: str = "keep") -> list[di
     for episode in episodes:
         if not episode.verified or not episode.usable:
             continue
+        if episode.truncated:
+            # SFT is pure imitation, so this matters more here than in `preference_pairs` -- where a
+            # truncated episode is already barred from the chosen side. A trajectory the harness cut
+            # off at the step budget ends mid-work, and its last recorded step is the harness saying
+            # so, not the model finishing. Training on it teaches stopping short.
+            #
+            # Measured on a 152-episode run: 18 of 143 verified episodes were truncated, concentrated
+            # on four tasks whose action budgets are still tight. Emitting them from here while
+            # excluding them there was an inconsistency, and the imitation signal is the stronger one.
+            continue
         trajectory = AgentTrajectory.from_record(episode.trajectory)
         record = to_messages_record(trajectory, system_policy=system_policy, **context)
         rows.append(
@@ -193,6 +228,56 @@ def sft_rows(episodes: list[Episode], *, system_policy: str = "keep") -> list[di
             }
         )
     return rows
+
+
+def _efficiency_pairs(
+    verified: list[Episode], *, round_id: str, task_id: str, context: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Cheapest correct solution against the most expensive, when the gap is bigger than the noise.
+
+    At a high pass rate there is no correctness signal left -- every attempt passes -- and the whole
+    point of this project is that the same model can solve the same task for fewer tokens. That is
+    what the promotion gate scores, so it is worth training toward.
+
+    The trap is pairing on sampling noise. Measured on this suite, two verified solutions to the same
+    task differ by anywhere from 1.02x to 2.01x, so a fixed ratio would either fire on noise or never
+    fire. The threshold comes from the task's own distribution instead: the pair must be separated by
+    more than the interquartile spread of that task's verified episodes. A task whose attempts all
+    cost about the same produces nothing, which is correct -- there is no lesson in it.
+    """
+    from hermes.format import to_messages_record
+    from hermes.trajectory import AgentTrajectory
+
+    if len(verified) < MIN_VERIFIED_FOR_EFFICIENCY:
+        return []
+    costs = sorted(e.tokens for e in verified)
+    if costs[0] <= 0:
+        # Unpriced episodes: every token count is 0, so every gap is 0 and every pair would look
+        # infinitely good. Refused rather than ranked on a field that was never populated -- and
+        # `mean_tokens` was a column of zeros in this repo once, so that is a real failure mode.
+        return []
+    typical = median(costs)
+    cheapest, dearest = verified[0], verified[-1]
+    # The rejected side has to be clearly worse than typical, and the chosen side at least as good as
+    # typical. Requiring both to be atypical would reject the common shape, where one attempt wandered
+    # and the rest were ordinary -- and that wandering attempt is exactly the lesson.
+    if dearest.tokens < typical * (1 + EFFICIENCY_MARGIN) or cheapest.tokens > typical:
+        return []
+    return [
+        {
+            "task_id": task_id,
+            "round_id": round_id,
+            "chosen": to_messages_record(AgentTrajectory.from_record(cheapest.trajectory), **context)["messages"],
+            "rejected": to_messages_record(AgentTrajectory.from_record(dearest.trajectory), **context)["messages"],
+            "chosen_tokens": cheapest.tokens,
+            "rejected_tokens": dearest.tokens,
+            "kind": "efficiency",
+            # So a reader can see the bar this pair cleared rather than trusting that one existed.
+            "typical_tokens": typical,
+            "efficiency_margin": EFFICIENCY_MARGIN,
+            "verified_episodes": len(verified),
+        }
+    ]
 
 
 def preference_pairs(
@@ -218,9 +303,25 @@ def preference_pairs(
     pairs: list[dict[str, Any]] = []
     capped: list[str] = []
     for (round_id, task_id), group in sorted(by_task.items()):
-        chosen = sorted([e for e in group if e.verified], key=lambda e: e.tokens)
+        # A truncated episode is never `chosen`: its trajectory stops mid-work at the step budget, so
+        # imitating it teaches an agent to stop before finishing. Measured reason this matters -- two
+        # runs of this suite had 53% and 56% of episodes truncated, and 5 of 9 capped episodes had
+        # already passed, so "verified" and "complete" are not the same thing.
+        chosen = sorted([e for e in group if e.verified and not e.truncated], key=lambda e: e.tokens)
         rejected = sorted([e for e in group if not e.verified], key=lambda e: -e.tokens)
-        if not chosen or not rejected:
+        made = 0
+        if not chosen:
+            continue
+        if not rejected:
+            # Every attempt passed, so there is no correctness signal here -- and at a 94.7% suite
+            # pass rate that is most tasks, which is why this branch exists at all. What is left is
+            # the efficiency signal the promotion gate actually scores: two correct solutions to one
+            # task, one of them far cheaper.
+            for pair in _efficiency_pairs(chosen, round_id=round_id, task_id=task_id, context=context):
+                if made >= max_per_task:
+                    break
+                pairs.append(pair)
+                made += 1
             continue
 
         made = 0
@@ -240,6 +341,10 @@ def preference_pairs(
                         ],
                         "chosen_tokens": good.tokens,
                         "rejected_tokens": bad.tokens,
+                        # Which signal produced this pair. A correctness pair and an efficiency pair
+                        # teach different things and a trainer may want to weight them differently;
+                        # a corpus that does not say which is which cannot be reweighted afterwards.
+                        "kind": "correctness",
                     }
                 )
                 made += 1
@@ -275,6 +380,7 @@ def aggregate(
     summary.capped = capped
     # Counted off the rows themselves rather than tracked through the renderer, so the number always
     # describes what was actually written.
+    summary.truncated_skipped = sum(1 for e in episodes if e.verified and e.usable and e.truncated)
     summary.reasoning_markup_stripped = sum(
         int(message.get("reasoning_markup_stripped") or 0) for row in rows for message in row["messages"]
     ) + sum(

@@ -103,6 +103,13 @@ dialect          atem
 verify_digest    sha256:9f57e7ac0cbb5daf…
 ```
 
+`max_steps_hit` was **true** for this episode: it verified its answer and then the harness cut in at
+the step budget, so the `FINAL` step is `step budget exhausted (18)` rather than the model's own
+summary. It passed anyway, because the work was done. That is not always how it goes — across both
+runs of this suite, **every failing episode ended the same way**, so `1 - success_rate` is a mix of
+"could not" and "ran out", and the suite now reports `truncated_episodes` and `truncated_failures`
+beside the rate rather than letting the rate stand in for a capability measurement.
+
 `verify_digest` is the sha256 of the *published* verify script, stamped at run time. It exists
 because two graders in this suite once invoked a bare `python`, failed 10/10 for a reason no model
 caused, and were fixed later — leaving a log that read as a capability gap against a grader that now
@@ -111,7 +118,7 @@ be re-read after a fix.
 
 ## 4. The same task with a miner surface attached
 
-A round was opened on a harder task, `tc-log-rotation-order`, where the pinned model scores **0 of
+A round was opened on a harder task, `tc-log-rotation-order`, where the pinned model scored **0 of
 10**. A miner submitted two files of prose — no code:
 
 ```
@@ -145,6 +152,18 @@ field would make an hourly reward that always pays out and therefore says nothin
 
 Both outcomes are the design working. Prose alone moved a task the model could not do — which is
 the premise the competition rests on — and the bar did not bend to reward it.
+
+### That baseline has since been invalidated
+
+All ten of those baseline attempts ended on `step budget exhausted`, because the harness was charging
+every reasoning step against the action budget — 49% of it, measured. With that corrected the pinned
+model passes `tc-log-rotation-order` unaided on the first attempt.
+
+So the stage-by-stage record above is exactly what the pipeline did, and the guards fired for the
+right reasons, but the challenge was opened on a task the model *could* do given the steps to do it.
+A round has to be opened on a task that genuinely resists, and establishing which those are now needs
+re-measuring. This is the same defect class as everything else in this document: a resource limit
+recorded as a capability measurement.
 
 ## 5. Why 2 of 10 is not "nearly there"
 
