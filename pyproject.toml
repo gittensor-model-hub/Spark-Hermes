@@ -36,7 +36,7 @@ dev = [
 # pulls in a web stack: the only thing here that listens on a socket is validator/api.py.
 validator = [
   "fastapi>=0.115",
-  "uvicorn[standard]>=0.32",
+  "uvicorn[standard]>=0.52.3",
 ]
 
 proof = [
