@@ -7,9 +7,9 @@
 #   scripts/train.sh recipes/spark-hermes-3.8-27b/stage-a-reasoning.yaml
 #
 # Base model pinned to a revision, not a name -- see hermes/base_model.json, which this
-# must agree with (tests/test_base_model.py). Qwen3.8-27B is the Phase 1 target and is not
-# published: the only repositories under that name are third-party derivatives with no
-# official base. Phase 0 validates the pipeline on 3.6, which exists.
+# must agree with (tests/test_base_model.py). The final target is the pinned official
+# Qwen3.8-27B base below. The CPU preparation/4B POC profile separately pins Qwen3.5-4B
+# in rtx5090-poc.yaml; CPU validation does not prove GPU training or serving compatibility.
 #
 # Nothing in this directory has been trained yet. See docs/roadmap-hermes.md.
 
@@ -17,7 +17,7 @@ base_model: Qwen/Qwen3.8-27B
 base_model_revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
 trust_remote_code: true
 
-chat_template: chat_template.jinja
+chat_template: tokenizer_default
 roles_to_train: ["assistant"]
 
 datasets:

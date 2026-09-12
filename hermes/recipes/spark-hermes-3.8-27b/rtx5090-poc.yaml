@@ -1,0 +1,24 @@
+# 4B proof of concept for the RTX 5090. The 27B production pin stays unchanged.
+# Consumed by admin.cli prepare --profile rtx5090-poc.
+base_model: Qwen/Qwen3.5-4B
+base_model_revision: 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+adapter: lora
+load_in_4bit: false
+load_in_8bit: false
+bf16: true
+sequence_len: 2048
+micro_batch_size: 1
+gradient_accumulation_steps: 8
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: sdpa
+sample_packing: false
+pad_to_sequence_len: false
+num_epochs: 1
+learning_rate: 2.0e-5
+optimizer: adamw_torch
+logging_steps: 1

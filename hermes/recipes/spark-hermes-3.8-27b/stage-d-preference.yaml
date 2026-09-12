@@ -10,7 +10,9 @@
 #   python -m validator.aggregate --out var/datasets
 #     -> var/datasets/preference.jsonl   {chosen: [...], rejected: [...], chosen_tokens, ...}
 #
-#   scripts/train.sh hermes/recipes/spark-hermes-3.8-27b/stage-d-preference.yaml
+# Raw message pairs must be rendered first; this file supplies objective defaults.
+# Use `python -m admin.cli prepare --training-stage dpo --root var/admin/run-1`
+# and then `python -m admin.cli train --training-stage dpo --root var/admin/run-1`.
 #
 # ## Why this stage exists separately from C
 #
@@ -38,18 +40,23 @@
 base_model: outputs/spark-hermes-3.8-27b/stage-c/merged
 trust_remote_code: true
 
-chat_template: chat_template.jinja
+chat_template: tokenizer_default
 
 rl: dpo
 rl_beta: 0.1
 
 datasets:
-  - path: var/datasets/preference.jsonl
-    type: chatml.argilla
-    field_messages: messages
+  - path: var/admin/run-1/models/dpo/train.jsonl
+    type:
+      field_prompt: prompt
+      field_chosen: chosen
+      field_rejected: rejected
+      prompt_format: "{prompt}"
+      chosen_format: "{chosen}"
+      rejected_format: "{rejected}"
 
 dataset_prepared_path: data/prepared/spark-hermes-27b-stage-d
-val_set_size: 0.05
+val_set_size: 0
 output_dir: outputs/spark-hermes-3.8-27b/stage-d
 
 # Agentic episodes are long: the 190-episode baseline had a median of 34 turns. Both sides of a
@@ -90,7 +97,7 @@ gradient_checkpointing_kwargs:
 
 logging_steps: 1
 save_strategy: epoch
-eval_strategy: epoch
+eval_strategy: "no"
 
 # `sample_packing` is deliberately absent. Packing concatenates sequences, and a packed pair is
 # two different episodes sharing a loss term -- the comparison this stage exists to make would be

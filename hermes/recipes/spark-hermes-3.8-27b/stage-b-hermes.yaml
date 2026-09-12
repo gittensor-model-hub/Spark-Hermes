@@ -15,7 +15,7 @@ base_model: Qwen/Qwen3.8-27B
 base_model_revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
 trust_remote_code: true
 
-chat_template: chat_template.jinja
+chat_template: tokenizer_default
 roles_to_train: ["assistant"]
 
 datasets:
