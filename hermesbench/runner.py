@@ -252,6 +252,7 @@ class EpisodeResult:
     metrics: EpisodeMetrics
     setup_failed: bool = False
     integrity: IntegrityReport = field(default_factory=IntegrityReport)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -261,6 +262,7 @@ class EpisodeResult:
             "metrics": self.metrics.to_record(),
             "setup_failed": self.setup_failed,
             "integrity": self.integrity.to_record(),
+            "evidence": self.evidence,
         }
 
 
@@ -549,7 +551,7 @@ def run_episode(
             usage=usage_record,
             wall_time_s=elapsed,
             mutating_tools=task.mutating_tools,
-            max_steps_hit=max_steps_hit,
+            max_steps_hit=max_steps_hit or stalled,
             verify_digest=verify_digest(task),
             dialect=dialect_name,
             category=task.category,
@@ -571,6 +573,8 @@ def run_suite(
     repeats: int = 1,
     sink: EpisodeSink | None = None,
     max_concurrency: int = 1,
+    evaluation_context: dict[str, Any] | None = None,
+    attempt_policy_factory: Any = None,
 ) -> tuple[SuiteMetrics, list[EpisodeResult]]:
     """Run every task in its own workspace and aggregate the scores.
 
@@ -603,7 +607,14 @@ def run_suite(
     # The whole plan first, so results come back in plan order whatever order they finish in.
     # `suite_metrics` and `repeated_from` are order-independent, but a caller diffing two runs is
     # not, and a list whose order depends on scheduling makes every comparison noisy.
-    plan: list[tuple[Task, Path]] = []
+    if evaluation_context is not None:
+        from validator.score import ScoreError
+
+        epoch = evaluation_context["epoch"]
+        ids = epoch.get("attempt_ids")
+        if not isinstance(ids, list) or len(ids) != repeats or len(set(ids)) != repeats:
+            raise ScoreError("runner repeats must match declared attempt schedule")
+    plan: list[tuple[Task, Path, int]] = []
     for task in tasks:
         for attempt in range(repeats):
             # The suffix is dropped on the first attempt so single-shot runs keep the
@@ -611,14 +622,27 @@ def run_suite(
             workspace = workspace_root / (task.task_id if attempt == 0 else f"{task.task_id}#{attempt}")
             if workspace.exists() and not keep_workspaces:
                 shutil.rmtree(workspace)
-            plan.append((task, workspace))
+            plan.append((task, workspace, attempt))
 
-    def one(item: tuple[Task, Path]) -> EpisodeResult:
-        task, workspace = item
+    def one(item: tuple[Task, Path, int]) -> EpisodeResult:
+        task, workspace, attempt = item
         # A policy per episode, which `policy_factory` already provides: a policy carries
         # per-episode state (`parse_failures`, `usage`), so sharing one across concurrent episodes
         # would attribute one episode's malformed turns to another.
-        return run_episode(task, policy_factory(task), executor, workspace)
+        policy = attempt_policy_factory(task, attempt) if attempt_policy_factory is not None else policy_factory(task)
+        result = run_episode(task, policy, executor, workspace)
+        result.evidence = {"attempt_id": str(attempt), "private_check_required": task.declares_hidden_tests}
+        if evaluation_context is not None:
+            epoch = evaluation_context["epoch"]
+            result.evidence.update({k: epoch[k] for k in ("model_revision", "harness_digest", "epoch_id")})
+            result.evidence["attempt_id"] = epoch["attempt_ids"][attempt]
+            for key in ("agent_id", "incumbent"):
+                if key in epoch:
+                    result.evidence[key] = epoch[key]
+            for key in ("round_id", "bundle_sha256", "origin"):
+                if key in evaluation_context:
+                    result.evidence[key] = evaluation_context[key]
+        return result
 
     if max_concurrency == 1:
         # The sequential path, unchanged. Kept as its own branch rather than a pool of size one so
@@ -718,6 +742,11 @@ def withheld_absence_notice(missing: list[str], total: int, *, for_miner: bool) 
 
 
 def main(argv: list[str] | None = None) -> int:
+    from hermesbench.execution import expected_execution
+
+    # Capture independent authority before consuming writable argv/files. A
+    # missing context flag must never downgrade expected execution to exploration.
+    expected = expected_execution()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--suite", default=BENCH_VERSION, help="bench versions: 'v1', 'v0,v1', or 'all'")
     parser.add_argument(
@@ -736,6 +765,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="", help="model id to drive the suite with")
     parser.add_argument("--base-url", default="", help="OpenAI-compatible endpoint")
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY", help="env var holding the endpoint's key")
+    parser.add_argument("--profile", choices=("bf16", "rtx5090-poc"), default=None, help="pinned base model profile")
+    parser.add_argument("--release-root", type=Path, help="resolve the exact active model and agent for this epoch")
+    parser.add_argument("--serving-config", type=Path, help="authenticated exact-model HTTPS deployment configuration")
+    parser.add_argument("--fixture-serving", type=Path, help="explicit CPU serving responses; fixture roots only")
+    parser.add_argument("--fixture-root", type=Path, help="existing immutable fixture authority for CPU responses")
+    parser.add_argument("--temperature", type=float, default=None, help="explicit sampling temperature")
+    parser.add_argument("--top-p", type=float, default=None, help="explicit nucleus sampling probability")
     # Default from the pin, not from a literal. `hermes/base_model.json` records
     # `hermes_dialect: hermes-4` with its evidence -- the model's own chat template emits
     # `<think>` and never `<scratch_pad>` -- and this flag defaulted to `hermes-3`, which
@@ -748,9 +784,12 @@ def main(argv: list[str] | None = None) -> int:
     # wrong, because the model complied -- with the wrong contract.
     parser.add_argument(
         "--dialect",
-        default=_pinned_dialect(),
+        default=None,
         choices=sorted(DIALECTS),
         help="Hermes wire dialect; defaults to hermes_dialect from hermes/base_model.json",
+    )
+    parser.add_argument(
+        "--evaluation-context", type=Path, default=None, help="validator-owned round identity and attempt schedule"
     )
     parser.add_argument("--repeats", type=int, default=1, help="run each task N times and report flakiness")
     parser.add_argument(
@@ -813,6 +852,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    explicit_dialect = args.dialect
+    args.dialect = args.dialect or _pinned_dialect()
 
     tags = tuple(t.strip() for t in args.tags.split(",") if t.strip())
     tasks = load_suite(args.suite, root=args.task_root, tags=tags)
@@ -900,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{task.task_id}\t{','.join(task.tags)}\t{task.prompt[:70]}")
         return 0
 
-    if not args.model or not args.base_url:
+    if not args.model or (not args.base_url and args.fixture_serving is None and args.serving_config is None):
         # Still a refusal, but a narrower one than before: the harness can run now, it
         # just will not invent a model to run against. Reporting success_rate 0.0 for a
         # suite nothing attempted would be a measurement of nothing.
@@ -919,6 +960,82 @@ def main(argv: list[str] | None = None) -> int:
     schemas = load_tool_schemas(HARNESS_DIR / "tools.json")
     system_prompt = (HARNESS_DIR / "system_prompt.txt").read_text(encoding="utf-8")
 
+    # Keep the same final byte-capture order as admitted base execution: subsequent
+    # transport reads cannot replace the already captured miner prompt snapshot.
+    miner_surface = None
+    if args.miner_dir is not None:
+        from validator.intake import IntakeError, capture_surface
+
+        try:
+            miner_surface = capture_surface(args.miner_dir, allow_empty=True)
+        except IntakeError as exc:
+            print(f"hermesbench: miner submission refused: {exc}", file=sys.stderr)
+            return 2
+
+    # Preserve the independently captured context through the final consumer. This
+    # also covers baseline execution, whose expected miner surface is explicitly absent.
+    evaluation_context = None
+    if expected is not None or args.evaluation_context is not None:
+        from hermes.evidence_json import evidence_object
+        from validator.score import ScoreError
+
+        try:
+            evaluation_context = (
+                expected.checked_context(args.miner_dir, args.evaluation_context)
+                if expected is not None
+                else evidence_object(args.evaluation_context.read_bytes())
+            )
+        except (ValueError, OSError) as exc:
+            raise ScoreError(f"invalid evaluation context: {exc}") from exc
+
+    pair = None
+    epoch = evaluation_context["epoch"] if evaluation_context is not None else {}
+    competition = (
+        evaluation_context is not None and evaluation_context["epoch"].get("schema") == "spark-competition-epoch-v1"
+    )
+    selected_profile = args.profile or "bf16"
+    selected_model = None
+    if args.release_root is not None or args.profile is not None or competition:
+        from admin.artifacts import StageError
+        from admin.competition_pair import active_pair, base_agent, base_profile, check_pair
+
+        if evaluation_context is None:
+            raise StageError("active release execution requires a committed evaluation context")
+        epoch = evaluation_context["epoch"]
+        if args.release_root is not None:
+            pair = active_pair(args.release_root)
+            check_pair(pair, epoch=epoch, origin=evaluation_context["origin"], model=args.model)
+            agent = pair["agent_record"]
+            selected_model = {"repository": pair["model"]["base_model"], "revision": pair["model_id"]}
+            selected_profile = pair["model"]["profile"]
+        else:
+            if "incumbent" in epoch:
+                raise StageError("derived competition epoch requires its release authority")
+            selected_model = base_profile(selected_profile)
+            if args.model != selected_model["repository"]:
+                raise StageError("bootstrap model differs from the selected pinned profile")
+            agent = base_agent(selected_profile)
+        if epoch.get("profile") != selected_profile:
+            raise StageError("competition profile differs from its committed epoch")
+        system_prompt, schemas = agent["system"], agent["tool_schemas"]
+        # Agent bytes choose dialect and tool framing; CLI flags cannot replace them.
+        if explicit_dialect is not None and explicit_dialect != agent["dialect"]:
+            raise StageError("CLI dialect differs from the active agent")
+        if args.native_tool_messages and not agent["native_tool_messages"]:
+            raise StageError("CLI tool framing differs from the active agent")
+        args.dialect = agent["dialect"]
+        args.native_tool_messages = agent["native_tool_messages"]
+
+    if args.out and not competition:
+        from hermes.harness import HarnessError
+        from hermes.pin import build_pin
+
+        try:
+            build_pin(system_prompt=system_prompt, tool_schemas=schemas)
+        except (HarnessError, OSError) as exc:
+            print(f"hermesbench: cannot pin this run before execution: {exc}", file=sys.stderr)
+            return 2
+
     # The step that made the miner-editable surface reachable. `hermes.miner_contract` and
     # `hermes.profile` were both built and tested and called from nowhere but tests, so a
     # submission could be validated and then had no way to affect a run: this file read one
@@ -929,22 +1046,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.miner_dir is not None:
         from hermes.base_model import load as load_pin
         from hermes.profile import PINNED_CONFIG_KEYS, ProfileError, assemble, compose_system_prompt
+        from validator.intake import IntakeError
 
         pin = load_pin()
         try:
+            assert miner_surface is not None
             profile = assemble(
                 # The agent is pinned by commit elsewhere; a run driven from this CLI is
                 # validator-executed by construction, which is what makes the config pin hold.
                 agent_repository="NousResearch/hermes-agent",
                 agent_commit="0" * 40,
-                model_repository=pin.repository,
-                model_revision=pin.revision,
+                model_repository=selected_model["repository"] if selected_model is not None else pin.repository,
+                model_revision=(
+                    pair["model"]["revision"]
+                    if pair is not None
+                    else selected_model["revision"]
+                    if selected_model is not None
+                    else pin.revision
+                ),
                 config=dict.fromkeys(PINNED_CONFIG_KEYS, "pinned"),
-                miner_dir=args.miner_dir,
+                miner_surface=miner_surface,
                 validator_executed=True,
             )
-            system_prompt = compose_system_prompt(system_prompt, args.miner_dir)
-        except ProfileError as exc:
+            system_prompt = compose_system_prompt(system_prompt, miner_surface)
+        except (ProfileError, IntakeError) as exc:
             print(f"hermesbench: miner submission refused: {exc}", file=sys.stderr)
             return 2
         print(
@@ -966,11 +1091,112 @@ def main(argv: list[str] | None = None) -> int:
             "protocol_clean true, because it complied with the wrong contract.",
             file=sys.stderr,
         )
-    complete = openai_completion(base_url=args.base_url, model=args.model, api_key=os.environ.get(args.api_key_env, ""))
+    sampling = {
+        key: value for key, value in {"temperature": args.temperature, "top_p": args.top_p}.items() if value is not None
+    }
+    import math
 
-    def policy_factory(task: Task) -> ServedModelPolicy:
+    if (
+        any(not math.isfinite(value) for value in sampling.values())
+        or (args.temperature is not None and args.temperature < 0)
+        or (args.top_p is not None and not 0 < args.top_p <= 1)
+    ):
+        print("hermesbench: invalid temperature or top-p", file=sys.stderr)
+        return 2
+    executor = LocalToolExecutor(allow_unsandboxed=args.allow_unsandboxed)
+    if evaluation_context is not None:
+        from hermes.base_model import load as load_model_pin
+        from validator.intake import bundle_digest
+        from validator.score import ScoreError
+
+        epoch = evaluation_context["epoch"]
+        revision = selected_model["revision"] if selected_model is not None else load_model_pin().revision
+        if epoch["model_revision"] != revision:
+            raise ScoreError("evaluation context model does not match installed model pin")
+        # Build the same harness identity used by a run manifest, before spending inference.
+        if competition:
+            from admin.competition_pair import base_agent_id, competition_harness
+
+            agent_id = pair["agent_id"] if pair is not None else base_agent_id(selected_profile)
+            if epoch.get("agent_id") != agent_id:
+                raise ScoreError("competition epoch differs from executed agent")
+            from hermesbench.execution import context_snapshot
+
+            if context_snapshot(epoch.get("sampling", {})) != context_snapshot(sampling):
+                raise ScoreError("competition sampling differs from committed epoch")
+            observed = competition_harness(
+                tasks,
+                agent_id=agent_id,
+                suite_name=args.suite,
+                salt=salt,
+                tool_timeout_s=executor.timeout_s,
+                sampling=sampling,
+            )
+        else:
+            observed = observed_harness(
+                tasks, suite_name=args.suite, salt=salt, executor="local", tool_timeout_s=executor.timeout_s
+            )
+        if epoch["harness_digest"] != observed:
+            raise ScoreError("evaluation context harness does not match observed harness")
+        if miner_surface is not None:
+            actual = bundle_digest(miner_surface)
+            if actual != evaluation_context.get("bundle_sha256"):
+                raise ScoreError("evaluation context bundle does not match runner surface")
+
+    fixture = None
+    remote = None
+    if args.fixture_serving is not None:
+        from admin.artifacts import StageError
+        from admin.competition_pair import FixtureServing
+
+        if not competition or args.fixture_root is None or args.serving_config is not None:
+            raise StageError("fixture serving requires a committed competition epoch and explicit fixture root")
+        assert evaluation_context is not None
+        fixture = FixtureServing(
+            args.fixture_serving,
+            root=args.fixture_root,
+            origin=evaluation_context["origin"],
+            model_id=epoch["model_revision"],
+            agent_id=epoch["agent_id"],
+            epoch=epoch,
+        )
+    elif pair is not None:
+        from admin.artifacts import StageError
+        from admin.competition_pair import serving_record
+        from admin.serving_identity import TrustedServing
+
+        if args.serving_config is None:
+            raise StageError("derived model execution requires trusted serving identity")
+        remote = TrustedServing(
+            serving_record(args.serving_config),
+            model_id=pair["model_id"],
+            origin=pair["origin"],
+            sampling=sampling,
+            budget={"max_tokens": 32768},
+        )
+    elif args.serving_config is not None or args.fixture_root is not None:
+        from admin.artifacts import StageError
+
+        raise StageError("serving options require an active pair or explicit fixture serving")
+    complete = (
+        None
+        if fixture is not None or remote is not None
+        else openai_completion(
+            base_url=args.base_url, model=args.model, api_key=os.environ.get(args.api_key_env, ""), **sampling
+        )
+    )
+
+    def policy_factory(task: Task, attempt: int = 0) -> ServedModelPolicy:
+        completion = (
+            fixture.completion(task.task_id, attempt)
+            if fixture is not None
+            else remote.completion(attempt)
+            if remote is not None
+            else complete
+        )
+        assert completion is not None
         return ServedModelPolicy(
-            complete=complete,
+            complete=completion,
             dialect=dialect,
             tool_schemas=schemas,
             system=system_prompt,
@@ -978,7 +1204,6 @@ def main(argv: list[str] | None = None) -> int:
             native_tool_messages=args.native_tool_messages,
         )
 
-    executor = LocalToolExecutor(allow_unsandboxed=args.allow_unsandboxed)
     sink = JsonlEpisodeSink(args.episodes_out, keep_trajectories=args.keep_trajectories) if args.episodes_out else None
     try:
         metrics, results = run_suite(
@@ -989,12 +1214,20 @@ def main(argv: list[str] | None = None) -> int:
             repeats=args.repeats,
             sink=sink,
             max_concurrency=args.concurrency,
+            evaluation_context=evaluation_context,
+            attempt_policy_factory=policy_factory if fixture is not None or remote is not None else None,
         )
     finally:
         # Closed in `finally` so a crashed run still flushes the episode in flight. The whole
         # point is that a killed run leaves something readable behind.
         if sink is not None:
             sink.close()
+
+    if pair is not None:
+        from admin.competition_pair import active_pair, check_pair
+
+        assert args.release_root is not None and evaluation_context is not None
+        check_pair(active_pair(args.release_root), epoch=epoch, origin=evaluation_context["origin"], model=args.model)
 
     record = metrics.to_record()
     # The interval is reported on every run, not only repeated ones. A fifteen-task suite
@@ -1021,11 +1254,29 @@ def main(argv: list[str] | None = None) -> int:
             metrics=metrics,
             tool_timeout_s=executor.timeout_s,
             salt=salt,
+            harness_digest=epoch["harness_digest"] if competition else None,
         )
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(manifest.to_record(), indent=2) + "\n", encoding="utf-8")
         print(f"wrote run manifest to {args.out}", file=sys.stderr)
     return 0
+
+
+def observed_harness(tasks: list[Task], *, suite_name: str, salt: str, executor: str, tool_timeout_s: int) -> str:
+    """The executed harness identity, also used before a competition run starts."""
+    from hermes.harness import digest_suite, fingerprint_task, harness_digest
+    from hermes.pin import build_pin
+    from hermes.pin import load_tool_schemas as load_schemas
+
+    pin = build_pin(
+        system_prompt=(HARNESS_DIR / "system_prompt.txt").read_text(encoding="utf-8"),
+        tool_schemas=load_schemas(HARNESS_DIR / "tools.json"),
+        container_image_digest=os.environ.get("HERMESBENCH_IMAGE_DIGEST", ""),
+    )
+    suite = digest_suite(suite_name, [fingerprint_task(t, salt=salt) for t in tasks])
+    return harness_digest(
+        pin, suite=suite, executor=executor, observation_limit=OBSERVATION_LIMIT, tool_timeout_s=tool_timeout_s
+    )
 
 
 def build_manifest(
@@ -1038,6 +1289,7 @@ def build_manifest(
     metrics: Any,
     tool_timeout_s: int = 0,
     salt: str = "",
+    harness_digest: str | None = None,
 ) -> Any:
     """Assemble the published record of a run.
 
@@ -1046,30 +1298,14 @@ def build_manifest(
     pin is read from the repository, so a dirty tree fails here rather than producing a
     manifest that describes a state nobody can reproduce.
     """
-    from hermes.harness import RunManifest, TaskResult, digest_suite, fingerprint_task, harness_digest
-    from hermes.pin import build_pin
-    from hermes.pin import load_tool_schemas as _load
+    from hermes.harness import RunManifest, TaskResult, digest_suite, fingerprint_task
 
-    schemas = _load(HARNESS_DIR / "tools.json")
-    pin = build_pin(
-        system_prompt=(HARNESS_DIR / "system_prompt.txt").read_text(encoding="utf-8"),
-        tool_schemas=schemas,
-        container_image_digest=os.environ.get("HERMESBENCH_IMAGE_DIGEST", ""),
-    )
     suite = digest_suite(suite_name, [fingerprint_task(t, salt=salt) for t in tasks])
     return RunManifest(
         model=model,
         suite=suite,
-        harness=harness_digest(
-            pin,
-            suite=suite,
-            executor=executor,
-            observation_limit=OBSERVATION_LIMIT,
-            # Threaded from the executor that actually ran. Introspecting the class gave 0
-            # unconditionally -- its parameters are keyword-only, so __defaults__ is None --
-            # and a harness digest that always records 0 does not describe the run.
-            tool_timeout_s=tool_timeout_s,
-        ),
+        harness=harness_digest
+        or observed_harness(tasks, suite_name=suite_name, salt=salt, executor=executor, tool_timeout_s=tool_timeout_s),
         results=tuple(
             TaskResult(
                 task_id=r.task_id,

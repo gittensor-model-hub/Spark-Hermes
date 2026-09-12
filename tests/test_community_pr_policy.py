@@ -34,6 +34,21 @@ def test_is_optimization_pr():
     assert not policy.is_optimization_pr(None, None)
 
 
+def test_strategy_training_and_data_tracks_enforce_their_diff_boundaries():
+    cases = [
+        ("- [x] **Strategy commitment**", "datasets/strategies.jsonl"),
+        (_TRAINING_BODY, "recipes/example/sft.yaml"),
+        (_DATASET_BODY, "datasets/registry.jsonl"),
+    ]
+    for body, artifact in cases:
+        assert policy.is_optimization_pr(body, [artifact])
+        assert not policy.is_optimization_pr(body, [artifact, "validator/score.py"])
+        assert not policy.is_optimization_pr(body, [artifact, "README.md"])
+    assert not policy.is_optimization_pr("- [x] **Strategy commitment**", ["datasets/registry.jsonl"])
+    assert not policy.is_optimization_pr(_TRAINING_BODY, ["datasets/strategies.jsonl"])
+    assert not policy.is_optimization_pr({}, ["datasets/strategies.jsonl"])
+
+
 def test_should_close_community_pr():
     # community + non-optimization -> close
     assert policy.should_close_community_pr(

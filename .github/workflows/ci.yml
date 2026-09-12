@@ -18,7 +18,18 @@ concurrency:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 was the budget when this suite was ~2600 tests and finished well inside it. The
+    # operator pipeline roughly doubles it to ~3990, and a large share of the new tests spawn
+    # real subprocesses -- installed interpreters out of pytest tmpdirs, supervised train/merge
+    # jobs, cutover fixtures -- which no amount of tuning makes cheap. Measured at 3231s (~54
+    # minutes) locally, so 15 could not pass and GitHub reported the timeout as `cancelled`,
+    # which reads as an infrastructure blip rather than the suite outgrowing its budget.
+    #
+    # Raised to unblock, NOT as the fix. Parallelism is not available here: pytest-xdist is not
+    # a dependency, and `admin.runtime_protocol.campaign_lock` is a single global file lock that
+    # workers would serialise on or deadlock against. The real fix is the slowest subprocess
+    # tests, and it needs the per-test measurement to be worth doing.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -47,3 +58,27 @@ jobs:
 
       - name: Pytest
         run: uv run pytest -q
+
+      - name: Offline CPU pipeline self-check
+        run: uv run python -m admin.cli selfcheck
+
+      - name: Build distributable package
+        run: uv build --wheel
+
+      - name: Verify installed package outside the checkout
+        run: |
+          uv pip install --reinstall --no-deps dist/*.whl
+          cd /tmp
+          "$GITHUB_WORKSPACE/.venv/bin/spark-hermes" selfcheck
+
+  cpu-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build CPU execution image
+        run: docker build --tag spark-hermes:cpu-check .
+      - name: Offline self-check as the container user
+        run: docker run --rm --network none --entrypoint /opt/spark/.venv/bin/spark-hermes spark-hermes:cpu-check selfcheck
+      - name: Verify benchmark entrypoint
+        run: docker run --rm --network none spark-hermes:cpu-check --suite v0,v1 --workspace-root /tmp/tasks --list

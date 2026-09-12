@@ -178,6 +178,45 @@ class IntegrityReport:
         }
 
 
+def validate_integrity_record(record: dict[str, Any]) -> None:
+    """Check serialized report semantics without inventing omitted observations.
+
+    Summary-only exports predate detailed reports and remain supported. When a
+    detail is supplied it constrains the summaries; a full signal list describes
+    exactly the report computed by IntegrityReport, including ordinary warnings.
+    """
+    for key in ("clean", "fully_checked", "disqualified"):
+        if type(record.get(key)) is not bool:
+            raise ValueError(f"missing or non-boolean integrity {key}")
+    if record["clean"] and (not record["fully_checked"] or record["disqualified"]):
+        raise ValueError("contradictory integrity summaries")
+    if "unassessed" in record:
+        unassessed = record["unassessed"]
+        if not isinstance(unassessed, list) or any(not isinstance(item, str) for item in unassessed):
+            raise ValueError("malformed integrity unassessed details")
+        if record["fully_checked"] is not (not unassessed):
+            raise ValueError("integrity summary contradicts unassessed details")
+    if "signals" not in record:
+        return
+    if not isinstance(record["signals"], list):
+        raise ValueError("malformed integrity signals")
+    signals = []
+    for item in record["signals"]:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("code"), str)
+            or not item["code"]
+            or item.get("severity") not in (DISQUALIFYING, WARNING)
+            or not isinstance(item.get("detail"), str)
+        ):
+            raise ValueError("malformed integrity signal entry")
+        signals.append(IntegritySignal(code=item["code"], severity=item["severity"], detail=item["detail"]))
+    expected = IntegrityReport(signals=tuple(signals)).to_record()
+    for key in ("clean", "fully_checked", "disqualified", "unassessed"):
+        if key in record and record[key] != expected[key]:
+            raise ValueError(f"integrity {key} contradicts detailed signals")
+
+
 def digest_paths(workspace: Path, protected: tuple[str, ...]) -> dict[str, str | None]:
     """Hash each protected path. `None` records that it did not exist.
 

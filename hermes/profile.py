@@ -37,8 +37,9 @@ of assumed. It is not a substitute for measurement; it is what measurement shoul
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 # Every key a miner must not be able to move, and the reason each one matters. Pinned in the
@@ -138,6 +139,7 @@ def assemble(
     model_revision: str,
     config: dict[str, Any],
     miner_dir: Path | None = None,
+    miner_surface: Mapping[str, str] | None = None,
     managed_dir: str = "/etc/hermes",
     validator_executed: bool = True,
 ) -> RunProfile:
@@ -155,7 +157,12 @@ def assemble(
         raise ProfileError("; ".join(issues))
 
     files: tuple[str, ...] = ()
-    if miner_dir is not None:
+    if miner_surface is not None:
+        files = tuple(sorted(miner_surface))
+        violations = load_contract().check(list(files))
+        if violations:
+            raise ProfileError("miner submission refused:\n  " + "\n  ".join(str(v) for v in violations))
+    elif miner_dir is not None:
         if not miner_dir.is_dir():
             raise ProfileError(f"miner submission {miner_dir} is not a directory")
         files = tuple(sorted(p.relative_to(miner_dir).as_posix() for p in miner_dir.rglob("*") if p.is_file()))
@@ -206,7 +213,7 @@ def doctor_probe(managed_dir_env: str | None) -> dict[str, Any]:
     }
 
 
-def compose_system_prompt(base: str, miner_dir: Path) -> str:
+def compose_system_prompt(base: str, miner_dir: Path | Mapping[str, str]) -> str:
     """Fold a validated miner submission into the harness system prompt.
 
     `assemble` proves a submission is *allowed*; this is what makes it *take effect*. Until
@@ -245,12 +252,27 @@ def compose_system_prompt(base: str, miner_dir: Path) -> str:
     production would be. Recorded rather than hidden: a miner optimising against this number
     deserves to know which direction the difference runs.
     """
-    soul = miner_dir / "SOUL.md"
-    skills = sorted(miner_dir.glob("skills/*/SKILL.md"))
-    references = sorted(miner_dir.glob("skills/*/references/*.md"))
+    # A runner passes the capture it verified. Local callers can still pass a
+    # directory. Stripping below is prompt framing, never artifact canonicalization.
+    if isinstance(miner_dir, Path):
+        from validator.intake import IntakeError, capture_surface
+
+        try:
+            surface = capture_surface(miner_dir, allow_empty=True)
+        except IntakeError as exc:
+            raise ProfileError(str(exc)) from exc
+    else:
+        surface = miner_dir
+    paths = [PurePosixPath(name) for name in sorted(surface)]
+    skills = [p for p in paths if len(p.parts) == 3 and p.parts[0] == "skills" and p.name == "SKILL.md"]
+    references = [
+        p
+        for p in paths
+        if len(p.parts) == 4 and p.parts[0] == "skills" and p.parts[2] == "references" and p.suffix == ".md"
+    ]
 
     if references:
-        shown = ", ".join(p.relative_to(miner_dir).as_posix() for p in references[:3])
+        shown = ", ".join(p.as_posix() for p in references[:3])
         raise ProfileError(
             f"submission carries {len(references)} reference file(s) ({shown}"
             f"{', ...' if len(references) > 3 else ''}), and this runner has no lazy-loading "
@@ -261,13 +283,13 @@ def compose_system_prompt(base: str, miner_dir: Path) -> str:
         )
 
     parts: list[str] = []
-    if soul.is_file():
-        text = soul.read_text(encoding="utf-8").strip()
+    if "SOUL.md" in surface:
+        text = surface["SOUL.md"].strip()
         if text:
             parts.append(text)
     parts.append(base.strip())
     for skill in skills:
-        text = skill.read_text(encoding="utf-8").strip()
+        text = surface[skill.as_posix()].strip()
         if text:
             parts.append(f"# Strategy: {skill.parent.name}\n\n{text}")
     return "\n\n".join(parts) + "\n"

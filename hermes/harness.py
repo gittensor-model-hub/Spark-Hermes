@@ -371,6 +371,30 @@ class RunManifest:
     notes: str = ""
     schema_version: int = SCHEMA_VERSION
 
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> RunManifest:
+        """Read the same artifact written by the runner, including its comparison digests."""
+        try:
+            if record.get("schema_version") != SCHEMA_VERSION:
+                raise HarnessError("unsupported run-manifest schema")
+            suite = SuiteDigest(**record["suite"])
+            results = record["results"]
+            if not isinstance(results, list) or any(
+                not isinstance(row, dict) or type(row.get("passed")) is not bool for row in results
+            ):
+                raise HarnessError("run-manifest results require boolean passed values")
+            return cls(
+                model=record["model"],
+                suite=suite,
+                harness=record["harness"],
+                results=tuple(TaskResult(**row) for row in results),
+                proves=record.get("proves", PROVES_CONSISTENCY),
+                metrics=record.get("metrics", {}),
+                notes=record.get("notes", ""),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HarnessError(f"invalid run manifest: {exc}") from exc
+
     def __post_init__(self) -> None:
         if not self.model:
             raise HarnessError("a run manifest without a model names no subject; the number is about nothing")
@@ -445,3 +469,36 @@ def comparable(a: RunManifest, b: RunManifest) -> tuple[bool, str]:
     if a.model == b.model:
         return False, f"both manifests are {a.model}; there is nothing to compare"
     return True, ""
+
+
+def crossed_runtime_identity() -> dict[str, Any]:
+    """Content identity for the installed crossed evaluator, independent of agent prompts.
+
+    Works in a dirty checkout or installed wheel; no invented clean Git revision. All
+    Python modules in the execution/scoring packages are covered, including tool and
+    protocol implementations. Callers persist and compare this before and after runs.
+    """
+    import importlib.util
+    import platform
+    import sys
+    from importlib.metadata import distributions
+    from pathlib import Path
+
+    files = {}
+    for package in ("admin", "eval", "hermes", "hermesbench", "miner", "proof", "teacher", "validator"):
+        spec = importlib.util.find_spec(package)
+        if spec is None or spec.origin is None:
+            raise HarnessError(f"missing evaluator package: {package}")
+        root = Path(spec.origin).parent
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix not in {".py", ".yaml", ".json", ".jinja", ".txt"}:
+                continue
+            files[package + "/" + str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    environment = {
+        "python": sys.version,
+        "executable_sha256": hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "dependencies": sorted((d.metadata.get("Name", ""), d.version) for d in distributions()),
+    }
+    return {"evaluator": digest_mapping(files), "environment": digest_mapping(environment), "files": files}

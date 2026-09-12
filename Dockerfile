@@ -11,7 +11,8 @@
 # Pinned by digest rather than tag on purpose. `python:3.12-slim` moves; a benchmark that
 # claims reproducibility while floating on a mutable tag is claiming something it does not
 # have, which is the same failure `PriceBook` and `harness_digest` refuse elsewhere.
-FROM python:3.12-slim@sha256:9c1d9ed7593f2552a4ea47362ec0d2ddf5fca959d1cbc0f4b6d5e33b0e8b8d0d
+# Resolved from the official registry on 2026-09-11 (Python 3.12.14, slim-trixie).
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 # Coreutils the task verifiers actually invoke. Left implicit, a slim base silently changes
 # which tasks are solvable, and the diff is invisible in every task file.
@@ -21,14 +22,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /opt/spark
 
-COPY pyproject.toml uv.lock ./
-RUN pip install --no-cache-dir uv==0.9.7 && uv sync --frozen --extra dev
+COPY pyproject.toml uv.lock README.md ./
+RUN pip install --no-cache-dir uv==0.9.7 && uv sync --frozen --no-install-project
 
+COPY admin/ admin/
 COPY hermes/ hermes/
 COPY hermesbench/ hermesbench/
 COPY eval/ eval/
 COPY proof/ proof/
 COPY teacher/ teacher/
+COPY validator/ validator/
+COPY miner/ miner/
+RUN uv sync --frozen
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -39,4 +44,4 @@ ENV PYTHONUNBUFFERED=1 \
 RUN useradd --create-home --uid 1000 agent && chown -R agent /opt/spark
 USER agent
 
-ENTRYPOINT ["uv", "run", "python", "-m", "hermesbench.runner"]
+ENTRYPOINT ["uv", "run", "--no-sync", "python", "-m", "hermesbench.runner"]

@@ -47,6 +47,7 @@ whose denominator changed between the two numbers being compared.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -108,8 +109,14 @@ class Serving:
     confidential_computing: bool | None = None
 
     def unstated(self) -> list[str]:
-        blank = [f for f in SERVING_FIELDS if not getattr(self, f)]
-        if self.confidential_computing is None:
+        blank = [f for f in ("precision", "device", "engine") if not getattr(self, f).strip()]
+        if not math.isfinite(self.temperature) or self.temperature < 0:
+            blank.append("temperature")
+        if not math.isfinite(self.top_p) or not 0 < self.top_p <= 1:
+            blank.append("top_p")
+        if self.max_model_len <= 0:
+            blank.append("max_model_len")
+        if type(self.confidential_computing) is not bool:
             blank.append("confidential_computing")
         return blank
 
@@ -131,7 +138,7 @@ class Serving:
                 precision=str(record.get("precision") or ""),
                 device=str(record.get("device") or ""),
                 engine=str(record.get("engine") or ""),
-                temperature=float(record.get("temperature") or 0.0),
+                temperature=float(record.get("temperature", float("nan"))),
                 top_p=float(record.get("top_p") or 0.0),
                 max_model_len=int(record.get("max_model_len") or 0),
                 confidential_computing=record.get("confidential_computing"),
@@ -535,6 +542,8 @@ class Decision:
     def to_record(self) -> dict[str, Any]:
         return {
             "verdict": YES if self.promote else NO,
+            "comparison_kind": "model-only",
+            "authorizes_activation": False,
             "incumbent": self.incumbent,
             "candidate": self.candidate,
             "success": self.success.to_record(),
@@ -622,13 +631,34 @@ def load_run(path: Path) -> Run:
         # The usual case: the runner wrote a JSONL log and the run file describes it. The path is
         # resolved against the run file rather than the working directory, so a run file stays
         # valid wherever it is read from.
-        episodes = _read_episode_log(path.parent / str(record["episodes_path"]))
+        episodes_path = path.parent / str(record["episodes_path"])
+        if record.get("episodes_sha256"):
+            try:
+                with episodes_path.open("rb") as stream:
+                    if hashlib.file_digest(stream, "sha256").hexdigest() != record["episodes_sha256"]:
+                        raise PromotionError("episode log changed after evaluation")
+            except OSError as exc:
+                raise PromotionError(f"cannot read episode log: {exc}") from exc
+        episodes = _read_episode_log(episodes_path)
     if not isinstance(episodes, list):
         raise PromotionError(f"{path} carries neither an episodes list nor an episodes_path naming a run log")
+    manifest = None
+    if record.get("manifest_path"):
+        manifest_path = path.parent / str(record["manifest_path"])
+        try:
+            with manifest_path.open("rb") as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != record.get("manifest_sha256"):
+                    raise PromotionError("run manifest changed after evaluation")
+            manifest = RunManifest.from_record(json.loads(manifest_path.read_text()))
+            if manifest.model != record.get("model"):
+                raise PromotionError("run record and manifest name different models")
+        except (OSError, ValueError) as exc:
+            raise PromotionError(f"cannot load run manifest: {exc}") from exc
     return Run(
         model=str(record.get("model") or ""),
         serving=Serving.from_record(record.get("serving") or {}),
         episodes=tuple(Episode.from_record(e) for e in episodes),
+        manifest=manifest,
     )
 
 

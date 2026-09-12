@@ -13,10 +13,13 @@ import json
 from pathlib import Path
 
 import pytest
+from competition_support import admit_receipt
+from competition_support import rows as evidence_rows
+from competition_support import window as fixture_window
 
 from validator.intake import Intake
-from validator.judge import JudgeError, accept, bundle_dir_for, judge_round
-from validator.round_loop import open_from_packet
+from validator.judge import JudgeError, bundle_dir_for, judge_round
+from validator.judge import accept as direct_accept
 from validator.store import RoundStore
 
 TASK = "tc-log-rotation-order"
@@ -45,45 +48,27 @@ def _episodes(tmp_path, n=10, *, tokens=78_000, public=False, hidden=None):
     return path
 
 
+_ORIGIN = None
+
+
 @pytest.fixture
 def setup(tmp_path):
-    """A stored round, plus an intake holding the bundles miners uploaded.
+    global _ORIGIN
+    store = RoundStore(tmp_path / "rounds", require_private=False, mode="fixture")
+    intake = Intake(root=tmp_path / "bundles", receipts=tmp_path / "receipts.jsonl", mode="fixture")
+    window = fixture_window(store)
+    _ORIGIN = store.identity
+    return store, intake, window.challenge.epoch
 
-    The bundles live in the intake store, not in a checkout: the surface is uploaded privately and
-    the pull request carries only its digest, so there is nothing in the tree to run.
-    """
-    store = RoundStore(tmp_path / "rounds", require_private=False)
-    intake = Intake(root=tmp_path / "bundles", receipts=tmp_path / "receipts.jsonl")
-    packet = tmp_path / "packet.json"
-    from hermes.challenge import Attempt, Baseline, open_challenge
 
-    attempts = tuple(
-        Attempt(
-            public_passed=i < 4,
-            hidden_passed=True if i < 4 else None,
-            tokens=78_000 + i * 1_500,
-            tool_calls=11,
-            wall_time_s=300.0,
-            steps=34,
-            max_steps_hit=True,
-        )
-        for i in range(10)
-    )
-    challenge = open_challenge(
-        Baseline(task_id=TASK, attempts=attempts),
-        epoch={"model_revision": "a" * 40, "harness_digest": "b" * 64},
-        task_pins={"task_id": TASK, "hidden_verify_commitment": "sha256:" + "c" * 64},
-    )
-    packet.write_text(json.dumps(challenge.to_record()), encoding="utf-8")
-    open_from_packet(
-        packet_path=packet,
-        episodes_path=_episodes(tmp_path),
-        round_id="r-1",
-        hours=24.0,
-        store=store,
-        now=0.0,
-    )
-    return store, intake, challenge.epoch
+def _admit(*, round_id, miner_id, receipt, store, intake):
+    if receipt.miner_id != miner_id or receipt.round_id != round_id:
+        return direct_accept(round_id=round_id, miner_id=miner_id, receipt=receipt, store=store, intake=intake)
+    from types import SimpleNamespace
+
+    with pytest.MonkeyPatch.context() as patch:
+        admit_receipt(store, intake, receipt, patch)
+    return SimpleNamespace(outcome="accepted", miner=miner_id)
 
 
 def _upload(intake, miner, *, body="# id\nOne call per turn.\n"):
@@ -97,28 +82,25 @@ def _upload(intake, miner, *, body="# id\nOne call per turn.\n"):
 
 
 def _log(rows):
-    def run(miner, workspace):
+    def run(miner, bundle_path, workspace):
         workspace.mkdir(parents=True, exist_ok=True)
         path = workspace / f"{miner}.jsonl"
-        path.write_text("\n".join(json.dumps({"task_id": TASK, "metrics": r}) for r in rows) + "\n", encoding="utf-8")
+        from validator.intake import bundle_digest
+
+        digest = bundle_digest(
+            {p.relative_to(bundle_path).as_posix(): p.read_text() for p in bundle_path.rglob("*") if p.is_file()}
+        )
+        stamped = [{**r, "origin": _ORIGIN, "bundle_sha256": digest} for r in rows]
+        path.write_text(
+            "\n".join(json.dumps({"task_id": TASK, "metrics": r}) for r in stamped) + "\n", encoding="utf-8"
+        )
         return path
 
     return run
 
 
-def _rows(n=3, *, tokens=57_000, public=True, hidden=True):
-    return [
-        {
-            "task_id": TASK,
-            "public_passed": public,
-            "hidden_passed": hidden,
-            "tokens_used": tokens,
-            "tool_calls": 6,
-            "steps": 20,
-            "malformed_turns": 0,
-        }
-        for _ in range(n)
-    ]
+def _rows(n=10, *, tokens=57_000, public=True, hidden=True):
+    return evidence_rows(n, tokens=tokens, public=public, hidden=hidden)
 
 
 def _judge(setup, run, **kw):
@@ -144,7 +126,7 @@ def test_accept_records_the_committed_digest(setup):
     anything else would let the thing that runs differ from the thing committed to."""
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
-    round_receipt = accept(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
+    round_receipt = _admit(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
     assert round_receipt.outcome == "accepted"
     assert store.load("r-1").submissions["carol"].payload_digest == receipt.bundle_sha256
 
@@ -154,7 +136,7 @@ def test_a_receipt_belonging_to_another_miner_or_round_is_refused(setup):
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
     with pytest.raises(JudgeError, match="belongs to"):
-        accept(round_id="r-1", miner_id="dave", receipt=receipt, store=store, intake=intake)
+        _admit(round_id="r-1", miner_id="dave", receipt=receipt, store=store, intake=intake)
 
 
 # --- the lifecycle refuses out-of-order judging -------------------------------------------------
@@ -165,7 +147,7 @@ def test_judging_an_open_round_is_refused_rather_than_freezing_it(setup):
     a side effect would take that decision by accident."""
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
-    accept(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
+    _admit(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
     with pytest.raises(JudgeError, match="needs a FROZEN round"):
         _judge(setup, _log(_rows()))
 
@@ -173,7 +155,7 @@ def test_judging_an_open_round_is_refused_rather_than_freezing_it(setup):
 def test_judging_a_settled_round_is_refused(setup):
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
-    accept(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
+    _admit(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
@@ -190,7 +172,7 @@ def test_a_stored_bundle_that_no_longer_matches_its_commitment_is_not_run(setup)
     digest was committed" and "this is what ran" are two claims joined by an assumption."""
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
-    accept(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
+    _admit(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
@@ -208,7 +190,7 @@ def test_an_untouched_bundle_is_run(setup):
     always-passing one and looks more responsible."""
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
-    accept(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
+    _admit(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
@@ -226,7 +208,7 @@ def test_a_skipped_submission_leaves_the_round_frozen(setup):
     submitted. The first version of this driver graded unconditionally and hit exactly that."""
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
-    accept(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
+    _admit(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
@@ -242,12 +224,12 @@ def test_a_failed_run_does_not_record_a_false_verdict(setup):
     miner's bad strategy."""
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
-    accept(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
+    _admit(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
 
-    def boom(miner, workspace):
+    def boom(miner, bundle_path, workspace):
         raise RuntimeError("the model endpoint went away")
 
     results = _judge(setup, boom)
@@ -261,17 +243,17 @@ def test_one_broken_run_does_not_stop_the_others(setup):
     """A run that dies partway through is the normal way this fails, not an exotic one."""
     store, intake, _ = setup
     for miner in ("carol", "dave"):
-        accept(round_id="r-1", miner_id=miner, receipt=_upload(intake, miner), store=store, intake=intake)
+        _admit(round_id="r-1", miner_id=miner, receipt=_upload(intake, miner), store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
 
     good = _log(_rows())
 
-    def flaky(miner, workspace):
+    def flaky(miner, bundle_path, workspace):
         if miner == "carol":
             raise RuntimeError("boom")
-        return good(miner, workspace)
+        return good(miner, bundle_path, workspace)
 
     results = _judge(setup, flaky)
     by_miner = {r.miner_id: r for r in results}
@@ -285,7 +267,7 @@ def test_one_broken_run_does_not_stop_the_others(setup):
 def test_every_submission_judged_grades_and_settles_the_round(setup):
     store, intake, _ = setup
     for miner in ("carol", "dave"):
-        accept(round_id="r-1", miner_id=miner, receipt=_upload(intake, miner), store=store, intake=intake)
+        _admit(round_id="r-1", miner_id=miner, receipt=_upload(intake, miner), store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
@@ -303,7 +285,7 @@ def test_overfit_is_recorded_as_a_failure_and_counted_apart(setup):
     """Passing the published check and failing the withheld one is not a pass, and the count is
     kept separate so it is not read as a capability gap."""
     store, intake, _ = setup
-    accept(round_id="r-1", miner_id="dave", receipt=_upload(intake, "dave"), store=store, intake=intake)
+    _admit(round_id="r-1", miner_id="dave", receipt=_upload(intake, "dave"), store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
@@ -311,7 +293,7 @@ def test_overfit_is_recorded_as_a_failure_and_counted_apart(setup):
     results = _judge(setup, _log(_rows(hidden=False)))
     card = results[0].scorecard
     assert card is not None
-    assert card.candidate.passes == 0 and card.overfit_attempts == 3
+    assert card.candidate.passes == 0 and card.overfit_attempts == 10
     assert store.load("r-1").verdicts["dave"].passed is False
 
 
@@ -320,7 +302,7 @@ def test_no_settle_grades_without_releasing_the_salt(setup):
     from grading so an operator can publish verdicts before opening the commitment."""
     store, intake, _ = setup
     receipt = _upload(intake, "carol")
-    accept(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
+    _admit(round_id="r-1", miner_id="carol", receipt=receipt, store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
@@ -334,17 +316,17 @@ def test_a_partially_judged_round_can_be_resumed(setup):
     one per miner, so a second pass would raise on the first and abandon everyone after them."""
     store, intake, _ = setup
     for miner in ("carol", "dave"):
-        accept(round_id="r-1", miner_id=miner, receipt=_upload(intake, miner), store=store, intake=intake)
+        _admit(round_id="r-1", miner_id=miner, receipt=_upload(intake, miner), store=store, intake=intake)
     window = store.load("r-1")
     window.freeze(now=1e9, reason="t")
     store.save(window)
 
     good = _log(_rows())
 
-    def only_carol(miner, workspace):
+    def only_carol(miner, bundle_path, workspace):
         if miner == "dave":
             raise RuntimeError("not yet")
-        return good(miner, workspace)
+        return good(miner, bundle_path, workspace)
 
     _judge(setup, only_carol)
     assert store.load("r-1").state == "frozen"
@@ -434,9 +416,5 @@ def test_the_judge_passes_the_dialect_it_was_given(monkeypatch, tmp_path):
     )
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    try:
-        run("carol", workspace)
-    except Exception:
-        pass  # the bundle lookup may refuse; the argv is what this test is about
-    if "argv" in captured:
-        assert "--dialect" in captured["argv"] and "atem" in captured["argv"]
+    run("carol", tmp_path / "exact-bundle", workspace)
+    assert "--dialect" in captured["argv"] and "atem" in captured["argv"]

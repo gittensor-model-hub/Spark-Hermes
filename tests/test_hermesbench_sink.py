@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from hermesbench.sink import JsonlEpisodeSink, SinkError, read_episodes
+from hermesbench.sink import JsonlEpisodeSink, SinkError, read_episode_prefix, read_episodes
 
 
 class _Metrics:
@@ -58,8 +58,10 @@ def test_a_torn_final_line_does_not_make_the_whole_log_unreadable(tmp_path):
     with log.open("a", encoding="utf-8") as handle:
         handle.write('{"episode": 1, "task_id": "half-writ')
 
-    episodes = list(read_episodes(log))
+    episodes = list(read_episode_prefix(log))
     assert [e["task_id"] for e in episodes] == ["done"]
+    with pytest.raises(SinkError, match="truncated"):
+        list(read_episodes(log))
 
 
 def test_a_complete_line_that_does_not_parse_is_refused_not_skipped(tmp_path):
@@ -186,7 +188,9 @@ def test_a_partial_log_from_a_killed_run_is_still_readable(tmp_path):
     out = tmp_path / "episodes.jsonl"
     out.write_text('{"task_id": "a", "success": true}\n{"task_id": "b", "succ')
 
-    recovered = list(read_episodes(out))
+    recovered = list(read_episode_prefix(out))
+    with pytest.raises(SinkError, match="truncated"):
+        list(read_episodes(out))
     assert [r["task_id"] for r in recovered] == ["a"]
 
 

@@ -89,6 +89,16 @@ class Episode:
     # a truncated trajectory is censored mid-work, so it is neither a model to imitate nor an honest
     # measurement of what the attempt cost. See `preference_pairs`.
     truncated: bool = False
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def task_key(self) -> str:
+        from admin.artifacts import content_digest
+
+        return (
+            content_digest({k: self.provenance.get(k) for k in ("task_version", "epoch", "origin", "model_revision")})
+            + self.task_id
+        )
 
     @property
     def usable(self) -> bool:
@@ -135,7 +145,7 @@ class Summary:
 
 
 def read_episodes(path: Path, *, round_id: str, miner_id: str) -> list[Episode]:
-    """Read one episode log into the shape aggregation needs."""
+    """Legacy rendering/inspection helper; does not grant corpus admission authority."""
     from hermes.challenge import episode_metrics_of
     from hermesbench.sink import read_episodes as read_lines
 
@@ -161,6 +171,51 @@ def read_episodes(path: Path, *, round_id: str, miner_id: str) -> list[Episode]:
             )
         )
     return out
+
+
+def admit_episode(
+    row: dict[str, Any], *, round_id: str, miner_id: str, private_required: bool, provenance: dict[str, Any]
+) -> Episode:
+    """Shared operator/competition ingress: strict evidence and complete executed steps."""
+    from hermes.trajectory import AgentTrajectory, validate
+    from validator.score import normalize_episode, validate_execution
+
+    metrics = normalize_episode(row)
+    validate_execution(row, private_required=private_required)
+    raw = row.get("trajectory")
+    if not isinstance(raw, dict) or raw.get("metadata", {}).get("executed") is not True:
+        raise AggregateError("episode has no executed trajectory")
+    if raw.get("task_id") != metrics.get("task_id") or type(raw.get("success")) is not bool:
+        raise AggregateError("trajectory task/success identity is missing or contradictory")
+    if not isinstance(raw.get("tools_available"), list) or not raw["tools_available"]:
+        raise AggregateError("trajectory must retain the tools offered during execution")
+    if raw.get("schema_version") != 1 or type(raw["schema_version"]) is not int:
+        raise AggregateError("unsupported trajectory schema")
+    steps = raw.get("steps")
+    if not isinstance(steps, list) or any(not isinstance(s, dict) for s in steps):
+        raise AggregateError("trajectory must retain complete executed steps")
+    for step in steps:
+        if "content" in step and not isinstance(step["content"], str):
+            raise AggregateError("trajectory content must be text")
+        if step.get("kind") == "tool_result" and type(step.get("ok")) is not bool:
+            raise AggregateError("trajectory tool result needs an observed boolean outcome")
+    trajectory = AgentTrajectory.from_record(raw)
+    validate(trajectory)
+    if len(trajectory.tool_calls) != metrics["tool_calls"] or len(trajectory.steps) != metrics["steps"]:
+        raise AggregateError("trajectory length/tool calls disagree with execution measurements")
+    if not isinstance(metrics.get("dialect"), str) or not metrics["dialect"]:
+        raise AggregateError("missing executed dialect")
+    return Episode(
+        task_id=metrics["task_id"],
+        round_id=round_id,
+        miner_id=miner_id,
+        verified=metrics["success"],
+        overfit=metrics["public_passed"] and metrics.get("hidden_passed") is False,
+        tokens=metrics["tokens_used"],
+        trajectory=raw,
+        dialect=metrics["dialect"],
+        provenance=provenance,
+    )
 
 
 def _render_context(episodes: list[Episode]) -> dict[str, Any]:
@@ -218,17 +273,17 @@ def sft_rows(episodes: list[Episode], *, system_policy: str = "keep", best_only:
     if best_only:
         best: dict[str, Episode] = {}
         for episode in episodes:
-            if not episode.verified or not episode.usable or episode.truncated:
+            if not episode.verified or not episode.usable or episode.truncated or episode.tokens <= 0:
                 continue
-            current = best.get(episode.task_id)
+            current = best.get(episode.task_key)
             if current is None or episode.tokens < current.tokens:
-                best[episode.task_id] = episode
+                best[episode.task_key] = episode
         chosen = {id(episode) for episode in best.values()}
         episodes = [episode for episode in episodes if id(episode) in chosen]
 
     rows: list[dict[str, Any]] = []
     for episode in episodes:
-        if not episode.verified or not episode.usable:
+        if not episode.verified or not episode.usable or episode.tokens <= 0:
             continue
         if episode.truncated:
             # SFT is pure imitation, so this matters more here than in `preference_pairs` -- where a
@@ -248,6 +303,8 @@ def sft_rows(episodes: list[Episode], *, system_policy: str = "keep", best_only:
                 "task_id": episode.task_id,
                 "round_id": episode.round_id,
                 "miner_id": episode.miner_id,
+                "metadata": {"executed": trajectory.metadata.get("executed") is True},
+                **({"provenance": [episode.provenance]} if episode.provenance else {}),
             }
         )
     return rows
@@ -299,6 +356,7 @@ def _efficiency_pairs(
             "typical_tokens": typical,
             "efficiency_margin": EFFICIENCY_MARGIN,
             "verified_episodes": len(verified),
+            **({"provenance": [cheapest.provenance, dearest.provenance]} if cheapest.provenance else {}),
         }
     ]
 
@@ -317,21 +375,25 @@ def preference_pairs(
     from hermes.format import to_messages_record
     from hermes.trajectory import AgentTrajectory
 
+    if max_per_task < 1:
+        raise AggregateError("max_per_task must be positive")
     context = _render_context(episodes)
-    by_task: dict[tuple[str, str], list[Episode]] = {}
+    by_task: dict[tuple[str, str, str, str], list[Episode]] = {}
     for episode in episodes:
         if episode.usable:
-            by_task.setdefault((episode.round_id, episode.task_id), []).append(episode)
+            key = (episode.round_id, episode.task_id, episode.task_key, episode.provenance.get("bundle_sha256", ""))
+            by_task.setdefault(key, []).append(episode)
 
     pairs: list[dict[str, Any]] = []
     capped: list[str] = []
-    for (round_id, task_id), group in sorted(by_task.items()):
+    for (round_id, task_id, _, _bundle), group in sorted(by_task.items()):
         # A truncated episode is never `chosen`: its trajectory stops mid-work at the step budget, so
         # imitating it teaches an agent to stop before finishing. Measured reason this matters -- two
         # runs of this suite had 53% and 56% of episodes truncated, and 5 of 9 capped episodes had
         # already passed, so "verified" and "complete" are not the same thing.
-        chosen = sorted([e for e in group if e.verified and not e.truncated], key=lambda e: e.tokens)
-        rejected = sorted([e for e in group if not e.verified], key=lambda e: -e.tokens)
+        usable = [e for e in group if not e.truncated and e.tokens > 0]
+        chosen = sorted([e for e in usable if e.verified], key=lambda e: e.tokens)
+        rejected = sorted([e for e in usable if not e.verified], key=lambda e: -e.tokens)
         made = 0
         if not chosen:
             continue
@@ -368,6 +430,7 @@ def preference_pairs(
                         # teach different things and a trainer may want to weight them differently;
                         # a corpus that does not say which is which cannot be reweighted afterwards.
                         "kind": "correctness",
+                        **({"provenance": [good.provenance, bad.provenance]} if good.provenance else {}),
                     }
                 )
                 made += 1
@@ -383,6 +446,7 @@ def aggregate(
     out: Path,
     *,
     max_per_task: int = MAX_PAIRS_PER_TASK,
+    best_only: bool = True,
 ) -> Summary:
     """Write both datasets. Refuses a corpus with no trajectories rather than emitting nothing."""
     summary = Summary(episodes_read=len(episodes))
@@ -396,8 +460,28 @@ def aggregate(
             "look the same as a run that produced nothing worth training on."
         )
 
-    rows = sft_rows(episodes)
+    rows = sft_rows(episodes, best_only=best_only)
     pairs, capped = preference_pairs(episodes, max_per_task=max_per_task)
+    # Preference messages need the same schema block as SFT. Retain the exact
+    # task/round tool set instead of silently dropping it when taking ["messages"].
+    from hermes.format import to_messages_record
+    from hermes.trajectory import AgentTrajectory
+
+    context = _render_context(episodes)
+    tools_by_task = {}
+    paired_tasks = {(p["round_id"], p["task_id"]) for p in pairs}
+    for episode in episodes:
+        key = (episode.round_id, episode.task_id)
+        if episode.usable and not episode.truncated and episode.tokens > 0 and key in paired_tasks:
+            record = to_messages_record(AgentTrajectory.from_record(episode.trajectory), **context)
+            tools = record.get("tools")
+            if key in tools_by_task and tools_by_task[key] != tools:
+                raise AggregateError(f"{episode.task_id}: preference episodes used different tool schemas")
+            tools_by_task[key] = tools
+    for pair in pairs:
+        tools = tools_by_task.get((pair["round_id"], pair["task_id"]))
+        if tools:
+            pair["tools"] = tools
     summary.sft_rows = len(rows)
     summary.pairs = len(pairs)
     summary.capped = capped
@@ -436,31 +520,24 @@ def collect(
     rounds: Path | None = None,
     episode_root: Path | None = None,
     store: Any = None,
+    replay: Any = None,
+    source: str | None = None,
+    round_ids: list[str] | None = None,
 ) -> list[Episode]:
-    """Every episode from every settled round, with the round and miner it belongs to.
-
-    Only SETTLED rounds. A round still open or frozen may yet change, and a dataset built from one
-    would have to be rebuilt when it did -- silently, because nothing records which rounds a
-    dataset was made from.
-    """
+    """Collect through configured committed authority, never a SETTLED JSON snapshot."""
     from hermes.round import SETTLED
     from validator.store import RoundStore
 
-    store = store or RoundStore(rounds)
-    root = episode_root or Path("var/judge")
-    out: list[Episode] = []
-    for round_id in store.round_ids():
-        try:
-            window = store.load(round_id)
-        except Exception:  # noqa: BLE001 - one unreadable round must not stop the aggregation
-            continue
-        if window.state != SETTLED:
-            continue
-        for miner_id in sorted(window.submissions):
-            log = root / round_id / f"{miner_id}.jsonl"
-            if log.is_file():
-                out.extend(read_episodes(log, round_id=round_id, miner_id=miner_id))
-    return out
+    if replay is None:
+        store = store or RoundStore(rounds)
+        if any(store.load(r).state == SETTLED for r in store.round_ids()):
+            raise AggregateError("settled snapshots are not authority; configure admin.replay with committed sources")
+        return []
+    if not source or not round_ids:
+        raise AggregateError("collection requires an explicit configured source and round IDs")
+    for round_id in round_ids:
+        replay.import_round(source, round_id)
+    return replay.experiences()[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -472,16 +549,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--episodes", type=Path, default=Path("var/judge"))
     parser.add_argument("--out", type=Path, default=Path("var/datasets"))
     parser.add_argument("--max-pairs-per-task", type=int, default=MAX_PAIRS_PER_TASK)
+    parser.add_argument("--replay-root", type=Path)
+    parser.add_argument("--source")
+    parser.add_argument("--round", action="append", dest="round_ids")
+    parser.add_argument("--mode", choices=("production", "fixture"))
+    parser.add_argument("--namespace")
     args = parser.parse_args(argv)
 
     try:
-        episodes = collect(rounds=args.rounds, episode_root=args.episodes)
-        summary = aggregate(episodes, args.out, max_per_task=args.max_pairs_per_task)
-    except AggregateError as exc:
+        from admin.pipeline import Workspace
+        from admin.replay import ReplayStore
+        from validator.persistence import state_identity
+
+        if args.replay_root is None:
+            raise AggregateError("configure --replay-root; raw episode paths/SETTLED snapshots cannot authorize corpus")
+        replay = ReplayStore(args.replay_root, mode=args.mode, namespace=args.namespace)
+        collect(replay=replay, source=args.source, round_ids=args.round_ids)
+        state_identity(args.out, mode=args.mode, namespace=args.namespace)
+        record = replay.freeze(Workspace(args.out))
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
         print(f"validator.aggregate: {exc}", file=sys.stderr)
         return 2
 
-    record = summary.to_record()
     print(f"read {record['episodes_read']} episode(s) from settled rounds")
     print(f"  {record['sft_rows']} SFT row(s)          -> {args.out / SFT_FILE}")
     print(f"  {record['preference_pairs']} preference pair(s) -> {args.out / PREFERENCE_FILE}")

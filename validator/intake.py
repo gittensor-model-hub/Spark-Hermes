@@ -45,10 +45,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
+import re
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from hermes.evidence_json import evidence_object
+from validator.persistence import atomic_write, locked, state_identity, sync_directory
 
 # A surface is prose. These are generous for that and small enough that a thousand of them is not
 # a storage problem, which is the point: the limit exists so that refusing is cheap.
@@ -81,6 +89,7 @@ class Receipt:
     files: int
     bytes: int
     status: str = PENDING
+    origin: dict[str, str] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -92,20 +101,43 @@ class Receipt:
             "files": self.files,
             "bytes": self.bytes,
             "status": self.status,
+            "origin": self.origin,
         }
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Receipt:
-        return cls(
-            submission_id=str(record["submission_id"]),
-            round_id=str(record["round_id"]),
-            miner_id=str(record["miner_id"]),
-            bundle_sha256=str(record["bundle_sha256"]),
-            received_at=float(record.get("received_at") or 0.0),
-            files=int(record.get("files") or 0),
-            bytes=int(record.get("bytes") or 0),
-            status=str(record.get("status") or PENDING),
+        if not isinstance(record, dict) or set(record) != set(cls.__dataclass_fields__):
+            raise IntakeError("malformed receipt fields")
+        for key in ("round_id", "miner_id"):
+            check_segment(record[key], key)
+        if not isinstance(record["bundle_sha256"], str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", record["bundle_sha256"]
+        ):
+            raise IntakeError("malformed receipt digest")
+        expected = submission_id(
+            round_id=record["round_id"], miner_id=record["miner_id"], digest=record["bundle_sha256"]
         )
+        if record["submission_id"] != expected or record["status"] not in STATUSES:
+            raise IntakeError("malformed receipt identity/status")
+        if any(type(record[k]) is not int or record[k] <= 0 for k in ("files", "bytes")):
+            raise IntakeError("malformed receipt counts")
+        stamp = record["received_at"]
+        if type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp < 0:
+            raise IntakeError("malformed receipt timestamp")
+        origin = record["origin"]
+        if (
+            not isinstance(origin, dict)
+            or set(origin) != {"mode", "namespace", "issuer"}
+            or origin.get("mode") not in ("production", "fixture")
+            or any(not isinstance(v, str) or not v for v in origin.values())
+        ):
+            raise IntakeError("receipt has no valid origin")
+        return cls(**record)
+
+
+def check_segment(value: Any, name: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
+        raise IntakeError(f"{name} {value!r} must be a single path segment")
 
 
 def canonical(files: dict[str, str]) -> bytes:
@@ -127,6 +159,11 @@ def check_paths(files: dict[str, str]) -> list[str]:
     """
     problems: list[str] = []
     for raw in sorted(files):
+        try:
+            raw.encode("utf-8")
+        except UnicodeEncodeError:
+            problems.append(f"{raw!r}: path must be encodable as UTF-8")
+            continue
         if not raw or raw != raw.strip():
             problems.append(f"{raw!r}: a path may not be empty or carry surrounding whitespace")
             continue
@@ -138,6 +175,9 @@ def check_paths(files: dict[str, str]) -> list[str]:
             continue
         if "\x00" in raw:
             problems.append(f"{raw!r}: contains a null byte")
+            continue
+        if PurePosixPath(raw).as_posix() != raw:
+            problems.append(f"{raw!r}: path must be canonical")
             continue
         parts = PurePosixPath(raw).parts
         if any(part in ("..", ".") for part in parts):
@@ -152,7 +192,11 @@ def check_size(files: dict[str, str]) -> list[str]:
         problems.append(f"{len(files)} files; at most {MAX_FILES} are accepted")
     total = 0
     for path in sorted(files):
-        size = len(files[path].encode("utf-8"))
+        try:
+            size = len(files[path].encode("utf-8"))
+        except UnicodeEncodeError:
+            problems.append(f"{path!r}: content must be encodable as UTF-8")
+            continue
         total += size
         if size > MAX_FILE_BYTES:
             problems.append(f"{path}: {size:,} bytes; at most {MAX_FILE_BYTES:,} per file")
@@ -205,6 +249,39 @@ def submission_id(*, round_id: str, miner_id: str, digest: str) -> str:
     return hashlib.sha256(material).hexdigest()[:16]
 
 
+def capture_surface(root: Path, *, allow_empty: bool = False) -> dict[str, str]:
+    """Capture actual UTF-8 files once, without newline or Unicode normalization.
+
+    The canonical digest describes this map, not a rendered prompt or the sibling
+    sidecar. Consumers that check and render a surface must use the same capture.
+    Empty directories are allowed only for local baseline/profile consumers.
+    """
+    try:
+        if any(p.is_symlink() for p in (root, *root.parents)):
+            raise IntakeError("symlink in bundle store")
+        if not root.is_dir():
+            raise IntakeError("bundle missing from intake store")
+        files: dict[str, str] = {}
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink():
+                raise IntakeError("symlink in stored bundle")
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise IntakeError("stored bundle contains a non-regular file")
+            name = path.relative_to(root).as_posix()
+            try:
+                files[name] = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise IntakeError(f"{name!r}: stored bundle content must be valid UTF-8") from exc
+        problems = validate(files) if files or not allow_empty else []
+        if problems:
+            raise IntakeError("; ".join(problems))
+        return files
+    except OSError as exc:
+        raise IntakeError("cannot capture stored bundle files") from exc
+
+
 def canonical_path(bundle_dir: Path) -> Path:
     """The canonical serialisation that sits beside a bundle directory, never within it."""
     return bundle_dir.with_name(bundle_dir.name + ".bundle.json")
@@ -229,97 +306,142 @@ class Intake:
     root: Path = field(default_factory=lambda: SUBMISSION_DIR)
     receipts: Path = field(default_factory=lambda: RECEIPTS)
 
+    mode: str | None = None
+    namespace: str | None = None
+
+    @property
+    def identity(self) -> dict[str, str]:
+        return state_identity(self.root, mode=self.mode, namespace=self.namespace)
+
     def canonical_path_for(self, receipt: Receipt) -> Path:
         """Where the canonical serialisation of a stored bundle lives."""
         return canonical_path(self.bundle_dir(receipt))
 
     def accept(self, *, round_id: str, miner_id: str, files: dict[str, str], now: float | None = None) -> Receipt:
         """Validate, store, and record. Raises `IntakeError` with every reason on refusal."""
-        for name, value in (("round_id", round_id), ("miner_id", miner_id)):
-            if not value or "/" in value or value in (".", ".."):
-                # Both become directory components below.
-                raise IntakeError(f"{name} {value!r} must be a single path segment")
-
+        check_segment(round_id, "round_id")
+        check_segment(miner_id, "miner_id")
         problems = validate(files)
         if problems:
             raise IntakeError("; ".join(problems))
-
         digest = bundle_digest(files)
         ident = submission_id(round_id=round_id, miner_id=miner_id, digest=digest)
-        target = self.root / round_id / miner_id / ident
-        target.mkdir(parents=True, exist_ok=True)
-        for path, content in sorted(files.items()):
-            destination = target / path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(content, encoding="utf-8")
-        # BESIDE the bundle directory, not inside it. This is the canonical serialisation the
-        # digest is computed over -- validator metadata, not part of the miner's surface -- and
-        # `validator.judge` hands that directory to the runner as `--miner-dir`. The miner contract
-        # admits SOUL.md, skills/*/SKILL.md and skills/*/references/*.md and refuses everything
-        # else rather than assuming it harmless, so a bundle.json inside made the runner exit 2 on
-        # EVERY judged submission. The competition could not run, and nothing caught it: the judge
-        # filters this name out of its own path accounting, so the file was invisible from both
-        # sides until an end-to-end round was actually attempted.
-        canonical_path(target).write_text(canonical(files).decode("utf-8") + "\n", encoding="utf-8")
-
         receipt = Receipt(
             submission_id=ident,
             round_id=round_id,
             miner_id=miner_id,
             bundle_sha256=digest,
             received_at=time.time() if now is None else now,
+            origin=self.identity,
             files=len(files),
             bytes=sum(len(v.encode("utf-8")) for v in files.values()),
         )
-        self.append_receipt(receipt)
+        Receipt.from_record(receipt.to_record())
+        with locked(self.receipts.with_suffix(".lock")):
+            existing = self.read_receipts()
+            prior = next((r for r in existing if r.submission_id == ident), None)
+            if prior is not None:
+                # A retry returns the original receipt, including its timestamp/status.
+                self.verify(prior)
+                return prior
+            target = self.bundle_dir(receipt)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            stage = Path(tempfile.mkdtemp(prefix=".upload-", dir=target.parent))
+            try:
+                for path, content in sorted(files.items()):
+                    atomic_write(stage / path, content.encode("utf-8"))
+                for directory in sorted(
+                    (p for p in stage.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True
+                ):
+                    sync_directory(directory)
+                sync_directory(stage)
+                if target.exists():
+                    # Recovery after a crash before receipt publication: never overwrite bytes.
+                    self.verify(receipt)
+                else:
+                    os.replace(stage, target)
+                    sync_directory(target.parent)
+                atomic_write(canonical_path(target), canonical(files) + b"\n")
+                self._write_receipts([*existing, receipt])
+            finally:
+                if stage.exists():
+                    shutil.rmtree(stage)
         return receipt
 
-    def append_receipt(self, receipt: Receipt) -> None:
-        """Append one receipt, replacing any earlier line for the same submission id.
+    def verify(self, receipt: Receipt, *, root: Path | None = None) -> Path:
+        """Check attribution, paths and every byte. No symlink or omitted metadata file."""
+        Receipt.from_record(receipt.to_record())
+        if receipt.origin != self.identity:
+            raise IntakeError("receipt belongs to another intake trust domain")
+        base = root or self.root
+        target = base / receipt.round_id / receipt.miner_id / receipt.submission_id
+        if any(p.is_symlink() for p in (base, target.parent.parent, target.parent, target)):
+            raise IntakeError("symlink in bundle store")
+        if not target.is_dir():
+            raise IntakeError("bundle missing from intake store")
+        files = capture_surface(target)
+        if bundle_digest(files) != receipt.bundle_sha256:
+            raise IntakeError("stored bundle no longer digests to what was committed")
+        if len(files) != receipt.files or sum(len(v.encode("utf-8")) for v in files.values()) != receipt.bytes:
+            raise IntakeError("stored bundle counts disagree with receipt")
+        return target.resolve()
 
-        Rewritten in place rather than appended blindly because a status moves -- pending, then
-        evaluating, then result -- and a reader taking the first match would report a finished
-        submission as pending forever.
-        """
-        self.receipts.parent.mkdir(parents=True, exist_ok=True)
-        existing = [r for r in self.read_receipts() if r.submission_id != receipt.submission_id]
-        existing.append(receipt)
-        existing.sort(key=lambda r: (r.received_at, r.submission_id))
-        with self.receipts.open("w", encoding="utf-8") as handle:
-            for entry in existing:
-                handle.write(json.dumps(entry.to_record(), sort_keys=True) + "\n")
+    def _write_receipts(self, receipts: list[Receipt]) -> None:
+        receipts.sort(key=lambda r: (r.received_at, r.submission_id))
+        atomic_write(
+            self.receipts, "".join(json.dumps(r.to_record(), sort_keys=True) + "\n" for r in receipts).encode()
+        )
+
+    def append_receipt(self, receipt: Receipt) -> None:
+        """Atomic status update; immutable receipt attribution cannot be replaced."""
+        Receipt.from_record(receipt.to_record())
+        with locked(self.receipts.with_suffix(".lock")):
+            existing = self.read_receipts()
+            for prior in existing:
+                if prior.submission_id == receipt.submission_id:
+                    if {**prior.to_record(), "status": receipt.status} != receipt.to_record():
+                        raise IntakeError("cannot rewrite receipt attribution")
+            self.verify(receipt)
+            self._write_receipts([r for r in existing if r.submission_id != receipt.submission_id] + [receipt])
 
     def read_receipts(self) -> list[Receipt]:
-        if not self.receipts.is_file():
+        if not self.receipts.exists():
             return []
-        out: list[Receipt] = []
-        for line in self.receipts.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(Receipt.from_record(json.loads(line)))
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                # A malformed line is skipped rather than fatal: one bad receipt must not make the
-                # dashboard unreadable or stop a later status from being recorded.
-                continue
+        raw = self.receipts.read_text(encoding="utf-8")
+        if raw and not raw.endswith("\n"):
+            raise IntakeError("truncated receipt store; refusing partial records")
+        out = []
+        try:
+            for line in raw.splitlines():
+                out.append(Receipt.from_record(evidence_object(line)))
+        except (ValueError, TypeError, KeyError) as exc:
+            raise IntakeError("corrupt receipt store; refusing partial records") from exc
+        if any(r.origin != self.identity for r in out):
+            raise IntakeError("receipt belongs to another intake trust domain")
+        if len({r.submission_id for r in out}) != len(out):
+            raise IntakeError("duplicate receipt identities in store")
         return out
 
     def set_status(self, submission_id_: str, status: str) -> Receipt:
         if status not in STATUSES:
             raise IntakeError(f"{status!r} is not one of {list(STATUSES)}")
-        for receipt in self.read_receipts():
-            if receipt.submission_id == submission_id_:
-                updated = Receipt(**{**receipt.to_record(), "status": status})
-                self.append_receipt(updated)
-                return updated
+        with locked(self.receipts.with_suffix(".lock")):
+            existing = self.read_receipts()
+            for index, receipt in enumerate(existing):
+                if receipt.submission_id == submission_id_:
+                    updated = Receipt(**{**receipt.to_record(), "status": status})
+                    existing[index] = updated
+                    self._write_receipts(existing)
+                    return updated
         raise IntakeError(f"no submission {submission_id_!r}")
 
     def bundle_dir(self, receipt: Receipt) -> Path:
         return self.root / receipt.round_id / receipt.miner_id / receipt.submission_id
 
 
-def receipt_for_digest(receipts: list[Receipt], *, round_id: str, digest: str) -> Receipt | None:
+def receipt_for_digest(
+    receipts: list[Receipt], *, round_id: str, digest: str, miner_id: str | None = None
+) -> Receipt | None:
     """The receipt a pull request's digest refers to, or None.
 
     This is what makes the public commitment authoritative: the pull request names a digest, and
@@ -328,7 +450,11 @@ def receipt_for_digest(receipts: list[Receipt], *, round_id: str, digest: str) -
     first.
     """
     for receipt in receipts:
-        if receipt.round_id == round_id and receipt.bundle_sha256 == digest:
+        if (
+            receipt.round_id == round_id
+            and receipt.bundle_sha256 == digest
+            and (miner_id is None or receipt.miner_id == miner_id)
+        ):
             return receipt
     return None
 
@@ -349,6 +475,7 @@ __all__ = [
     "bundle_digest",
     "canonical_path",
     "canonical",
+    "capture_surface",
     "check_contract",
     "check_paths",
     "check_size",

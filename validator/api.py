@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -71,7 +72,20 @@ from hermes.round import (
 # the two frozensets would let a round receipt start publishing intake fields and nobody would
 # notice. The screen still refuses anything outside the union.
 INTAKE_FIELDS = frozenset(
-    {"submission_id", "round_id", "miner_id", "bundle_sha256", "received_at", "files", "bytes", "status"}
+    {
+        "submission_id",
+        "round_id",
+        "miner_id",
+        "bundle_sha256",
+        "received_at",
+        "files",
+        "bytes",
+        "status",
+        "origin",
+        "mode",
+        "namespace",
+        "issuer",
+    }
 )
 
 # Rounds this process is serving, keyed by round_id.
@@ -360,7 +374,7 @@ def submit(round_id: str, request: SubmissionRequest) -> dict[str, Any]:
     from validator.intake import Intake, IntakeError
 
     window = _round_or_404(round_id)
-    if window.state != OPEN:
+    if window.state != OPEN or time.time() > window.deadline:
         raise HTTPException(
             status_code=409,
             detail=(

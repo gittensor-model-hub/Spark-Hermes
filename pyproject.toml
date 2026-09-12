@@ -14,7 +14,11 @@ dependencies = [
     "click==8.4.2",
     "rich==15.0.0",
     "huggingface_hub>=1.27.0",
+    "jinja2>=3.1.4",
 ]
+
+[project.scripts]
+spark-hermes = "admin.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -60,7 +64,7 @@ build-backend = "hatchling.build"
 override-dependencies = ["pytest==9.1.1", "numpy<2.5"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["teacher", "eval", "proof", "hermes", "hermesbench", "validator"]
+packages = ["admin", "teacher", "eval", "proof", "hermes", "hermesbench", "validator", "miner"]
 
 [tool.ruff]
 line-length = 120
@@ -81,7 +85,9 @@ quote-style = "double"
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["teacher", "eval", "proof", "hermes", "hermesbench", "validator"]
+venvPath = "."
+venv = ".venv"
+include = ["admin", "teacher", "eval", "proof", "hermes", "hermesbench", "validator"]
 # Optional training/miner-side entrypoints that import the uninstalled GPU/training
 # stack (torch, flash_attn, axolotl, cut_cross_entropy); not import-resolvable in CI.
 ignore = ["eval/train_prep.py", "eval/export_gsm8k_regression_sample.py"]

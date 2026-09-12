@@ -48,6 +48,7 @@ from eval.rollout_track import (
     added_lines,
     gate,
 )
+from hermes.evidence_json import evidence_object
 
 
 def git_show(ref: str, path: str) -> str:
@@ -82,7 +83,10 @@ def load_round(round_id: str, base_ref: str) -> dict[str, Any]:
     text = git_show(base_ref, (ROUNDS_DIR / f"{round_id}.json").as_posix())
     if not text.strip():
         raise SubmissionError(f"round {round_id!r} has no announcement in the base ref; it was never opened")
-    return json.loads(text)
+    try:
+        return evidence_object(text)
+    except ValueError as exc:
+        raise SubmissionError(f"round {round_id!r} has malformed JSON metadata: {exc}") from exc
 
 
 def fetch_exports(record: dict[str, Any], into: Path) -> Path | None:
@@ -135,8 +139,8 @@ def load_attestation(export_dir: Path | None) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        record = evidence_object(path.read_bytes())
+    except (OSError, ValueError):
         return None
     return record if isinstance(record, dict) else None
 

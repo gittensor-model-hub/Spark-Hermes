@@ -20,6 +20,7 @@ from typing import Any, Callable
 from eval.dataset_verify import MERGE_THRESHOLD_ROWS, REWARDED_DATASET_LABELS, verify_dataset_submission
 from eval.fair_dataset_label import apply_fair_label, compute_rows_selected_for_entry
 from eval.gpu_architecture import dataset_architecture_allowed, normalize_gpu_architecture
+from hermes.evidence_json import evidence_object, evidence_records
 
 REGISTRY_PATH = Path("datasets/registry.jsonl")
 REQUIRED_FIELDS = ("miner", "hf_url", "trajectories_sha256", "rows_total", "dataset_version", "gpu_architecture")
@@ -44,16 +45,10 @@ _LABEL_COLORS = {
 def _load_registry_lines(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    rows: list[dict[str, Any]] = []
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{path}:{line_no}: invalid JSON: {exc}") from exc
-    return rows
+    try:
+        return evidence_records(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"{path}: invalid JSON: {exc}") from exc
 
 
 def parse_added_registry_lines(base_text: str, head_text: str) -> list[dict[str, Any]]:
@@ -63,27 +58,19 @@ def parse_added_registry_lines(base_text: str, head_text: str) -> list[dict[str,
     drive the CI gate (``gate_registry_pr``) must catch that and return a clean
     ``dataset:REJECT`` instead of letting the traceback fail the job.
     """
-    base_lines = {line.strip() for line in base_text.splitlines() if line.strip()}
-    added: list[dict[str, Any]] = []
-    for line_no, line in enumerate(head_text.splitlines(), start=1):
-        line = line.strip()
-        if not line or line in base_lines:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"added registry line {line_no}: invalid JSON: {exc}") from exc
-        if not isinstance(obj, dict):
-            raise ValueError(f"added registry line {line_no}: must be a JSON object, got {type(obj).__name__}")
-        added.append(obj)
-    return added
+    base = evidence_records(base_text)
+    head = evidence_records(head_text)
+    return head[len(base) :]
 
 
 def validate_append_only_registry(base_text: str, head_text: str) -> list[str]:
-    """Require the PR registry to preserve every base line, in order, then append."""
-    base_lines = [line.strip() for line in base_text.splitlines() if line.strip()]
-    head_lines = [line.strip() for line in head_text.splitlines() if line.strip()]
-    if head_lines[: len(base_lines)] != base_lines:
+    """Require the PR registry to preserve every base byte, then append records."""
+    if not head_text.startswith(base_text) or (
+        base_text
+        and not base_text.endswith("\n")
+        and head_text[len(base_text) :]
+        and not head_text[len(base_text) :].startswith("\n")
+    ):
         return [
             "datasets/registry.jsonl is append-only; rebase onto the latest base "
             "and preserve every existing line in order"
@@ -204,8 +191,8 @@ def _pr_state(pr_number: int) -> str | None:
     if result.returncode != 0:
         return None
     try:
-        return json.loads(result.stdout or "{}").get("state")
-    except json.JSONDecodeError:
+        return evidence_object(result.stdout or "{}").get("state")
+    except ValueError:
         return None
 
 
@@ -390,17 +377,16 @@ def gate_registry_pr(
             "submissions": [],
         }
 
-    existing = []
-    for line in base_registry_text.splitlines():
-        line = line.strip()
-        if line:
-            existing.append(json.loads(line))
-
     # Invalid / non-object JSON in the appended line used to raise ValueError /
     # AttributeError out of the gate; catch it so CI gets dataset:REJECT + a
     # helpful close comment instead of a traceback (same class as #173).
     try:
+        existing = evidence_records(base_registry_text)
         added = parse_added_registry_lines(base_registry_text, head_registry_text)
+        for entry in existing:
+            issues = validate_registry_entry(entry)
+            if issues:
+                raise ValueError(f"malformed base registry entry: {'; '.join(issues)}")
     except ValueError as exc:
         return {
             "verified": False,

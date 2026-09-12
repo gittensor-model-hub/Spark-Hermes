@@ -36,11 +36,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hermes.taskgen.dna import VERBATIM_WINDOW
+from hermesbench.tasks import TASKS_ROOT, load_task
 
 # Where the hand-written suite lives. Read from disk rather than listed here: a task added to the
 # suite is an eval task from the moment it exists, and a hard-coded list would silently make the
 # twentieth one trainable.
-EVAL_ROOT = Path("hermesbench/tasks")
+EVAL_ROOT = TASKS_ROOT.resolve()
 
 
 class SplitError(RuntimeError):
@@ -87,8 +88,8 @@ def eval_task_ids(root: Path | None = None) -> tuple[str, ...]:
     if not base.is_dir():
         raise SplitError(f"{base} does not exist; the evaluation suite has to be readable to be protected")
     ids = []
-    for path in sorted(base.rglob("*.yaml")):
-        ids.append(path.stem)
+    for path in sorted([*base.rglob("*.yaml"), *base.rglob("*.yml")]):
+        ids.append(load_task(path).task_id)
     for path in sorted(base.rglob("*.jsonl")):
         ids.append(path.stem)
     if not ids:

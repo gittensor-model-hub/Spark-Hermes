@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from eval.hf_pin import check_revision
+from hermes.evidence_json import evidence_records
 from hermes.harness import digest_mapping
 from hermes.seed import CLOSED, COMMITTED, Round, SeedError
 
@@ -512,13 +513,15 @@ def check_novelty(record: dict[str, Any], registry_text: str) -> list[str]:
     round_key = (record.get("round_id"), record.get("miner_id"))
     receipt_id = record.get("receipt_id")
     issues: list[str] = []
-    for line in registry_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            existing = json.loads(line)
-        except json.JSONDecodeError:
+    try:
+        existing_records = evidence_records(registry_text)
+    except ValueError as exc:
+        return [f"malformed base rollout registry: {exc}"]
+    for existing in existing_records:
+        # Historical schemas can differ, but their exclusion identities cannot be
+        # absent or ambiguous. Do not reinterpret old proof/manifest schemas here.
+        if any(not isinstance(existing.get(k), str) or not existing[k] for k in ("round_id", "miner_id")):
+            issues.append("malformed base rollout identity")
             continue
         if (existing.get("round_id"), existing.get("miner_id")) == round_key:
             issues.append(f"{round_key[1]!r} has already submitted for round {round_key[0]!r}")
@@ -542,9 +545,12 @@ def check_paths(changed_paths: list[str] | None) -> list[str]:
 
 def check_append_only(base_text: str, head_text: str) -> list[str]:
     """The registry is history; a rewrite is rejected even when it is an improvement."""
-    base_lines = [line.strip() for line in base_text.splitlines() if line.strip()]
-    head_lines = [line.strip() for line in head_text.splitlines() if line.strip()]
-    if head_lines[: len(base_lines)] != base_lines:
+    if not head_text.startswith(base_text) or (
+        base_text
+        and not base_text.endswith("\n")
+        and head_text[len(base_text) :]
+        and not head_text[len(base_text) :].startswith("\n")
+    ):
         return [
             f"{ROLLOUT_REGISTRY.as_posix()} is append-only; rebase onto the latest base and preserve "
             "every existing line in order"
@@ -557,20 +563,12 @@ def added_lines(base_text: str, head_text: str) -> list[dict[str, Any]]:
     # Positional, not set membership. A miner resubmitting a line byte-identical to one
     # already in the base would have it silently skipped, and a PR that appends nothing
     # would look like a PR that appends nothing wrong.
-    base = [line.strip() for line in base_text.splitlines() if line.strip()]
-    head = [line.strip() for line in head_text.splitlines() if line.strip()]
-    added = []
-    for number, line in enumerate(head[len(base) :], start=len(base) + 1):
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise SubmissionError(f"line {number} is not valid JSON: {exc.msg}") from exc
-        if not isinstance(record, dict):
-            raise SubmissionError(f"line {number} is not a JSON object")
-        added.append(record)
-    return added
+    try:
+        base = evidence_records(base_text)
+        head = evidence_records(head_text)
+    except ValueError as exc:
+        raise SubmissionError(f"registry is not a JSON object stream (not valid JSON metadata): {exc}") from exc
+    return head[len(base) :]
 
 
 @dataclass(frozen=True)

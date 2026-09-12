@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# Delegate to SparkProof/scripts/install.sh
+# Install the standalone project's CPU development tools and validator.
+# Proof verifier dependencies are CPU packages; hardware attestation is not run here.
 set -euo pipefail
-
-distill_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-sparkproof_root="${SPARKPROOF_ROOT:-$distill_root/../SparkProof}"
-
-if [ ! -x "$sparkproof_root/scripts/install.sh" ]; then
-  echo "error: SparkProof not found at $sparkproof_root — clone beside SparkDistill or set SPARKPROOF_ROOT" >&2
+cd "$(dirname "$0")/.."
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: install uv first (python3 -m pip install uv), then rerun scripts/install.sh" >&2
   exit 1
 fi
-
-exec "$sparkproof_root/scripts/install.sh" --sparkdistill "$distill_root" "$@"
+exec uv sync --frozen --extra dev --extra proof --extra validator "$@"

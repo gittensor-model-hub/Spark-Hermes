@@ -459,12 +459,15 @@ def _download_and_verify_bundle(
     attestation = None
     attestation_path = find_attestation_path(changed_paths)
     if attestation_path is not None:
-        text = _git_show(head_ref, attestation_path)
-        if text:
-            try:
-                attestation = json.loads(text)
-            except json.JSONDecodeError:
-                return None, None, f"{attestation_path}: invalid JSON", None
+        try:
+            from hermes.evidence_json import evidence_object
+
+            text = _git_show(head_ref, attestation_path)
+            if text is None:
+                raise ValueError("attestation could not be read")
+            attestation = evidence_object(text)
+        except ValueError:
+            return None, None, f"{attestation_path}: invalid JSON", None
 
     try:
         # `revision` is used when the submission carries one and left to the Hub's default

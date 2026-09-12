@@ -42,13 +42,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 # The one the gate reads. Imported rather than re-declared: two spellings of this path is how
 # the writer and the reader end up disagreeing about where a round lives.
 from eval.rollout_track import ROUNDS_DIR
-from hermes.seed import CLOSED, COMMITTED, OPEN, Round, SeedError, coverage, duplicated, new_seed
+from hermes.evidence_json import evidence_object
+from hermes.seed import CLOSED, COMMITTED, OPEN, Round, SeedError, coverage, duplicated
+from hermes.seed import open_round as seed_round
 
 
 def announcement_path(round_id: str, root: Path | None = None) -> Path:
@@ -59,7 +62,13 @@ def _load(round_id: str, root: Path | None = None) -> dict[str, Any]:
     path = announcement_path(round_id, root)
     if not path.is_file():
         raise SeedError(f"no announcement at {path}; commit the round first")
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        record = evidence_object(path.read_bytes())
+    except ValueError as exc:
+        raise SeedError(f"invalid round announcement: {exc}") from exc
+    if record.get("round_id") != round_id:
+        raise SeedError("announcement round_id differs from requested round")
+    return record
 
 
 def _write(record: dict[str, Any], round_id: str, root: Path | None = None) -> Path:
@@ -90,12 +99,8 @@ def commit_round(
             f"{path} already exists. Rewriting an announcement changes an assignment miners may "
             "already be working against, so a re-run is refused rather than allowed to overwrite."
         )
-    round_ = Round(
-        round_id=round_id,
-        seed=seed or new_seed(),
-        task_ids=tuple(task_ids),
-        miner_ids=tuple(miner_ids),
-        replicas=replicas,
+    round_ = replace(
+        seed_round(round_id, task_ids, miner_ids, replicas=replicas, seed=seed),
         state=COMMITTED,
     )
     # Seed withheld. `Round.from_record` refuses to rebuild from this file for exactly that
@@ -117,22 +122,9 @@ def open_seed(*, round_id: str, seed: str, root: Path | None = None) -> tuple[Pa
             f"round {round_id} is {record.get('state')!r}; only a COMMITTED round can have its seed "
             "revealed. Re-revealing would let an assignment change after miners saw it."
         )
-    candidate = Round(
-        round_id=round_id,
-        seed=seed,
-        task_ids=tuple(str(t) for t in record.get("task_ids") or ()),
-        miner_ids=tuple(str(m) for m in record.get("miner_ids") or ()),
-        replicas=int(record.get("replicas") or 1),
-        state=OPEN,
-    )
-    published = str(record.get("commitment") or "")
-    if candidate.commitment != published:
-        raise SeedError(
-            f"the supplied seed does not match the published commitment for {round_id}: "
-            f"announcement says {published}, this seed gives {candidate.commitment}. A reveal that "
-            "does not check the digest makes the commitment decorative -- the validator could publish "
-            "one digest and reveal whichever seed produced a convenient assignment."
-        )
+    if "seed" in record and record["seed"] != seed:
+        raise SeedError("supplied seed differs from the seed already recorded")
+    candidate = replace(Round.from_record({**record, "seed": seed}), state=OPEN)
     return _write(candidate.to_record(reveal_seed=True), round_id, root), candidate
 
 
@@ -144,12 +136,14 @@ def close_round(*, round_id: str, root: Path | None = None) -> tuple[Path, dict[
     """
     record = _load(round_id, root)
     if record.get("state") == CLOSED:
+        Round.from_record(record)
         return announcement_path(round_id, root), record
     if record.get("state") != OPEN:
         raise SeedError(
             f"round {round_id} is {record.get('state')!r}; closing a round that never opened would "
             "record a window nobody could submit to as though it had run"
         )
+    Round.from_record(record)
     record["state"] = CLOSED
     return _write(record, round_id, root), record
 

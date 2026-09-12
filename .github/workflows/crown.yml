@@ -1,97 +1,84 @@
 name: crown
 
-# One crown an hour.
-#
-# Score every evaluated submission, keep exactly one, close the rest, move the label, open the next
-# round. One miner is rewarded per hour and everyone else starts again.
-#
-# A barren hour leaves the crown where it is and runs the same task again -- it says nothing about
-# the miner who last cleared the bar. Two barren hours rotate the task, because that is evidence
-# about the task rather than the field.
-#
-# Not on merge. A merge grants nothing by itself, which keeps the crown off the submission path --
-# a mistake here mislabels or wrongly closes a pull request rather than blocking intake.
-#
-# :23 rather than :00 -- the hour mark is where every scheduled job on the platform lands and this
-# one has no reason to queue behind them.
+# Trusted operator jobs only. The active round is persisted by strategy.yml.
+# The dedicated runner must mount a private durable local filesystem at SPARK_STATE_ROOT.
 on:
   schedule:
     - cron: "23 * * * *"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Score and print the actions without moving labels or closing anything"
+      deliver:
+        description: "Explicitly deliver pending GitHub actions (default only records intent)"
         type: boolean
         default: false
 
 permissions:
   contents: read
-  # Enough to label and close, and nothing that can advance a ref. This job decides who won; it
-  # must not be able to merge anything.
-  pull-requests: write
 
 concurrency:
-  # One at a time, and never cancelled mid-flight. Two overlapping runs would each score against
-  # the other's half-applied closures, and a cancelled run can leave the old crown removed with the
-  # new one never added -- an hour with no crown at all, for the wrong reason.
-  group: crown
+  group: spark-competition-state
   cancel-in-progress: false
 
 jobs:
-  crown:
-    runs-on: ubuntu-latest
+  settle:
+    runs-on: [self-hosted, linux, spark-validator]
+    environment: competition-validator
+    env:
+      SPARK_STATE_ROOT: ${{ vars.SPARK_STATE_ROOT }}
+      SPARK_PYTHON: ${{ vars.SPARK_PYTHON }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          enable-cache: true
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Check trusted external interpreter and durable state
+        shell: bash
+        run: bash scripts/competition-environment.sh
+      - name: Require durable private state
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SPARK_STATE_ROOT" = /* && "$SPARK_STATE_ROOT" != /tmp* ]]
+          test -f "$SPARK_STATE_ROOT/rounds/.identity"
+          test -f "$SPARK_STATE_ROOT/settlement/settlement.sqlite3"
+      - name: Commit active round and outbox
+        run: >-
+          "$SPARK_PYTHON" -m validator.crown select
+          --store "$SPARK_STATE_ROOT/rounds"
+          --settlement-root "$SPARK_STATE_ROOT/settlement"
+          --scorecards "$SPARK_STATE_ROOT/scorecards"
+          --episodes "$SPARK_STATE_ROOT/judge"
+          --out "$SPARK_STATE_ROOT/latest-settlement.json"
+      - name: Pending intent (no external mutations)
+        run: >-
+          "$SPARK_PYTHON" -m validator.settlement deliver
+          --settlement-root "$SPARK_STATE_ROOT/settlement"
 
-      - name: Install
-        run: uv sync --extra dev --frozen
-
-      - name: Score the field
-        run: uv run python -m validator.crown select --out /tmp/crowns.json | tee /tmp/standings.txt
-
-      - name: Work out the actions
-        run: uv run python -m validator.crown actions --out /tmp/crowns.json > /tmp/actions.txt 2>/tmp/skipped.txt || true
-
-      - name: Apply
-        if: ${{ !inputs.dry_run }}
+  deliver:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deliver }}
+    needs: settle
+    runs-on: [self-hosted, linux, spark-validator]
+    environment: competition-delivery
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      SPARK_STATE_ROOT: ${{ vars.SPARK_STATE_ROOT }}
+      SPARK_PYTHON: ${{ vars.SPARK_PYTHON }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Check trusted external interpreter and durable state
+        shell: bash
+        run: bash scripts/competition-environment.sh
+      - name: Reconcile and deliver committed actions
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -o pipefail
-          # Label removals first: a crown only ever added is a crown two people hold at once.
-          grep '^label remove ' /tmp/actions.txt | while read -r _ _ label pr; do
-            gh pr edit "${pr#\#}" --remove-label "${label}" || true
-          done
-          grep '^label add ' /tmp/actions.txt | while read -r _ _ label pr; do
-            gh pr edit "${pr#\#}" --add-label "${label}" || true
-          done
-          # Closures carry the reason. A pull request closed with no reason is a miner who learns
-          # nothing from losing and resubmits the same thing next hour.
-          grep '^close ' /tmp/actions.txt | while read -r _ pr reason; do
-            gh pr comment "${pr#\#}" --body "Round closed. ${reason}" || true
-            gh pr close "${pr#\#}" || true
-          done
-
-      - name: Report
-        if: always()
-        run: |
-          {
-            echo '### Crown'
-            echo '```'
-            cat /tmp/standings.txt
-            echo '```'
-            echo '### Actions'
-            echo '```'
-            cat /tmp/actions.txt
-            echo '```'
-            if [ -s /tmp/skipped.txt ]; then
-              echo '### Not acted on'
-              echo '```'
-              cat /tmp/skipped.txt
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          # Configured bot credential must support authenticated /user identity reads.
+          GH_TOKEN: ${{ secrets.COMPETITION_ACTION_TOKEN }}
+        run: >-
+          "$SPARK_PYTHON" -m validator.settlement deliver
+          --settlement-root "$SPARK_STATE_ROOT/settlement"
+          --allow-external --credential-env GH_TOKEN

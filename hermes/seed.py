@@ -58,6 +58,17 @@ class SeedError(ValueError):
     """A round or an assignment is malformed."""
 
 
+def _id_pool(values: Any, name: str) -> tuple[str, ...]:
+    """Validate producer collections before freezing them; mappings are not ID lists."""
+    if not isinstance(values, (list, tuple)):
+        raise SeedError(f"{name}_ids must be a list or tuple of nonempty strings")
+    if any(not isinstance(value, str) or not value for value in values):
+        raise SeedError(f"{name}_ids must contain only nonempty strings")
+    if len(set(values)) != len(values):
+        raise SeedError(f"duplicate {name} id; the assignment would be ambiguous")
+    return tuple(values)
+
+
 def _digest(*parts: str) -> str:
     hasher = hashlib.sha256()
     for part in parts:
@@ -78,6 +89,8 @@ def seed_commitment(seed: str) -> str:
     seeing who registered -- which would let it hand a favoured miner the easy tasks and
     leave no trace, because any seed looks as random as any other.
     """
+    if not isinstance(seed, str) or not seed:
+        raise SeedError("seed must be a nonempty string")
     if len(seed) < 32:
         raise SeedError("a seed needs at least 128 bits of entropy to be worth committing to")
     return "sha256:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()
@@ -129,21 +142,22 @@ class Round:
     state: str = OPEN
 
     def __post_init__(self) -> None:
-        if not self.round_id:
+        if not isinstance(self.round_id, str) or not self.round_id:
             raise SeedError("a round needs an id")
         # Shape-checked on construction, not only when publishing. Otherwise a round rebuilt
         # from a record could carry a seed too weak to commit to, and every read path --
         # assignees, owns, the gate's scope check -- would use it happily.
         seed_commitment(self.seed)
-        if self.state not in STATES:
+        if not isinstance(self.state, str) or self.state not in STATES:
             raise SeedError(f"unknown round state {self.state!r}; expected one of {list(STATES)}")
+        object.__setattr__(self, "task_ids", _id_pool(self.task_ids, "task"))
+        object.__setattr__(self, "miner_ids", _id_pool(self.miner_ids, "miner"))
         if not self.task_ids:
             raise SeedError(f"{self.round_id}: a round with no tasks assigns nothing")
         if not self.miner_ids:
             raise SeedError(f"{self.round_id}: a round with no miners has nobody to assign to")
-        for name, values in (("task", self.task_ids), ("miner", self.miner_ids)):
-            if len(set(values)) != len(values):
-                raise SeedError(f"{self.round_id}: duplicate {name} id; the assignment would be ambiguous")
+        if type(self.replicas) is not int:
+            raise SeedError("replicas must be an integer, excluding booleans")
         if self.replicas < 1:
             raise SeedError("a task assigned to nobody is not in the round")
         if self.replicas > len(self.miner_ids):
@@ -226,22 +240,29 @@ class Round:
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Round:
-        seed = str(record.get("seed") or "")
-        if not seed:
+        if not isinstance(record, dict):
+            raise SeedError("round announcement must be an object")
+        if type(record.get("schema_version")) is not int or record["schema_version"] != SCHEMA_VERSION:
+            raise SeedError(f"round schema_version must be integer {SCHEMA_VERSION}")
+        if "seed" not in record:
             raise SeedError("cannot rebuild a round from a commitment announcement; the seed is not revealed yet")
-        instance = cls(
-            round_id=str(record.get("round_id") or ""),
-            seed=seed,
-            task_ids=tuple(str(t) for t in record.get("task_ids") or ()),
-            miner_ids=tuple(str(m) for m in record.get("miner_ids") or ()),
-            replicas=int(record.get("replicas", 1)),
-            state=str(record.get("state", OPEN)),
-        )
+        for name in ("round_id", "state", "replicas", "task_ids", "miner_ids"):
+            if name not in record:
+                raise SeedError(f"round announcement is missing {name}")
+        for name in ("task_ids", "miner_ids"):
+            if not isinstance(record[name], list):
+                raise SeedError(f"round {name} must be a nonempty list of strings")
         published = record.get("commitment")
-        if not published:
-            # An announcement with no commitment fixes nothing: the assignment could have
-            # been chosen after seeing who registered, and nothing would show it.
-            raise SeedError(f"{instance.round_id}: announcement carries no commitment; the round was never fixed")
+        if not isinstance(published, str) or not published:
+            raise SeedError("announcement carries no valid commitment; the round was never fixed")
+        instance = cls(
+            round_id=record["round_id"],
+            seed=record["seed"],
+            task_ids=_id_pool(record["task_ids"], "task"),
+            miner_ids=_id_pool(record["miner_ids"], "miner"),
+            replicas=record["replicas"],
+            state=record["state"],
+        )
         if published != instance.commitment:
             # The seed does not hash to the digest that was published before the round
             # opened, which means the seed was chosen or swapped after the fact.
@@ -256,9 +277,9 @@ def open_round(round_id: str, task_ids: list[str], miner_ids: list[str], *, repl
     """Open a round, generating a seed if one was not supplied."""
     return Round(
         round_id=round_id,
-        seed=seed or new_seed(),
-        task_ids=tuple(task_ids),
-        miner_ids=tuple(miner_ids),
+        seed=new_seed() if seed == "" else seed,
+        task_ids=_id_pool(task_ids, "task"),
+        miner_ids=_id_pool(miner_ids, "miner"),
         replicas=replicas,
         state=OPEN,
     )

@@ -1,0 +1,119 @@
+name: trusted strategy
+
+# No PR-head checkout, pull_request_target execution, or automatic inference.
+# Dispatch explicitly names the round and expected PR head. Authenticated reads
+# fetch the registry append and base assignment; no code from that PR executes.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [admit, judge]
+        default: admit
+        description: "Admit a commitment, or freeze/evaluate an active round"
+      round:
+        type: string
+        required: true
+        description: "Existing trusted round ID"
+      pr:
+        type: string
+        description: "PR number for admission"
+      head:
+        type: string
+        description: "Expected full PR head SHA for admission"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: spark-competition-state
+  cancel-in-progress: false
+
+jobs:
+  admit:
+    if: ${{ inputs.operation == 'admit' }}
+    runs-on: [self-hosted, linux, spark-validator]
+    environment: competition-validator
+    env:
+      SPARK_STATE_ROOT: ${{ vars.SPARK_STATE_ROOT }}
+      SPARK_PYTHON: ${{ vars.SPARK_PYTHON }}
+      ROUND_ID: ${{ inputs.round }}
+      PR_NUMBER: ${{ inputs.pr }}
+      EXPECTED_HEAD: ${{ inputs.head }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Check trusted external interpreter and durable state
+        shell: bash
+        run: bash scripts/competition-environment.sh
+      - name: Require durable private state and exact head
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SPARK_STATE_ROOT" = /* && "$SPARK_STATE_ROOT" != /tmp* ]]
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test -f "$SPARK_STATE_ROOT/rounds/.identity"
+      - name: Bind active task and epoch
+        run: >-
+          "$SPARK_PYTHON" -m validator.settlement activate
+          --store "$SPARK_STATE_ROOT/rounds" --round "$ROUND_ID"
+          --settlement-root "$SPARK_STATE_ROOT/settlement"
+          --repository "$REPOSITORY"
+      - name: Admit authenticated commitment (read only)
+        env:
+          GH_TOKEN: ${{ secrets.COMPETITION_READ_TOKEN }}
+        run: >-
+          "$SPARK_PYTHON" -m validator.pr_admission
+          --repository "$REPOSITORY" --pr "$PR_NUMBER" --head "$EXPECTED_HEAD"
+          --round "$ROUND_ID" --credential-env GH_TOKEN
+          --store "$SPARK_STATE_ROOT/rounds"
+          --intake-root "$SPARK_STATE_ROOT/submissions"
+          --receipts "$SPARK_STATE_ROOT/receipts.jsonl"
+
+  judge:
+    if: ${{ inputs.operation == 'judge' }}
+    runs-on: [self-hosted, linux, spark-validator]
+    environment: competition-evaluation
+    permissions:
+      contents: read
+    env:
+      SPARK_STATE_ROOT: ${{ vars.SPARK_STATE_ROOT }}
+      SPARK_PYTHON: ${{ vars.SPARK_PYTHON }}
+      ROUND_ID: ${{ inputs.round }}
+      MODEL: ${{ vars.COMPETITION_MODEL }}
+      BASE_URL: ${{ vars.COMPETITION_BASE_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Check trusted external interpreter and durable state
+        shell: bash
+        run: bash scripts/competition-environment.sh
+      - name: Require durable state and configured model endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SPARK_STATE_ROOT" = /* && "$SPARK_STATE_ROOT" != /tmp* ]]
+          test -n "$MODEL"
+          test -n "$BASE_URL"
+      - name: Freeze at or after the announced deadline
+        run: >-
+          "$SPARK_PYTHON" -m validator.judge freeze
+          --store "$SPARK_STATE_ROOT/rounds" --round "$ROUND_ID"
+      - name: Evaluate exact admitted bundles without repository credentials
+        # Runner sandboxing stays enabled. The model service must be provisioned
+        # separately; this explicit dispatch is never part of CPU fixture validation.
+        run: >-
+          "$SPARK_PYTHON" -m validator.judge judge
+          --store "$SPARK_STATE_ROOT/rounds" --round "$ROUND_ID"
+          --intake-root "$SPARK_STATE_ROOT/submissions"
+          --receipts "$SPARK_STATE_ROOT/receipts.jsonl"
+          --workspace "$SPARK_STATE_ROOT/judge"
+          --scorecards "$SPARK_STATE_ROOT/scorecards"
+          --base-url "$BASE_URL" --model "$MODEL" --api-key-env NONE
+          --no-settle

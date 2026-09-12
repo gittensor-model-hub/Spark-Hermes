@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes.challenge import CHALLENGES_DIR, Challenge, ChallengeError, from_episode_log
+from hermes.evidence_json import evidence_object
 from hermes.round import RoundError, open_round
 from validator.store import RoundStore, StoreError
 
@@ -56,14 +57,17 @@ def challenge_from_packet_and_log(packet_path: Path, episodes_path: Path) -> Cha
     are needed and neither is sufficient: without the log there is no spread, and without the
     packet there is no commitment to say which withheld check will grade the round.
     """
-    from hermesbench.sink import read_episodes
+    from hermesbench.sink import SinkError, read_episodes
 
-    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    try:
+        packet = evidence_object(packet_path.read_bytes())
+        rows = list(read_episodes(episodes_path))
+    except (ValueError, SinkError) as exc:
+        raise LoopError(f"invalid complete challenge evidence: {exc}") from exc
     task_id = str(packet.get("task_id") or "")
     if not task_id:
         raise LoopError(f"{packet_path} has no task_id; it is not a challenge packet")
 
-    rows = [r for r in read_episodes(episodes_path)]
     opened, refused = from_episode_log(
         rows,
         epoch=dict(packet.get("epoch") or {}),

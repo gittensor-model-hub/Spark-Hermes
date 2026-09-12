@@ -212,6 +212,31 @@ def test_a_malformed_appended_line_is_an_error():
         added_lines("", "{not json")
 
 
+@pytest.mark.parametrize("value", [None, [], 3, True, "metadata", {"schema_version": "2"}])
+def test_non_object_or_malformed_metadata_is_a_refusal(value):
+    assert check_shape(value)
+
+
+def test_prior_registry_bytes_are_immutable():
+    prior = '{"round_id": "old"}'
+    assert check_append_only(prior, '{"round_id":"old"}\n{}')
+
+
+def test_gated_record_must_be_the_exact_appended_delta(world):
+    intake, round_, owner, receipt = world
+    record = _commit(owner, receipt).to_record()
+    issues = gate(
+        record=record,
+        round_record=round_.to_record(reveal_seed=True),
+        receipts=intake.read_receipts(),
+        base_text="",
+        head_text=json.dumps({**record, "notes": "different"}),
+        changed_paths=[STRATEGY_REGISTRY.as_posix()],
+        pull_request_author=owner,
+    )
+    assert issues and "one commitment" in issues[0]
+
+
 # --- shape ------------------------------------------------------------------------------------------------
 
 

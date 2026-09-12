@@ -1,8 +1,17 @@
 # Spark-Hermes Miner Guide
 
-This guide is for SN74 miners and contributors who want to earn rewards by improving
-Spark-Hermes. The rule is simple: rewards come from verified improvements, not from
-claims, formatting, or duplicated ideas.
+This guide describes contributions to the public Spark-Hermes stack and local quality gates.
+The operator's derived adapters/checkpoints, licensed training corpus and private checks remain
+private unless explicitly released. Public recipe/data competition tracks remain reproducible
+under their own reviewed rights; they do not imply open access to the private derived model.
+Preserve upstream Qwen Apache-2.0 and Hermes MIT notices and modification attribution, and
+record data/contribution rights separately. See [contribution policy](../CONTRIBUTING.md).
+
+SN74 rewards additionally require external repository approval, eligible merged PRs, miner
+identity and the subnet's current configuration. Local scoring and labels do not enroll this
+repository or guarantee payout. [Repository registration](https://docs.gittensor.io/register-repository.html)
+and [OSS contribution scoring](https://docs.gittensor.io/oss-contributions.html) define that boundary.
+No CPU fixture score establishes real model improvement, novelty or live rewards.
 
 > **Scope.** There are now **three** tracks. This note used to say the Hermes-native agent work
 > was "not yet a mining track" and told miners to mine against the two below it. That is no longer
@@ -183,11 +192,11 @@ the manifest says so in its own `does_not_prove` field.
 
 ### SN74 payout multipliers (Gittensor)
 
-Live payout is `fixed_base_score (1.0) × label_multiplier × time_decay` from
-[`master_repositories.json`](https://github.com/entrius/gittensor/blob/test/gittensor/validator/weights/master_repositories.json)
-(`gittensor-model-hub/Spark-Hermes`). **Training-track `eval:*` tiers pay 2× the
-`dataset:*` tier at the same letter** — a verified frontier win is weighted higher than
-adding training rows at the same size band:
+The table below records this repository's local label-weight intent, not verified live payout.
+The actual [subnet registry](https://raw.githubusercontent.com/entrius/gittensor/main/gittensor/validator/weights/master_repositories.json)
+and validator eligibility/scoring policy control emissions. Repository registration and reward
+policy agreement must be confirmed externally. A crown, label or pending settlement outbox action
+is not a merged eligible contribution or payment receipt.
 
 | tier | `dataset:*` | `eval:*` |
 |---|---|---|
@@ -198,8 +207,8 @@ adding training rows at the same size band:
 | XS | 0.5 | **1.0** |
 | BASELINE | — | **2.0** |
 
-`eval:BASELINE` (first verified checkpoint on a new student/phase) pays **2.0**.
-`eval:none`, `dataset:none`, and `*:REJECT` pay **0**.
+`eval:BASELINE` has local intended weight **2.0**.
+`eval:none`, `dataset:none`, and `*:REJECT` have local intended weight **0**.
 
 Reference copy: [`.gittensor/weights.json`](../.gittensor/weights.json).
 
@@ -274,7 +283,7 @@ Pin the snapshot by comparing your file's sha256 to
 The lightweight `accepted_task_ids.json` on the same HF repo is useful for
 pre-generation filtering so you do not burn GPU on tasks already accepted.
 
-Spark-Hermes sizes rewards from canonical-mix `rows_selected` (fair label), so
+Spark-Hermes sizes local contribution tiers from canonical-mix `rows_selected` (fair label), so
 miners should treat the snapshot as the source of truth for expected credit.
 
 **Before you generate on a CC VM:** decontamination needs the TritonBench problem set. It
@@ -308,10 +317,10 @@ proofs (`dataset:none`) are also closed automatically.
 
 This distinction is important because the word `eval` is used in two different ways:
 
-- `dataset:xs/s/m/l/xl` rewards miners for contributing **training data** that passed
+- `dataset:xs/s/m/l/xl` labels contributions of **training data** that passed
   SparkProof generation, GPU validation, decontamination, attestation, and registry
   verification.
-- `eval:XS/S/M/L/XL` rewards a **training recipe or checkpoint improvement** measured by
+- `eval:XS/S/M/L/XL` labels a **training recipe or checkpoint improvement** measured by
   the validator on its held-out benchmark basket. It does not mean the miner contributed
   the benchmark or an evaluation dataset.
 
@@ -517,7 +526,7 @@ regresses, the PR is rejected and may be auto-closed.
 
 ## Quality Labels
 
-The reward label (`eval:XS` through `eval:XL`) comes from **TritonBench only** — the
+The local training-track label (`eval:XS` through `eval:XL`) comes from **TritonBench only** — the
 domain improvement signal for mining recipes. The general basket (GSM8K, BFCL,
 HumanEval, …) is regression-guarded: any drop beyond its floor yields `eval:REJECT`
 and a `regression-*` label, but **GSM8K/BFCL improvements alone do not earn a tier**.
@@ -545,19 +554,17 @@ triton** scores needed when GSM8K holds at ≥ 0.588 (2% relaxed floor) or
 | `eval:none` | correct, but no significant improvement |
 | `eval:REJECT` | correctness failure, training failure, or unacceptable regression |
 
-The exact label is deterministic from the evaluator output. The bot does not use AI
-judgment to decide rewards.
+The local label is deterministic from evaluator output. The subnet independently applies
+its eligibility and reward policy; the label alone does not decide payout.
 
 ## Sharing Your Dataset And Recipe (Required)
 
-**No trained weights are ever merged.** What actually gets merged — and what the evaluator
-actually trusts — is your **recipe (the Axolotl YAML) and the dataset it trained on**,
-because those are what the evaluator reproduces from source to verify your claim. This is
-also what makes the whole system fair: because the recipe and dataset behind the current
-frontier are always public, anyone can fork the leader and try to beat it with one more
-optimization. Nobody — including whoever currently holds the frontier ("the king") — can
-permanently dominate by keeping a checkpoint secret; there's no way to merge a PR without
-its recipe and dataset becoming public too.
+**Trained weights are not merged into the repository.** Public training-track contributions
+provide their recipe and pinned canonical dataset references so the evaluator can reproduce
+the claim. Dataset-track publication requires permission to redistribute those rows and
+their provenance. The operator's separate derived model and rights-controlled corpus stay
+private; neither a contributor PR nor a fixture release authorizes their publication.
+Strategy contributions publish only the exact private bundle's commitment in the registry.
 
 In practice today:
 
@@ -794,8 +801,10 @@ to verify and merge than a broad rewrite.
 
 ## Current Target
 
-The current frontier is Phase 1: **Qwen3.5-4B**, distilled from the teacher basket
-(Claude Fable 5, GPT 5.6). The project is especially interested in:
+The initial recipe target is Phase 1: **Qwen3.5-4B**. The legacy training track's teacher
+configuration is separate from the CPU-first operator POC and final Qwen3.8-27B target;
+neither a recipe nor a CPU fixture establishes an already-trained frontier. The project
+is especially interested in:
 
 - Higher-quality / more diverse reasoning trajectories, especially for underrepresented
   task types in the benchmark basket — reasoning-heavy prompts (multi-step math, logic,
@@ -809,5 +818,5 @@ The evaluator uses held-out prompts, frozen benchmark data, immutable logs, and
 path-aware labels. Attempts to tune for the harness instead of the checkpoint's real
 quality can be rejected or ignored.
 
-The best way to earn is to make the shipped student checkpoint genuinely better and keep
-it honest.
+Contribute reproducible evidence of useful changes. Any eventual reward remains subject to
+external SN74 approval, merged-PR eligibility and current subnet policy.

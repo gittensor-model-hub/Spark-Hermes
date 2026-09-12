@@ -236,7 +236,7 @@ def test_a_zero_token_episode_is_refused_rather_than_averaged_in(tmp_path):
         json.dumps({"task_id": "t", "metrics": {"tokens_used": 0, "tool_calls": 0, "steps": 0}}) + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(EvaluateError, match="did not happen"):
+    with pytest.raises(EvaluateError, match="missing or non-boolean|did not happen"):
         arm_from_log(log, label="control")
 
 
@@ -311,6 +311,15 @@ def test_each_arms_runner_output_is_captured_rather_than_printed(monkeypatch, tm
             "metrics": {
                 "task_id": "t",
                 "public_passed": False,
+                "success": False,
+                "setup_failed": False,
+                "max_steps_hit": False,
+                "disqualified": False,
+                "integrity_clean": True,
+                "integrity_fully_checked": True,
+                "protocol_clean": True,
+                "malformed_turns": 0,
+                "wall_time_s": 1.0,
                 "tokens_used": 50_000,
                 "tool_calls": 11,
                 "steps": 34,

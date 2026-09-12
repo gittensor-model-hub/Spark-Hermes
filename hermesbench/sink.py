@@ -16,8 +16,8 @@ durability while making the log the slowest thing in a run.
 **JSONL, because the reader has to cope with a file whose last line is torn in half.** A
 single JSON array is unreadable until its closing bracket arrives, which is precisely the
 property that made the old behavior useless -- the file existed and told you nothing.
-`read_episodes` drops an unterminated final line, the one the writer died inside, and
-refuses anything else that fails to parse. A corrupt line in the *middle* is not a crash:
+`read_episode_prefix` observes completed records in a live or interrupted log.
+`read_episodes` requires a complete snapshot for authoritative consumers and refuses a torn tail. A corrupt line in the *middle* is not a crash:
 it is two runs interleaved into one path, or a damaged disk, and skipping it silently would
 turn missing episodes into a lower success rate with no trace of why.
 
@@ -37,6 +37,8 @@ import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Protocol
+
+from hermes.evidence_json import evidence_object
 
 
 class SinkError(RuntimeError):
@@ -111,7 +113,12 @@ class JsonlEpisodeSink:
             # crashed run's log is read precisely to tell them apart.
             "disqualified": result.integrity.disqualified,
             "metrics": result.metrics.to_record(),
+            "integrity": (result.integrity.to_record() if hasattr(result.integrity, "to_record") else None),
+            "evidence": getattr(result, "evidence", {}),
         }
+        verification = getattr(result, "verification", None)
+        if verification is not None:
+            record["verification"] = verification.to_record()
         # The trajectory, when the caller asked for it.
         #
         # Off by default and not by accident. A trajectory is the whole conversation -- every tool
@@ -135,7 +142,7 @@ class JsonlEpisodeSink:
         # on "no trailing newline" meaning "this is the episode the run died inside".
         # ensure_ascii also keeps any newline inside the record escaped, so one line stays
         # one episode even when a field carries a shell transcript.
-        self._handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+        self._handle.write(json.dumps(record, ensure_ascii=True, allow_nan=False) + "\n")
         self._handle.flush()
         self.episodes_written += 1
 
@@ -149,30 +156,40 @@ class JsonlEpisodeSink:
         self.close()
 
 
-def read_episodes(path: Path) -> Iterator[dict[str, Any]]:
-    """Yield a log's episodes, tolerating a torn final line and nothing else.
+def _decode_line(raw: bytes, *, source: str, number: int) -> dict[str, Any]:
+    try:
+        return evidence_object(raw)
+    except (ValueError, RecursionError) as exc:
+        raise SinkError(f"{source}: line {number} is not valid complete episode evidence ({exc})") from exc
 
-    A generator, so a consumer asking "how far did the run get" over a long log does not
-    have to hold the whole thing -- the sink refuses to buffer a run, and a reader that
-    buffers it instead would have moved the problem rather than solved it.
+
+def decode_episodes(raw: bytes, *, source: str = "episode snapshot") -> list[dict[str, Any]]:
+    """Decode the exact complete byte snapshot, without yielding a partial schedule."""
+    if raw and not raw.endswith(b"\n"):
+        raise SinkError(f"{source}: truncated episode log (unfinished final record)")
+    return [
+        _decode_line(line, source=source, number=number)
+        for number, line in enumerate(raw.split(b"\n")[:-1], start=1)
+        if line.strip()
+    ]
+
+
+def read_episodes(path: Path) -> Iterator[dict[str, Any]]:
+    """Read complete authoritative evidence; malformed or unfinished records refuse.
+
+    Materialize and check one byte snapshot before exposing any rows. For progress
+    observation of an unfinished run, explicitly use `read_episode_prefix` instead.
     """
     path = Path(path)
-    with path.open(encoding="utf-8") as handle:
+    return iter(decode_episodes(path.read_bytes(), source=str(path)))
+
+
+def read_episode_prefix(path: Path) -> Iterator[dict[str, Any]]:
+    """Observe only a live log's finished prefix; this is not complete run evidence."""
+    path = Path(path)
+    with path.open("rb") as handle:
         for number, raw in enumerate(handle, start=1):
-            if not raw.endswith("\n"):
-                # Only a file's final line can be missing its terminator, so this is the
-                # episode the writer was killed inside. Dropping it is the point: half a
-                # JSON object is not an episode, and raising here would leave a crashed
-                # run's log exactly as useful as the nothing it used to produce.
+            if not raw.endswith(b"\n"):
                 return
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SinkError(
-                    f"{path}: line {number} is complete but does not parse ({exc}). That is "
-                    "corruption or two runs written to one path, not an interrupted write -- "
-                    "skipping it would drop episodes silently and move the reported score."
-                ) from exc
+            if raw.strip():
+                yield _decode_line(raw, source=str(path), number=number)

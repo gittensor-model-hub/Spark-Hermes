@@ -16,10 +16,10 @@ from eval.canonical_dataset import assert_recipe_uses_canonical_dataset
 # Axolotl multipack sampler fails on very small mixes (observed at 17 rows).
 MIN_SAMPLE_PACKING_ROWS = 32
 
-_PATH_KEYS = ("path", "dataset_prepared_path", "output_dir")
+_PATH_KEYS = ("path", "dataset_prepared_path", "output_dir", "lora_model_dir")
 
 # Qwen3.5 recipe detection (base_model / chat_template / config type all encode it).
-_QWEN3_5_MARKERS = ("qwen3.5", "qwen3_5")
+_QWEN3_5_MARKERS = ("qwen3.5", "qwen3_5", "qwen3.8", "qwen35")
 # Axolotl 0.18's Qwen3.5 sample-packing monkeypatch reads ``self.layer_type``, but
 # current transformers ``Qwen3_5DecoderLayer`` stores ``self.block_type`` and never
 # sets ``layer_type`` — so packing crashes with AttributeError on a fresh install
@@ -108,6 +108,7 @@ def prepare_train_recipe(
     recipe_path: Path,
     distill_root: Path,
     out_path: Path | None = None,
+    enforce_canonical: bool = True,
 ) -> dict[str, Any]:
     """Return a training-safe recipe with absolute paths and runtime fallbacks."""
     root = distill_root.resolve()
@@ -115,7 +116,7 @@ def prepare_train_recipe(
     if not isinstance(cfg, dict):
         raise ValueError(f"{recipe_path} must contain a YAML mapping")
 
-    canonical_issues = assert_recipe_uses_canonical_dataset(cfg)
+    canonical_issues = assert_recipe_uses_canonical_dataset(cfg) if enforce_canonical else []
     if canonical_issues:
         raise ValueError(
             "training recipes must use the pinned canonical mining dataset only: " + "; ".join(canonical_issues)
@@ -123,6 +124,14 @@ def prepare_train_recipe(
 
     notes: list[str] = []
     row_count: int | None = None
+
+    # Axolotl expects a selector here, not a filename. Use the pinned tokenizer's
+    # template, including its tools and reasoning channels.
+    if cfg.get("chat_template") == "chat_template.jinja":
+        cfg["chat_template"] = "tokenizer_default"
+    base = cfg.get("base_model")
+    if isinstance(base, str) and (root / base).is_dir():
+        cfg["base_model"] = _resolve_path(base, root)
 
     for key in _PATH_KEYS:
         value = cfg.get(key)
@@ -149,6 +158,8 @@ def prepare_train_recipe(
             # Axolotl concatenates all datasets, so the multipack guard below must
             # look at the combined row count, not just the last shard's.
             row_count = total_rows
+            if not row_count:
+                raise ValueError("training dataset is empty")
             if counted_sources > 1:
                 notes.append(f"dataset rows (total): {total_rows}")
 

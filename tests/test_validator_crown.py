@@ -17,6 +17,7 @@ from hermes.acceptance import Arm
 from validator.crown import (
     CROWN_LABEL,
     Contender,
+    CrownError,
     Standing,
     close_actions,
     contenders_from,
@@ -58,7 +59,7 @@ def test_a_cheaper_wrong_answer_is_not_ranked_at_all():
     a gate before tokens are looked at, exactly as `acceptance.decide` orders it."""
     ok, why = eligibility(_c("heidi", _arm(6, 10, 20_000, calls=4)))
     assert ok is False
-    assert "before tokens are looked at" in why
+    assert "before efficiency is considered" in why
 
 
 def test_a_perfect_run_of_too_few_attempts_is_not_ranked():
@@ -114,7 +115,7 @@ def test_a_noisy_large_margin_does_not_outrank_a_tight_smaller_one():
 
 def test_the_full_ordering_is_published_not_just_the_winner():
     """A miner has to be able to see where they placed, or an hourly loss carries no information."""
-    outcome = select([_c("erin", _arm(10, 10, 59_000)), _c("frank", _arm(10, 10, 70_000))])
+    outcome = select([_c("erin", _arm(10, 10, 59_000)), _c("frank", _arm(10, 10, 62_000))])
     assert [s.contender.miner_id for s in outcome.ranked] == ["erin", "frank"]
 
 
@@ -135,7 +136,7 @@ def test_a_field_that_is_correct_but_not_cheaper_has_no_winner():
     stops carrying information within a week."""
     outcome = select([_c("frank", _arm(10, 10, [79_000 + i * 1_500 for i in range(10)]))])
     assert outcome.winner is None
-    assert any("does not clear" in why for _, why in outcome.ineligible)
+    assert any("below the 20% bar" in why for _, why in outcome.ineligible)
     assert "NO CROWN" in render(outcome)
 
 
@@ -151,7 +152,7 @@ def test_the_record_distinguishes_no_entries_from_no_winner():
     nothing = select([]).to_record()
     lost = select([_c("frank", _arm(10, 10, BASE))]).to_record()
     assert nothing["ranked"] == [] and nothing["ineligible"] == []
-    assert lost["ranked"] and lost["crowned"] is False
+    assert lost["ineligible"] and lost["ranked"] == [] and lost["crowned"] is False
 
 
 # --- the label and the closures ---------------------------------------------------------------------
@@ -213,71 +214,22 @@ def test_a_missing_registry_is_not_an_error(tmp_path):
 
 
 def test_only_graded_rounds_are_eligible(tmp_path):
-    """A verdict is not published until grading; crowning on an ungraded round would rank miners on
-    a result the round itself refuses to serve."""
-    from hermes.challenge import Attempt, Baseline, open_challenge
-    from hermes.round import open_round
+    from competition_support import window
+
     from validator.store import RoundStore
 
-    store = RoundStore(tmp_path / "rounds", require_private=False)
-    attempts = tuple(
-        Attempt(
-            public_passed=i < 4,
-            hidden_passed=True if i < 4 else None,
-            tokens=78_000 + i * 900,
-            tool_calls=11,
-            wall_time_s=1.0,
-            steps=34,
-            max_steps_hit=True,
-        )
-        for i in range(10)
-    )
-    challenge = open_challenge(
-        Baseline(task_id=TASK, attempts=attempts),
-        epoch={"model_revision": "a" * 40, "harness_digest": "b" * 64},
-        task_pins={"task_id": TASK, "hidden_verify_commitment": "sha256:" + "c" * 64},
-    )
-    window = open_round(challenge, round_id="r-open", opened_at=0.0, deadline=1_000.0)
-    # `record_verdict` refuses a miner with no standing submission: a verdict for someone who never
-    # submitted inflates the denominator of every rate the round reports.
-    window.submit("erin", paths=["SOUL.md"], payload_digest="sha256:" + "d" * 64, received_at=10.0)
-    store.save(window)
-
-    cards = tmp_path / "cards"
-    cards.mkdir()
-    (cards / "r-open-erin.json").write_text(
-        json.dumps(
-            {
-                "round_id": "r-open",
-                "miner_id": "erin",
-                "task_id": TASK,
-                "candidate": {"verified_passes": 10, "attempts": 10, "tokens": [59_000] * 10, "tool_calls": [8] * 10},
-                "baseline": {"verified_passes": 4, "attempts": 10, "tokens": BASE, "tool_calls": [11] * 10},
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert contenders_from(cards, store=store) == [], "an OPEN round yields no contender"
-
-    window.freeze(now=2_000.0)
-    window.record_verdict(window.token(), "erin", passed=True)
-    window.grade(now=2_001.0)
-    store.save(window)
-    assert len(contenders_from(cards, store=store)) == 1
+    store = RoundStore(tmp_path / "rounds", mode="fixture", namespace="ungraded")
+    window(store)
+    with pytest.raises(CrownError, match="graded"):
+        contenders_from(tmp_path / "cards", store=store, round_id="r-1")
 
 
-def test_a_scorecard_without_a_baseline_is_skipped(tmp_path):
-    """No bar, no relative score. Ranking it would compare an absolute token count against a set of
-    reductions."""
+def test_unscoped_historical_cards_cannot_enter_a_tournament(tmp_path):
     from validator.store import RoundStore
 
-    cards = tmp_path / "cards"
-    cards.mkdir()
-    (cards / "x.json").write_text(
-        json.dumps({"round_id": "gone", "miner_id": "erin", "task_id": TASK, "candidate": {"tokens": [1, 2]}}),
-        encoding="utf-8",
-    )
-    assert contenders_from(cards, store=RoundStore(tmp_path / "r", require_private=False)) == []
+    store = RoundStore(tmp_path / "rounds", mode="fixture", namespace="unscoped")
+    with pytest.raises(CrownError, match="explicit active round"):
+        contenders_from(tmp_path / "cards", store=store)
 
 
 def test_the_crown_label_name_is_stable():

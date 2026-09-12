@@ -63,3 +63,15 @@ tritonbench/LLM_generated/
 # withheld verifier into a check-your-guess oracle. `validator.store.store_is_private` asks git
 # whether this entry is still here and refuses to construct a store if it is not.
 var/
+
+# Local agent/orchestration scaffolding. Machine-specific and not project content:
+# MCP endpoints point at localhost ports, and AGENTS.md here is a symlink into .local/
+# whose absolute target exists on exactly one machine -- committed once already, where it
+# dangled in CI and killed `ruff format` before any test ran.
+.agents/
+.claude/
+.codex/
+.hermes/
+.zenith/
+AGENTS.md
+.mcp.json

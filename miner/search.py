@@ -69,11 +69,16 @@ class Candidate:
     dropped: tuple[str, ...] = ()
 
     def write(self, root: Path) -> Path:
+        from validator.intake import validate
+
+        problems = validate(self.files)
+        if problems:
+            raise SearchError("; ".join(problems))
         target = root / self.name
         for rel, text in self.files.items():
             path = target / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            path.write_bytes(text.encode("utf-8"))
         return target
 
 
@@ -144,11 +149,12 @@ def split_rules(skill_text: str) -> list[str]:
 
 
 def read_surface(root: Path) -> dict[str, str]:
-    return {
-        p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
-        for p in sorted(root.rglob("*"))
-        if p.is_file() and not p.is_symlink()
-    }
+    from validator.intake import IntakeError, capture_surface
+
+    try:
+        return capture_surface(root, allow_empty=True)
+    except IntakeError as exc:
+        raise SearchError(str(exc)) from exc
 
 
 def ablations(files: dict[str, str]) -> list[Candidate]:

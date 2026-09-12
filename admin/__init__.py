@@ -1,10 +1,14 @@
 """The operator-driven training pipeline: no miners, no rounds, no competition.
 
     python -m admin.cli status
-    python -m admin.cli run --stage generate --count 350
-    python -m admin.cli run --stage rollout --repeats 8
-    python -m admin.cli run --stage corpus
-    python -m admin.cli run --stage evaluate
+    python -m admin.cli doctor
+    python -m admin.cli generate --count 350 --salt-file /private/salt --allow-unsandboxed
+    python -m admin.cli rollout --repeats 8 --salt-file /private/salt --allow-unsandboxed
+    python -m admin.cli corpus
+    python -m admin.cli prepare
+    python -m admin.cli train
+    python -m admin.cli merge
+    python -m admin.cli evaluate --print-only
 
 The rest of this repository is a competition. Miners submit prose surfaces, a validator executes them
 against a published challenge, a withheld check grades them, and an hourly crown pays out. That

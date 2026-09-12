@@ -68,6 +68,16 @@ def _ep(
 # --- the field that was dropped -------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("tokens,truncated", [(0, False), (100, True)])
+def test_preference_rejects_unpriced_or_truncated_negatives(tokens, truncated):
+    pairs, _ = preference_pairs([_ep(), _ep(verified=False, tokens=tokens, truncated=truncated)])
+    assert pairs == []
+
+
+def test_sft_excludes_unpriced_successes():
+    assert sft_rows([_ep(tokens=0)]) == []
+
+
 def test_the_sink_writes_a_trajectory_when_asked_and_not_otherwise(tmp_path):
     """The bug. Without this flag the log holds counts, so nothing downstream can exist -- and the
     trajectory was in memory at the moment it was discarded."""
@@ -282,7 +292,8 @@ def test_only_settled_rounds_are_collected(tmp_path):
     window.grade(now=2_001.0)
     window.settle(now=2_002.0)
     store.save(window)
-    assert len(collect(store=store, episode_root=tmp_path / "judge")) == 1
+    with pytest.raises(AggregateError, match="snapshots are not authority"):
+        collect(store=store, episode_root=tmp_path / "judge")
 
 
 # --- pairs when every attempt passes --------------------------------------------------------------

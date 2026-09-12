@@ -38,12 +38,13 @@ whatever result would have been convenient.
 
 from __future__ import annotations
 
-import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from eval.rollout_track import check_scope
+from hermes.evidence_json import evidence_records
 
 STRATEGY_REGISTRY = Path("datasets/strategies.jsonl")
 
@@ -87,16 +88,37 @@ class Commitment:
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Commitment:
+        if not isinstance(record, dict):
+            raise StrategyError("commitment must be an object")
         missing = [f for f in REQUIRED_FIELDS if not record.get(f)]
         if missing:
             raise StrategyError(f"commitment is missing {', '.join(missing)}")
+        if type(record["schema_version"]) is not int:
+            raise StrategyError("schema_version must be an integer")
+        for key in ("round_id", "miner_id", "bundle_sha256"):
+            if not isinstance(record[key], str) or not record[key].strip():
+                raise StrategyError(f"{key} must be a nonempty string")
+        for key in ("round_id", "miner_id"):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", record[key]):
+                raise StrategyError(f"invalid {key}")
+        tasks = record.get("task_ids", [])
+        if (
+            not isinstance(tasks, list)
+            or any(not isinstance(t, str) or not t for t in tasks)
+            or len(set(tasks)) != len(tasks)
+        ):
+            raise StrategyError("task_ids must be a list of unique nonempty strings")
+        if not isinstance(record.get("notes", ""), str):
+            raise StrategyError("notes must be a string")
+        if set(record) - {*REQUIRED_FIELDS, "task_ids", "notes"}:
+            raise StrategyError("unknown commitment fields")
         return cls(
-            round_id=str(record["round_id"]),
-            miner_id=str(record["miner_id"]),
-            bundle_sha256=str(record["bundle_sha256"]),
-            task_ids=tuple(str(t) for t in record.get("task_ids") or ()),
-            schema_version=int(record.get("schema_version") or SCHEMA_VERSION),
-            notes=str(record.get("notes") or ""),
+            round_id=record["round_id"],
+            miner_id=record["miner_id"],
+            bundle_sha256=record["bundle_sha256"],
+            task_ids=tuple(tasks),
+            schema_version=record["schema_version"],
+            notes=record.get("notes", ""),
         )
 
 
@@ -111,7 +133,7 @@ def check_shape(record: dict[str, Any]) -> list[str]:
             f"schema_version {commitment.schema_version} is not {SCHEMA_VERSION}. Version 1 carried the "
             "surface files themselves; the surface is private now and the line carries a digest."
         )
-    if not commitment.bundle_sha256.startswith("sha256:") or len(commitment.bundle_sha256) != 71:
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", commitment.bundle_sha256):
         issues.append(f"bundle_sha256 {commitment.bundle_sha256!r} is not a sha256 digest")
     return issues
 
@@ -149,8 +171,13 @@ def check_commitment(commitment: Commitment, receipts: list[Any]) -> list[str]:
     """
     from validator.intake import receipt_for_digest
 
-    receipt = receipt_for_digest(receipts, round_id=commitment.round_id, digest=commitment.bundle_sha256)
+    receipt = receipt_for_digest(
+        receipts, round_id=commitment.round_id, digest=commitment.bundle_sha256, miner_id=commitment.miner_id
+    )
     if receipt is None:
+        other = receipt_for_digest(receipts, round_id=commitment.round_id, digest=commitment.bundle_sha256)
+        if other is not None:
+            return [f"digest was uploaded by {other.miner_id!r}, not {commitment.miner_id!r}"]
         return [
             f"no bundle with digest {commitment.bundle_sha256[:23]}... was uploaded for round "
             f"{commitment.round_id}. A commitment names something the validator already holds; a "
@@ -166,8 +193,8 @@ def check_commitment(commitment: Commitment, receipts: list[Any]) -> list[str]:
 
 def check_paths(changed_paths: list[str] | None) -> list[str]:
     """A commitment PR touches one file. Data-only, so auto-merge can never carry code."""
-    if changed_paths is None:
-        return []
+    if not changed_paths:
+        return ["verified changed paths are required"]
     registry = STRATEGY_REGISTRY.as_posix()
     unexpected = sorted({p for p in changed_paths if p != registry})
     if unexpected:
@@ -176,27 +203,24 @@ def check_paths(changed_paths: list[str] | None) -> list[str]:
 
 
 def check_append_only(base_text: str, head_text: str) -> list[str]:
-    base_lines = [line.strip() for line in base_text.splitlines() if line.strip()]
-    head_lines = [line.strip() for line in head_text.splitlines() if line.strip()]
-    if head_lines[: len(base_lines)] != base_lines:
-        return [
-            f"{STRATEGY_REGISTRY.as_posix()} is append-only; rebase onto the latest base and preserve "
-            "every existing line in order"
-        ]
+    if not head_text.startswith(base_text) or (
+        base_text
+        and not base_text.endswith("\n")
+        and head_text[len(base_text) :]
+        and not head_text[len(base_text) :].startswith("\n")
+    ):
+        return [f"{STRATEGY_REGISTRY.as_posix()} is append-only; preserve every existing byte in order"]
     return []
 
 
 def added_lines(base_text: str, head_text: str) -> list[dict[str, Any]]:
-    """The JSON objects this PR appends, positionally."""
-    base_lines = [line.strip() for line in base_text.splitlines() if line.strip()]
-    head_lines = [line.strip() for line in head_text.splitlines() if line.strip()]
-    out: list[dict[str, Any]] = []
-    for line in head_lines[len(base_lines) :]:
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError as exc:
-            raise StrategyError(f"appended line is not JSON: {exc}") from exc
-    return out
+    """The positional delta, after decoding complete base and head snapshots."""
+    try:
+        base = evidence_records(base_text)
+        head = evidence_records(head_text)
+    except ValueError as exc:
+        raise StrategyError(f"registry is not JSON object metadata: {exc}") from exc
+    return head[len(base) :]
 
 
 def check_one_commitment_per_round(commitment: Commitment, base_text: str) -> list[str]:
@@ -206,18 +230,38 @@ def check_one_commitment_per_round(commitment: Commitment, base_text: str) -> li
     Uploading twice is allowed and cheap -- the digest decides which is evaluated -- so the moment
     that choice becomes binding has to be a single, dated, public one.
     """
-    for line in base_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            existing = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if (
-            str(existing.get("round_id") or "") == commitment.round_id
-            and str(existing.get("miner_id") or "") == commitment.miner_id
+    try:
+        existing_records = evidence_records(base_text)
+    except ValueError as exc:
+        return [f"base registry contains malformed metadata: {exc}"]
+    for existing in existing_records:
+        # History may contain older schemas or identity-only records. They still
+        # exclude this miner/round; never require a current payload to recognize it.
+        if any(
+            not isinstance(existing.get(k), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", existing[k])
+            for k in ("round_id", "miner_id")
         ):
+            return ["base registry contains a malformed commitment identity"]
+        if "schema_version" in existing and (
+            type(existing["schema_version"]) is not int or existing["schema_version"] < 1
+        ):
+            return ["base registry contains a malformed schema_version"]
+        if "bundle_sha256" in existing and (
+            not isinstance(existing["bundle_sha256"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", existing["bundle_sha256"])
+        ):
+            return ["base registry contains a malformed bundle_sha256"]
+        if "task_ids" in existing:
+            tasks = existing["task_ids"]
+            if (
+                not isinstance(tasks, list)
+                or any(not isinstance(t, str) or not t for t in tasks)
+                or len(set(tasks)) != len(tasks)
+            ):
+                return ["base registry contains malformed task_ids"]
+        if "notes" in existing and not isinstance(existing["notes"], str):
+            return ["base registry contains malformed notes"]
+        if existing["round_id"] == commitment.round_id and existing["miner_id"] == commitment.miner_id:
             return [
                 f"{commitment.miner_id!r} already has a commitment standing in round "
                 f"{commitment.round_id}. Which bundle you are judged on is fixed once it is public."
@@ -247,6 +291,12 @@ def gate(
         return shape
 
     commitment = Commitment.from_record(record)
+    try:
+        delta = added_lines(base_text, head_text)
+    except StrategyError as exc:
+        return [str(exc)]
+    if delta != [record]:
+        return ["PR must append exactly the one commitment being gated"]
     return [
         *check_paths(changed_paths),
         *check_append_only(base_text, head_text),

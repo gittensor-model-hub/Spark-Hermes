@@ -19,7 +19,7 @@ from validator.store import RoundStore
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(tmp_path, monkeypatch):
     """A settled round with one submission, in a store outside the repository."""
     from hermes.challenge import Attempt, Baseline, open_challenge
     from hermes.round import open_round
@@ -47,6 +47,10 @@ def world(tmp_path):
     store = RoundStore(tmp_path / "rounds", require_private=False)
     store.save(window)
 
+    from validator import intake as intake_module
+
+    monkeypatch.setattr(intake_module, "SUBMISSION_DIR", tmp_path / "store")
+    monkeypatch.setattr(intake_module, "RECEIPTS", tmp_path / "receipts.jsonl")
     intake = Intake(root=tmp_path / "store", receipts=tmp_path / "receipts.jsonl")
     intake.accept(round_id="r-1", miner_id="carol", files={"SOUL.md": "# be careful\n"}, now=110.0)
     return store, intake, window

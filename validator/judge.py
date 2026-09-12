@@ -1,53 +1,38 @@
-"""Take a merged surface, run it, score it, and record the verdict. The turn of the crank.
+"""Execute exact admitted bundles, score them, and record round verdicts.
 
-    python -m validator.judge accept --round e2e-1 --miner carol
-    python -m validator.judge judge  --round e2e-1 --model qwen3.8-27b --repeats 10
+    python -m validator.pr_admission --help
+    python -m validator.judge freeze --round r-001 --store /srv/spark-hermes/rounds
+    python -m validator.judge judge --help
 
-`eval.strategy_track` decides whether a surface may merge and `validator.score` says whether it
-beat the bar. Between them the three steps that actually happen -- run, score, record -- were three
-commands typed by hand in an end-to-end test. This is those three, in the order the round lifecycle
-requires.
+Admission requires authenticated GitHub metadata and an exact uploaded receipt;
+the legacy ``accept --miner`` command refuses unauthenticated admission. Freeze
+closes the declared window before any verdict can exist. Judging verifies the
+admitted bundle before and after execution and applies the published baseline,
+epoch and score policy. It never selects a bundle by miner name or upload recency.
 
-## Two commands because the lifecycle has two moments
+A partially judged FROZEN round resumes by skipping miners with recorded verdicts.
+Invalid or missing evidence leaves the round frozen. Use ``--no-settle`` in the
+durable competition workflow: crown then commits winner and outbox intent before
+projecting the SETTLED/salt-release state into the round snapshot.
 
-`accept` records a merged submission into an **open** window and returns a receipt. That is a
-merge-time event: it is what a miner is owed the moment their pull request lands, and it carries
-no correctness information because none exists yet.
-
-`judge` runs every standing submission after the window has **frozen**. Verdicts cannot exist
-before then -- `Verdict` refuses to be constructed without the `FreezeToken` the freeze mints,
-which is what stops a correctness result existing during an open round. Then it grades, which is
-what makes verdicts publishable, and settles, which releases the per-task salt for audit.
-
-## The surface is re-verified before it is run
-
-The gate checked the pull request head. This runs whatever is in the merged tree now, and those
-are not the same object: a later commit can touch a directory an earlier gate approved. So the
-digest recorded on the receipt at `accept` time is recomputed here and compared, and a mismatch
-refuses the run.
-
-Without that, "the gate approved this surface" and "this is the surface being executed" are two
-claims joined by an assumption. The whole reason validator-side execution answers the cheating
-question is that the files being run are the files that were checked.
-
-## Judging is resumable and does not double-count
-
-`record_verdict` allows one verdict per miner, so a second `judge` on the same round would raise
-on the first miner already judged and abandon the rest. Miners already carrying a verdict are
-skipped instead, which makes a partially-completed judge safe to re-run -- and a run that dies
-after three of ten submissions is the normal way this fails, not an exotic one.
+Explicit ``--fixture-episodes`` replays labelled CPU logs only in an immutable
+fixture store. See docs/competition-settlement.md for the complete operator flow,
+durable path configuration and production trust requirements.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
+from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from validator.intake import Intake, Receipt
-from validator.score import Scorecard, ScoreError, score
+from validator.intake import Intake, IntakeError, Receipt
+from validator.score import Scorecard, ScoreError, read_metrics, score
 from validator.store import RoundStore
 
 SCORECARD_DIR = Path("var/scorecards")
@@ -55,6 +40,32 @@ SCORECARD_DIR = Path("var/scorecards")
 
 class JudgeError(RuntimeError):
     """A submission cannot be accepted or judged."""
+
+
+@dataclass(frozen=True)
+class _ExecutionIdentity:
+    miner_id: str
+    bundle_path: Path
+    context_json: str
+
+
+_execution_identity: ContextVar[_ExecutionIdentity | None] = ContextVar("judge_execution_identity", default=None)
+
+
+def execution_context(miner_id: str, bundle_path: Path | None) -> dict[str, Any] | None:
+    """Copy the admitted identity for a synchronous execution adapter, if judging.
+
+    The three-argument callback remains compatible, including wrappers delegating
+    to runner_for. Authority travels in the call context, never in mutable files
+    or attributes on a reusable callback. Adapters starting another thread/process
+    must explicitly forward this context to their final capture consumer.
+    """
+    identity = _execution_identity.get()
+    if identity is None:
+        return None
+    if miner_id != identity.miner_id or bundle_path != identity.bundle_path:
+        raise JudgeError("execution adapter differs from admitted miner/bundle path")
+    return json.loads(identity.context_json)
 
 
 @dataclass(frozen=True)
@@ -104,28 +115,9 @@ def accept(
     published in their pull request, and recording anything else would let the thing that runs
     differ from the thing that was committed to.
     """
-    store = store or RoundStore()
-    window = store.load(round_id)
     if receipt.miner_id != miner_id or receipt.round_id != round_id:
-        raise JudgeError(
-            f"receipt {receipt.submission_id} belongs to {receipt.miner_id!r} in {receipt.round_id!r}, "
-            f"not {miner_id!r} in {round_id!r}"
-        )
-    # The bundle's own file paths, read from the store. `RoundWindow.submit` checks them against
-    # the contract, which is defence in depth rather than duplication: intake validated them on the
-    # way in, and this re-checks what is actually on disk at the moment it is accepted into a round.
-    # Passing the submission id here instead -- a hex string -- made every accept come back
-    # `refused`, correctly, because a hex string is not an allowed miner file.
-    root = bundle_dir_for(receipt, intake=intake)
-    paths = sorted(f.relative_to(root).as_posix() for f in root.rglob("*") if f.is_file() and f.name != "bundle.json")
-    round_receipt = window.submit(
-        miner_id,
-        paths=paths,
-        payload_digest=receipt.bundle_sha256,
-        received_at=receipt.received_at if now is None else now,
-    )
-    store.save(window)
-    return round_receipt
+        raise JudgeError(f"receipt belongs to {receipt.miner_id!r} in {receipt.round_id!r}")
+    raise JudgeError("direct miner/receipt admission has no authority; use validator.pr_admission")
 
 
 def judge_one(
@@ -133,61 +125,74 @@ def judge_one(
     window: Any,
     miner_id: str,
     intake: Intake | None = None,
-    run: Callable[[str, Path], Path],
+    run: Callable[[str, Path, Path], Path],
     model_revision: str,
     harness_digest: str,
     repo_root: Path | None = None,
     workspace: Path,
 ) -> Judgement:
     """Run and score one standing submission. Never raises for one miner's sake."""
-    from hermes.challenge import episode_metrics_of
-    from hermesbench.sink import read_episodes
-
-    standing = window.submissions.get(miner_id)
-    expected = getattr(standing, "payload_digest", "") if standing else ""
-    intake = intake or Intake()
-    match = next(
-        (r for r in intake.read_receipts() if r.round_id == window.round_id and r.bundle_sha256 == expected),
-        None,
-    )
-    if match is None:
-        return Judgement(miner_id, None, f"no stored bundle digests to {expected[:23]}...; nothing to run")
-
-    root = bundle_dir_for(match, root=repo_root, intake=intake)
-    if not root.is_dir():
-        return Judgement(miner_id, None, f"{root.as_posix()} is missing from the intake store")
-
-    # The bundle on disk must still digest to what the miner committed to. The store is the
-    # validator's own, so this catches corruption and local tampering rather than a miner -- but an
-    # unchecked store is one where "the digest was published" and "this is what ran" are two claims
-    # joined by an assumption.
-    from validator.intake import bundle_digest
-
-    files = {
-        p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
-        for p in sorted(root.rglob("*"))
-        if p.is_file() and p.name != "bundle.json"
-    }
-    current = bundle_digest(files)
-    if expected and current != expected:
-        # The gate checked the pull request head; this runs the merged tree. A later commit can
-        # touch a directory an earlier gate approved, and then "the gate approved this" and "this
-        # is what ran" are two claims joined by an assumption.
-        return Judgement(
-            miner_id,
-            None,
-            f"the stored bundle no longer digests to what was committed: the commitment names "
-            f"{expected[:23]}... and the store holds {current[:23]}.... Refusing to run something "
-            "other than what was published.",
-        )
+    from validator.pr_admission import admission_for
 
     try:
-        log = run(miner_id, workspace)
+        admission = admission_for(window, miner_id)
+    except ValueError as exc:
+        return Judgement(miner_id, None, str(exc))
+    expected = admission["bundle_sha256"]
+    intake = intake or Intake()
+    try:
+        match = next(
+            (
+                r
+                for r in intake.read_receipts()
+                if r.round_id == window.round_id
+                and r.miner_id == miner_id
+                and r.bundle_sha256 == expected
+                and r.submission_id == admission["submission_id"]
+            ),
+            None,
+        )
+        if match is None:
+            return Judgement(miner_id, None, "no stored bundle matches admitted receipt and miner")
+        if match.origin != admission["receipt_origin"]:
+            raise IntakeError("receipt origin differs from admission")
+        root = intake.verify(match, root=repo_root)
+        # Reject bad baseline/epoch before invoking an expensive runner.
+        from validator.score import baseline_arm, epoch_issues
+
+        issues = epoch_issues(window.challenge.epoch, model_revision=model_revision, harness_digest=harness_digest)
+        if issues:
+            raise ScoreError("; ".join(issues))
+        from validator.pr_admission import verify_admission
+
+        verify_admission(admission)
+        baseline_arm(window.challenge, origin=admission["origin"])
+        identity = _ExecutionIdentity(
+            miner_id,
+            root,
+            json.dumps({key: admission[key] for key in ("epoch", "round_id", "origin", "bundle_sha256", "task_id")}),
+        )
+    except (IntakeError, ScoreError, OSError, ValueError) as exc:
+        return Judgement(miner_id, None, str(exc))
+
+    try:
+        from validator.intake import bundle_digest, capture_surface
+
+        # Guard recording/replay adapters too. This check is not the final capture
+        # check: consumers must still compare what they consume to this identity.
+        if bundle_digest(capture_surface(root)) != expected:
+            raise JudgeError("stored bundle changed before execution callback")
+        token = _execution_identity.set(identity)
+        try:
+            log = run(miner_id, root, workspace)
+        finally:
+            _execution_identity.reset(token)
+        intake.verify(match, root=repo_root)
     except Exception as exc:  # noqa: BLE001 - one miner's broken run must not stop the round
         return Judgement(miner_id, None, f"the run failed: {type(exc).__name__}: {exc}")
 
     try:
-        rows = [episode_metrics_of(r) for r in read_episodes(log)]
+        rows = read_metrics(log)
         card = score(
             window=window,
             miner_id=miner_id,
@@ -195,7 +200,7 @@ def judge_one(
             model_revision=model_revision,
             harness_digest=harness_digest,
         )
-    except ScoreError as exc:
+    except (ScoreError, ValueError, OSError, RuntimeError) as exc:
         return Judgement(miner_id, None, str(exc))
     return Judgement(miner_id, card)
 
@@ -203,7 +208,7 @@ def judge_one(
 def judge_round(
     *,
     round_id: str,
-    run: Callable[[str, Path], Path],
+    run: Callable[[str, Path, Path], Path],
     model_revision: str,
     harness_digest: str = "",
     store: RoundStore | None = None,
@@ -263,8 +268,11 @@ def judge_round(
             passed=result.scorecard.accepted,
             notes=(result.scorecard.decision.reasons[0][:120] if result.scorecard.decision.reasons else "accepted"),
         )
-        (cards / f"{round_id}-{miner_id}.json").write_text(
-            json.dumps(result.scorecard.to_record(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        from validator.persistence import atomic_write
+
+        atomic_write(
+            cards / f"{round_id}-{miner_id}.json",
+            (json.dumps(result.scorecard.to_record(), indent=2, sort_keys=True) + "\n").encode(),
         )
 
     from hermes.round import GRADED
@@ -305,7 +313,14 @@ def runner_for(
     allow_unsandboxed: bool,
     intake: Intake | None = None,
     dialect: str = "",
-) -> Callable[[str, Path], Path]:
+    task_root: Path | None = None,
+    evaluation_context: dict[str, Any] | None = None,
+    release_root: Path | None = None,
+    serving_config: Path | None = None,
+    fixture_serving: Path | None = None,
+    fixture_root: Path | None = None,
+    profile: str | None = None,
+) -> Callable[[str, Path | None, Path], Path]:
     """A `run` callable that invokes the real runner.
 
     Injected rather than called directly so `judge_round` is testable without a served model --
@@ -315,29 +330,78 @@ def runner_for(
     `round_id` is a parameter rather than derived from the workspace path. The first version read
     it off `workspace.name`, which happened to be the round id and would have silently pointed at
     the wrong surface the moment anyone passed a different workspace.
-    """
 
-    def run(miner_id: str, workspace: Path) -> Path:
+    Judging inherits the admitted execution context even if the adapter was built
+    without one. Outside judging, an explicit context must include the expected
+    bundle digest; omitting the entire context is only exploratory execution.
+    """
+    from hermesbench.execution import context_snapshot, execution_scope
+
+    configured_json = context_snapshot(evaluation_context) if evaluation_context is not None else None
+
+    def run(miner_id: str, bundle_path: Path | None, workspace: Path) -> Path:
         from hermesbench import runner
         from miner.evaluate import runner_argv
+
+        context = json.loads(configured_json) if configured_json is not None else None
+        admitted = execution_context(miner_id, bundle_path)
+        if admitted is not None:
+            if admitted["round_id"] != round_id or admitted["task_id"] != task_id:
+                raise JudgeError("runner round/task differs from admitted execution")
+            if context is not None and any(
+                context_snapshot({key: context[key]}) != context_snapshot({key: value})
+                for key, value in admitted.items()
+                if key in context
+            ):
+                raise JudgeError("runner context differs from admitted execution")
+            context = {**(context or {}), **admitted}
+        if context is not None:
+            expected = context.get("bundle_sha256")
+            if bundle_path is None:
+                if expected not in (None, "") or admitted is not None:
+                    raise JudgeError("baseline cannot replace a committed miner execution")
+            elif not isinstance(expected, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected):
+                raise JudgeError("evaluation context requires an expected bundle commitment")
+            if context.get("round_id") != round_id:
+                raise JudgeError("runner round differs from evaluation context")
+            if "task_id" in context and context["task_id"] != task_id:
+                raise JudgeError("runner task differs from evaluation context")
 
         log = workspace / f"{miner_id}.jsonl"
         if log.exists():
             log.unlink()
-        code = runner.main(
-            runner_argv(
-                task_id=task_id,
-                base_url=base_url,
-                model=model,
-                api_key_env=api_key_env,
-                workspace_root=workspace / f"ws-{miner_id}",
-                episodes_out=log,
-                repeats=repeats,
-                miner_dir=_bundle_for(round_id, miner_id, repo_root, intake),
-                allow_unsandboxed=allow_unsandboxed,
-                dialect=dialect,
-            )
+        from validator.persistence import atomic_write
+
+        context_path = workspace / f"{miner_id}.context.json" if context is not None else None
+        scope = (
+            execution_scope(bundle_path, context_path, context)
+            if context is not None and context_path is not None
+            else nullcontext()
         )
+        with scope:
+            if context_path is not None:
+                atomic_write(context_path, json.dumps(context).encode())
+            code = runner.main(
+                runner_argv(
+                    task_id=task_id,
+                    base_url=base_url,
+                    model=model,
+                    api_key_env=api_key_env,
+                    workspace_root=workspace / f"ws-{miner_id}",
+                    episodes_out=log,
+                    repeats=repeats,
+                    miner_dir=bundle_path,
+                    task_root=task_root,
+                    evaluation_context=context_path,
+                    allow_unsandboxed=allow_unsandboxed,
+                    dialect=dialect,
+                    release_root=release_root,
+                    serving_config=serving_config,
+                    fixture_serving=fixture_serving,
+                    fixture_root=fixture_root,
+                    profile=profile,
+                )
+            )
         if code != 0:
             raise JudgeError(f"the runner exited {code}")
         return log
@@ -345,33 +409,30 @@ def runner_for(
     return run
 
 
-def _bundle_for(round_id: str, miner_id: str, repo_root: Path | None, intake: Intake | None = None) -> Path:
-    """The stored bundle for a miner's standing commitment in this round.
-
-    Looked up by (round, miner) rather than derived from a path. An earlier version read the round
-    id off `workspace.name`, which happened to be right and would have pointed at the wrong bundle
-    the moment anyone passed a different workspace.
-    """
-    intake = intake or Intake()
-    match = next((r for r in intake.read_receipts() if r.round_id == round_id and r.miner_id == miner_id), None)
-    if match is None:
-        raise JudgeError(f"no stored bundle for {miner_id!r} in round {round_id!r}")
-    return bundle_dir_for(match, root=repo_root, intake=intake)
-
-
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import sys
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("action", choices=["accept", "judge"])
+    parser.add_argument("action", choices=["accept", "freeze", "judge"])
     parser.add_argument("--round", dest="round_id", required=True)
     parser.add_argument("--miner", dest="miner_id", default="", help="accept only")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--model", default="")
     parser.add_argument("--api-key-env", default="NONE")
+    parser.add_argument("--release-root", type=Path, help="active exact model/agent release authority")
+    parser.add_argument("--serving-config", type=Path, help="trusted exact-model HTTPS deployment configuration")
+    parser.add_argument("--fixture-serving", type=Path, help="explicit CPU serving responses; fixture stores only")
+    parser.add_argument("--fixture-root", type=Path, help="existing fixture response authority root")
+    parser.add_argument("--profile", choices=("bf16", "rtx5090-poc"))
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--store", type=Path, default=None)
+    parser.add_argument("--intake-root", type=Path)
+    parser.add_argument("--receipts", type=Path)
+    parser.add_argument("--workspace", type=Path, help="durable episode root; logs use ROUND/MINER.jsonl")
+    parser.add_argument("--scorecards", type=Path)
+    parser.add_argument("--reason", default="", help="explicit reason required to freeze before the deadline")
+    parser.add_argument("--fixture-episodes", type=Path, help="fixture stores only: replay labelled CPU episode logs")
     parser.add_argument("--repo-root", type=Path, default=None)
     parser.add_argument("--allow-unsandboxed", action="store_true")
     parser.add_argument(
@@ -387,45 +448,28 @@ def main(argv: list[str] | None = None) -> int:
 
     from hermes.base_model import load as load_pin
 
-    store = RoundStore(args.store)
     try:
+        store = RoundStore(args.store)
         if args.action == "accept":
-            if not args.miner_id:
-                print("validator.judge: accept needs --miner", file=sys.stderr)
-                return 2
-            # The CLI resolves the miner's standing upload; `accept` takes the receipt itself so
-            # the digest recorded on the round is the one the miner published, not one re-derived
-            # from whatever is on disk at accept time.
-            intake = Intake()
-            standing = [
-                r for r in intake.read_receipts() if r.round_id == args.round_id and r.miner_id == args.miner_id
-            ]
-            if not standing:
-                print(
-                    f"validator.judge: {args.miner_id!r} has uploaded nothing for round {args.round_id!r}",
-                    file=sys.stderr,
-                )
-                return 2
-            if len(standing) > 1:
-                # Which bundle is judged is decided by the digest in the pull request, not by
-                # recency. Guessing here would evaluate something the miner did not commit to.
-                print(
-                    f"validator.judge: {args.miner_id!r} has {len(standing)} uploads in round "
-                    f"{args.round_id!r}; the pull request's digest decides which is judged, so accept "
-                    "it through the gate rather than from the command line",
-                    file=sys.stderr,
-                )
-                return 2
-            round_receipt = accept(
-                round_id=args.round_id, miner_id=args.miner_id, receipt=standing[0], store=store, intake=intake
-            )
-            print(f"{round_receipt.outcome}  {round_receipt.miner}  {standing[0].bundle_sha256[:23]}...")
-            return 0 if round_receipt.outcome == "accepted" else 1
+            print("validator.judge: use validator.pr_admission with authenticated GitHub metadata", file=sys.stderr)
+            return 2
 
-        if not args.model:
+        if args.action == "freeze":
+            with store.lock(args.round_id):
+                window = store.load(args.round_id)
+                window.freeze(now=time.time(), reason=args.reason)
+                store.save(window)
+            print(f"round {args.round_id} is now FROZEN")
+            return 0
+        if not args.model and args.fixture_episodes is None:
             print("validator.judge: judge needs --model", file=sys.stderr)
             return 2
         window = store.load(args.round_id)
+        intake = Intake()
+        if args.intake_root is not None:
+            intake.root = args.intake_root
+        if args.receipts is not None:
+            intake.receipts = args.receipts
         run = runner_for(
             round_id=args.round_id,
             base_url=args.base_url,
@@ -436,17 +480,52 @@ def main(argv: list[str] | None = None) -> int:
             repo_root=args.repo_root,
             allow_unsandboxed=args.allow_unsandboxed,
             dialect=args.dialect,
+            task_root=Path(window.challenge.epoch["task_root"]) if window.challenge.epoch.get("task_root") else None,
+            evaluation_context={"epoch": window.challenge.epoch, "round_id": window.round_id, "origin": store.identity},
+            release_root=args.release_root,
+            serving_config=args.serving_config,
+            fixture_serving=args.fixture_serving,
+            fixture_root=args.fixture_root,
+            profile=args.profile,
         )
+        revision = load_pin().revision
+        if args.release_root is not None:
+            from admin.competition_pair import active_pair, check_pair
+
+            pair = active_pair(args.release_root)
+            check_pair(pair, epoch=window.challenge.epoch, origin=store.identity, model=args.model)
+            revision = pair["model_id"]
+        elif args.profile is not None:
+            from admin.competition_pair import base_profile
+
+            revision = base_profile(args.profile)["revision"]
+        if args.fixture_episodes is not None:
+            if store.identity["mode"] != "fixture":
+                raise JudgeError("fixture episode replay requires a fixture state root")
+            source = args.fixture_episodes.resolve()
+            revision = window.challenge.epoch["model_revision"]
+
+            def fixture_run(miner_id: str, bundle_path: Path, workspace: Path) -> Path:
+                from validator.persistence import atomic_write
+
+                log = workspace / f"{miner_id}.jsonl"
+                atomic_write(log, (source / args.round_id / f"{miner_id}.jsonl").read_bytes())
+                return log
+
+            run = fixture_run
+
         results = judge_round(
             round_id=args.round_id,
             run=run,
-            model_revision=load_pin().revision,
+            model_revision=revision,
             store=store,
+            intake=intake,
             repo_root=args.repo_root,
-            workspace=Path("var/judge") / args.round_id,
+            workspace=(args.workspace or Path("var/judge")) / args.round_id,
+            scorecard_dir=args.scorecards,
             settle=not args.no_settle,
         )
-    except (JudgeError, ScoreError) as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         print(f"validator.judge: {exc}", file=sys.stderr)
         return 2
 
@@ -478,6 +557,7 @@ __all__ = [
     "JudgeError",
     "Judgement",
     "accept",
+    "execution_context",
     "judge_one",
     "judge_round",
     "main",

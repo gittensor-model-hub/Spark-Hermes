@@ -100,6 +100,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes.challenge import Challenge
+from hermes.evidence_json import evidence_object
 from hermes.harness import derive_task_salt, digest_mapping, salted_digest
 
 SCHEMA_VERSION = "spark-round-v1"
@@ -661,6 +662,8 @@ class RoundWindow:
     # But `scope_enforced` is published either way: a validator who forgot to attach one is
     # running an unscoped round, and that must be visible rather than inferred from an absence.
     assignment: Any = None
+    store_identity: dict[str, Any] = field(default_factory=dict, init=False)
+    admissions: dict[str, Any] = field(default_factory=dict, init=False)
     state: str = field(default=OPEN, init=False)
     _clock: float = field(default=0.0, init=False)
     _submissions: dict[str, Submission] = field(default_factory=dict, init=False)
@@ -1433,7 +1436,7 @@ class Registry:
         round is a real requirement and it needs a decision about what the restarted validator
         is allowed to believe; it is not something a JSON loader should grant by accident.
         """
-        return json.loads(Path(str(path)).read_text(encoding="utf-8"))
+        return evidence_object(Path(str(path)).read_bytes())
 
 
 __all__ = [

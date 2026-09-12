@@ -1,0 +1,24 @@
+# Only build inputs belong in the context; runtime corpora and private checks do not.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!admin/
+!admin/**
+!hermes/
+!hermes/**
+!hermesbench/
+!hermesbench/**
+!eval/
+!eval/**
+!proof/
+!proof/**
+!teacher/
+!teacher/**
+!validator/
+!validator/**
+!miner/
+!miner/**
+**/__pycache__/
+**/*.pyc

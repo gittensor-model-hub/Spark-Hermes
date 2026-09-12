@@ -1,22 +1,31 @@
 # Contributing to Spark-Hermes
 
-Spark-Hermes is the model-quality arm of **SN74 on [Gittensor](https://gittensor.io/)**, the same subnet that funds
-[`sparkinfer`](https://github.com/gittensor-ai-lab/sparkinfer). Contributions are rewarded
-for **real, verified distillation quality improvements** — not benchmark gaming. This guide
-is how to make a contribution that counts.
+Spark-Hermes accepts reusable contributions to its public agent and model improvement stack.
+Local evaluation establishes eligibility for project review. It does not establish SN74
+registration, a right to subnet emissions, or measured model learning from CPU fixtures.
 
-## Built through [Gittensor](https://gittensor.io/)
+## Public contributions and private derivatives
 
-[Gittensor](https://gittensor.io/) helps power SPARKDISTILL through SN74: the project receives subnet emissions,
-contributors submit source PRs, the evaluator retrains or re-scores those PRs against a
-frozen reference, and rewards are assigned from verified marginal quality improvements
-that keep the checkpoint honest. You do not need to be in Discord or understand the
-subnet internals to contribute, but the source of the incentive loop is clear: SPARKDISTILL
-is built through **SN74 on [Gittensor](https://gittensor.io/)**.
+Public code, allowed strategy surfaces, recipes, protocols and reproducibility metadata remain
+reusable under their applicable licenses. Operator-derived adapters/checkpoints, licensed
+training data, private checks and credentials remain private unless explicitly approved for
+release. A reproducible public competition recipe/data track does not require disclosure of
+the operator's separate private derived model or corpus. Never upload private checks, salts,
+credentials or data you lack permission to redistribute.
+
+Preserve [Qwen's Apache-2.0 license, applicable NOTICE and modification attribution](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/LICENSE)
+and [Hermes Agent's MIT notice](https://raw.githubusercontent.com/NousResearch/hermes-agent/main/LICENSE).
+Record contribution/dataset ownership, training permission, redistribution permission and
+attribution separately. Private control of derivatives grants no ownership of upstream Qwen,
+Hermes or third-party datasets. See [rights and replay policy](docs/learning-boundary.md).
+
+The first real training target is pinned Qwen3.5-4B (`rtx5090-poc`), followed by pinned
+Qwen3.8-27B (`bf16`). [The CPU runbook](docs/train-spark-hermes.md) verifies software first;
+neither fixture execution nor a completed preparation command proves real model improvement.
 
 ## Principles
 
-- **The submission is the recipe + dataset, never the weights.** The evaluator retrains
+- **Training-track submissions provide the recipe + dataset references.** The evaluator retrains
   from your recipe and dataset from source on its own hardware — that retrain is the
   source of truth. A shipped checkpoint (via the proof-of-training fast path) is a
   verification convenience for the eval *numbers* only; it is never merged or trusted
@@ -34,16 +43,17 @@ is built through **SN74 on [Gittensor](https://gittensor.io/)**.
   one benchmark but a loss elsewhere is overfitting.
 - **Phase-scoped.** Phase 1 targets Qwen3.5-4B. Recipes and eval changes should target the
   current phase's student model unless a PR is explicitly opening the next phase.
-- **Fair by construction, not by policy.** Because every merged PR's recipe and dataset
-  are public, the current frontier ("the king") can always be forked and improved on by
-  anyone — a miner can't permanently dominate by hoarding a secret checkpoint. "Copy the
-  frontier and add one optimization" is a normal, expected way to compete, not a violation
-  — see *How rewards work* below for why it still only pays for your marginal delta.
+- **Reproducible contribution evidence.** Public competition recipes use their pinned canonical
+  data; strategy PRs commit to the exact privately uploaded bundle. Operators expose enough
+  reference behavior and evaluation evidence to support useful contributions and review.
+  This does not promise public access to private derived checkpoints or licensed corpora.
 
 ## Found a bug or have an idea?
 
-**Open an issue, not a PR.** Community pull requests here are limited to the two
-rewarded tracks (training or dataset — see *How rewards work* below). A community PR
+**Open an issue for evaluator/tooling changes.** Community pull requests are limited to the
+training, dataset and strategy tracks. A strategy PR appends only a commitment to
+`datasets/strategies.jsonl`, binding a separately uploaded private surface; follow the
+[admission runbook](docs/competition-ingress.md) for exact paths and metadata. A community PR
 that is neither is automatically commented on with this policy and closed by CI
 (`.github/workflows/community_pr_policy.yml` / `eval/community_pr_policy.py`) — it is
 not queued for manual review. Maintainer PRs (and bots, e.g. dependabot) are exempt.
@@ -58,10 +68,11 @@ regardless of quality.
 ## Before you open a PR
 
 ```bash
-# 1. install + sanity checks
-uv sync
-ruff check .
-pyright
+# 1. CPU installation and checks: no training, model download or external mutation
+scripts/install.sh
+scripts/check.sh
+.venv/bin/spark-hermes doctor --software-only
+.venv/bin/spark-hermes selfcheck
 
 # 2. trajectory / recipe change — does it actually train?
 scripts/train.sh recipes/<your-recipe>/sft.yaml --dry-run
@@ -145,29 +156,22 @@ hardware (e.g. a Blackwell RTX PRO 6000 Server Edition node) can skip attestatio
 entirely and still use the HF bundle + cheap re-run path — attestation only affects how
 much trust the ledger records for that run, not whether the fast path is available.
 
-## How rewards work (SN74 on [Gittensor](https://gittensor.io/))
+## Local quality labels and external SN74 rewards
 
-**Quality-only.** You're paid for the **verified marginal quality improvement** your PR
-adds over the current best ("frontier") checkpoint, not your rank — so "copy the leader +
-ε" pays ≈ ε. Both the current frontier checkpoint and your PR's resulting checkpoint are
-evaluated on the same held-out benchmark basket in one run and scored on the delta between
-them, so eval-run variance can't inflate or hide your result.
+Project quality labels and [.gittensor/weights.json](.gittensor/weights.json) express local
+scoring intent. They do not determine live payout. Strategy scoring requires verified correctness
+and the frozen efficiency policy; model release requires the separate four-cell gain and
+regression checks described in [crossed release](docs/crossed-release.md).
 
-**Non-quality PRs score 0** — SN74 emits only for verified quality improvements. Maintainer
-PRs of this kind (bug fixes, refactors, tests, tooling, docs) are still welcome and
-reviewed normally. From a **community** contributor, though, a PR that is neither a
-training-track nor a dataset-track submission is **auto-closed** by CI, not queued for
-review — see *Found a bug or have an idea?* above for the actual path. (The eval/scoring
-harness is maintainer-owned — see *Maintainer-owned paths* below.)
+SN74 onboarding requires a maintained public repository, installation of its read-only GitHub
+App, submission and manual approval. That App is separate from credentials for this project's
+validator admission and optional GitHub action delivery. See [repository registration](https://docs.gittensor.io/register-repository.html).
 
-The eval loop labels each PR **XL / L / M / S / XS** from the measured delta (or
-**BASELINE** for the first verified checkpoint on a new student/phase) — never by hand —
-and that tier is the payout. **Training-track `eval:*` multipliers are 2× the `dataset:*`
-tier at the same letter** (e.g. `eval:L` = 5.0 vs `dataset:l` = 2.5); see
-[`.gittensor/weights.json`](.gittensor/weights.json) and
-[`docs/miner-guide.md`](docs/miner-guide.md#sn74-payout-multipliers-gittensor). A quality
-improvement is scored the same wherever it lands (`teacher/`, `recipes/`, `eval/`); there
-is **no per-subsystem budget**.
+Only subnet-eligible merged PRs to recognized repositories can count toward contribution
+rewards; miner identity, branch/review rules and repository-specific eligibility still apply.
+The subnet's current registry and validator policy control payout. A local accepted score,
+open PR, crown or successful fixture settlement does not guarantee any emission. See
+[Gittensor OSS contribution scoring](https://docs.gittensor.io/oss-contributions.html).
 
 ## Maintainer-owned paths
 
@@ -291,5 +295,5 @@ The evaluator uses held-out prompts, frozen benchmark data, and reproducible tra
 seeds. Attempts to tune for the harness instead of real checkpoint quality can be rejected
 or ignored.
 
-The best way to earn is to make the shipped student checkpoint genuinely better and keep
-it honest.
+Contributions should demonstrate reproducible quality gains without weakening evaluation.
+Any external reward still depends on SN74 onboarding and its current eligibility policy.

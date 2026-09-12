@@ -6,7 +6,7 @@ training (recipe/hyperparameter improvement) and dataset (verified rows). A PR s
 open only when it is either:
 
   * from a trusted author — OWNER / MEMBER / COLLABORATOR, or a bot (e.g. dependabot); or
-  * an optimization submission — a training-track or dataset-track PR.
+  * an optimization submission — a strategy, training or dataset-track PR.
 
 Everything else from the community is commented on and closed. This never executes
 untrusted PR code: it reads the PR body, the changed path names, and author metadata
@@ -16,18 +16,19 @@ only, so it is safe to run from `pull_request_target`.
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
 
-from eval.training_track_gate import is_dataset_track_pr, is_training_track_pr
+from eval.training_track_gate import is_dataset_track_pr, is_training_track_pr, validate_changed_paths
 
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 _DATASET_REGISTRY_PATH = "datasets/registry.jsonl"
 
 _CLOSE_COMMENT = (
     "## Closed automatically\n\n"
-    "Community pull requests here are limited to **training-track or dataset-track "
+    "Community pull requests here are limited to **strategy, training or dataset-track "
     "optimization submissions**. The eval/scoring harness, tooling, and docs are "
     "maintainer-owned (see `.gittensor/weights.json` and `CONTRIBUTING.md`), so a PR that "
     "changes them is closed.\n\n"
@@ -52,20 +53,45 @@ def is_trusted_author(author_association: str, author_login: str, author_type: s
 
 
 def is_optimization_pr(pr_body: str | None, changed_paths: list[str] | None) -> bool:
-    """Whether a PR is a training-track or dataset-track optimization submission.
+    """Whether a PR is a strategy, training or dataset-track optimization submission.
 
     Detected by the track checkbox in the body, or by touching a track's submission
     artifact — a recipe file (training) or the dataset registry (dataset).
     """
+    if pr_body is not None and not isinstance(pr_body, str):
+        return False
+    if changed_paths is not None and (
+        not isinstance(changed_paths, list) or any(not isinstance(p, str) for p in changed_paths)
+    ):
+        return False
     body = pr_body or ""
-    if is_training_track_pr(body) or is_dataset_track_pr(body):
-        return True
-    for path in changed_paths or []:
-        if path.startswith("recipes/") and path.endswith((".yaml", ".yml")):
-            return True
-        if path == _DATASET_REGISTRY_PATH:
-            return True
-    return False
+    paths = changed_paths or []
+    strategy = bool(re.search(r"- \[x\]\s*\*?\*?Strategy (?:track submission|commitment)", body, re.I))
+    training = is_training_track_pr(body)
+    dataset = is_dataset_track_pr(body)
+    declared = sum((strategy, training, dataset))
+    if declared > 1:
+        return False
+    if not declared:
+        strategy = "datasets/strategies.jsonl" in paths
+        dataset = _DATASET_REGISTRY_PATH in paths
+        training = any(p.startswith("recipes/") and p.endswith((".yaml", ".yml")) for p in paths)
+        if sum((strategy, training, dataset)) != 1:
+            return False
+    if changed_paths is None:
+        return bool(declared)  # classification only; the admission gate requires the diff
+    if not paths:
+        return False
+    if strategy:
+        return set(paths) == {"datasets/strategies.jsonl"}
+    if dataset:
+        return set(paths) == {_DATASET_REGISTRY_PATH}
+    return not validate_changed_paths(paths) and all(
+        (p.startswith("recipes/") and p.endswith((".yaml", ".yml")))
+        or bool(re.fullmatch(r"runs/[^/]+/attestation\.json", p))
+        or p == "datasets/canonical.json"
+        for p in paths
+    )
 
 
 def should_close_community_pr(
@@ -132,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         if is_trusted_author(args.author_association, args.author_login, args.author_type):
             reason = "trusted author (maintainer/bot)"
         else:
-            reason = "optimization submission (training/dataset track)"
+            reason = "optimization submission (strategy/training/dataset track)"
         print(f"keep-open: {reason}", file=sys.stderr)
         return 0
 

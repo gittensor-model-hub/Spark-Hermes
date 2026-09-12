@@ -61,6 +61,7 @@ def test_the_receipt_is_appended_as_public_jsonl(intake):
     line = json.loads(intake.receipts.read_text(encoding="utf-8").splitlines()[0])
     assert line["status"] == PENDING
     assert set(line) == {
+        "origin",
         "submission_id",
         "round_id",
         "miner_id",
@@ -245,23 +246,24 @@ def test_an_unknown_submission_cannot_have_a_status_set(intake):
         intake.set_status("nope", DONE)
 
 
-def test_a_malformed_receipt_line_does_not_break_the_file(intake):
-    """One bad line must not make the dashboard unreadable or stop a later status being recorded."""
+def test_a_malformed_receipt_store_fails_closed(intake):
     intake.receipts.parent.mkdir(parents=True, exist_ok=True)
     intake.receipts.write_text("{not json\n", encoding="utf-8")
-    receipt = intake.accept(round_id="r-1", miner_id="carol", files=GOOD, now=100.0)
-    assert [r.submission_id for r in intake.read_receipts()] == [receipt.submission_id]
+    with pytest.raises(IntakeError, match="corrupt receipt store"):
+        intake.accept(round_id="r-1", miner_id="carol", files=GOOD, now=100.0)
+    assert intake.receipts.read_text() == "{not json\n"
 
 
 def test_a_receipt_round_trips():
     receipt = Receipt(
-        submission_id="abc",
+        submission_id=submission_id(round_id="r-1", miner_id="carol", digest="sha256:" + "1" * 64),
         round_id="r-1",
         miner_id="carol",
         bundle_sha256="sha256:" + "1" * 64,
         received_at=100.0,
         files=2,
         bytes=78,
+        origin={"mode": "fixture", "namespace": "receipt-unit", "issuer": "local"},
     )
     assert Receipt.from_record(receipt.to_record()) == receipt
 

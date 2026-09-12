@@ -2,21 +2,39 @@
 
 # SPARK-HERMES
 
-### Verified agent intelligence, continuously improved by SN74 Gittensor
+**Training operators:** see the [current training runbook](docs/train-spark-hermes.md) for
+readiness checks, verified data collection, SFT/DPO preparation, training, merging, and evaluation.
+For the CPU-only completion audit and directory map, see [project status](docs/project-status.md).
+Run `scripts/install.sh` and `scripts/check.sh` to validate the software without a GPU.
+
+### Agent and model improvement infrastructure, validated first on CPUs
 
 **Target:** `Spark-Hermes-3.8-27B`
 **Base:** pinned [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B) @ `1d4bf0f2`, served bf16
-**Train and score on:** RTX PRO 6000 Blackwell Server Edition, 96 GB, bf16
-**Ship as:** GGUF, sized for a 32 GB card
+**First training target:** pinned Qwen3.5-4B, `rtx5090-poc` profile, RTX 5090 32 GB
+**Final training target:** RTX PRO 6000 Blackwell Server Edition, 96 GB, bf16
+**Derived artifacts:** private by default; any GGUF distribution requires separate rights review and evaluation
 **Runtime:** Hermes 4, over the `qwen35` wire format the base natively speaks
 **Competition:** verified rollout optimization
-**Execution:** NVIDIA Confidential Computing enabled; Intel TDX quote verification implemented,
-no approved guest measurement pinned yet
+**Confidential execution:** attestation integration available; real deployment evidence and
+an independently approved guest measurement remain prerequisites
 
-> **Same model. Better rollout. Verified improvement. Better next model.**
+The contribution stack is public and reusable: agent tooling, permitted optimization surfaces,
+training/evaluation code, protocols and reproducibility metadata. Derived Spark Hermes adapters,
+checkpoints, licensed training data, private evaluation checks and deployment credentials remain
+under operator-controlled access. A public contribution does not promise public derived weights.
+Contributors retain applicable rights; access restrictions do not confer ownership of upstream assets.
 
-Spark-Hermes is an open-weight Hermes-native agent model improved through continuous,
-verifiable competition.
+Preserve the [Qwen Apache-2.0 license and applicable NOTICE/modification attribution](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/LICENSE)
+and [Hermes Agent MIT copyright/license notice](https://raw.githubusercontent.com/NousResearch/hermes-agent/main/LICENSE).
+Record dataset/contribution rights, attribution, redistribution permission and access separately;
+public availability alone does not authorize training or redistribution.
+
+SN74 participation requires external [repository registration and approval](https://docs.gittensor.io/register-repository.html)
+and [eligible merged contributions under the subnet's configuration](https://docs.gittensor.io/oss-contributions.html).
+Local scores, crowns, labels and [weights configuration](.gittensor/weights.json) express project scoring
+intent; they do not register the repository or guarantee a payout. This CPU delivery establishes
+software behavior. It does not establish model learning, novelty, hardware readiness or live rewards.
 
 ```text
 RUN → OPTIMIZE → VERIFY → LEARN → REPEAT
@@ -25,9 +43,10 @@ RUN → OPTIMIZE → VERIFY → LEARN → REPEAT
 The current model attempts real tasks. When it fails, loops, uses excessive tokens or tool
 calls, or takes too long, that execution becomes a challenge.
 
-SN74 miners compete to make **the same frozen model** perform the task better. Accepted
-improvements are hardware-attested, independently verified, added to the training corpus,
-and used by the maintainer to train the next open Spark-Hermes checkpoint.
+Contributors compete to make **the same frozen model** perform the task better. Eligible,
+verified experience with reviewed rights can enter replay and a private training corpus.
+The maintainer prepares the next derived checkpoint; real training and measured quality gains
+must be demonstrated separately before production activation.
 
 ---
 
@@ -222,7 +241,9 @@ rules as written.
 
 ## One canonical model epoch
 
-Every miner runs the same content-addressed deployment artifact for a model epoch.
+Official validator execution uses the same content-addressed deployment artifact for a model
+epoch. Miners need the declared reference behavior and permitted rehearsal access; private
+derived weights are not automatically distributed to contributors.
 
 ```text
 open base / Spark-Hermes checkpoint
@@ -526,8 +547,9 @@ gates the crown          verified success
 reported, never gates    wall time
 ```
 
-Non-dominated candidates remain on the challenge's Pareto frontier. A pre-registered SN74
-reward policy distributes emissions across that verified frontier.
+Non-dominated candidates can remain on the challenge's local Pareto frontier. This is local
+evaluation metadata; external SN74 registration, eligibility and reward configuration govern emissions.
+Model/agent release uses the separate [crossed evaluation and release gate](docs/crossed-release.md).
 
 ### Wall time is reported and never gates the crown
 
@@ -625,7 +647,8 @@ M2
 repeat
 ```
 
-> **Miners improve behavior. Verified behavior becomes data. Data improves the weights.
+> **Contributors propose better behavior. Eligible verified experience becomes data.
+> Measured release checks determine whether new weights improve.
 > Better weights create a harder frontier for miners.**
 
 ---
@@ -680,7 +703,7 @@ unmeasurable, not because the corpus is clean.
 | [**SparkProof**](https://github.com/gittensor-model-hub/SparkProof) | verified Triton training corpus, and its export/dedupe primitives |
 | [**SparkInfer**](https://github.com/gittensor-ai-lab/sparkinfer) | canonical fast inference for the frozen model — where the latency guarantee lives |
 | **Hermes Agent** | agent runtime, tools, sessions and execution semantics |
-| **SN74 Gittensor** | open competition and rewards for verified marginal improvement |
+| **SN74 Gittensor** | external repository onboarding, merged-PR eligibility and subnet-controlled payout |
 
 Latency is a property of the runtime, and SparkInfer is what delivers it. It is deliberately not a
 competition axis: wall time is reported on every episode and never gates the crown, because the
@@ -767,10 +790,14 @@ which was real and is now history.
 
 ## Current status
 
-The loop runs end to end. Most of it has been driven on the pinned model against a real challenge
-packet rather than only in tests, and the two columns say which is which — a status section that
-does not distinguish "exercised" from "implemented" is how a repository comes to claim more than it
-has.
+The integrated CPU workflow connects authenticated admission, exact-bundle judging, durable
+settlement, rights-aware replay, approved-parent preparation, crossed evaluation and resumable
+activation. Run the [installed two-cycle fixture demonstration](docs/cycles.md) to exercise those
+producers. The first fixture candidate activates only a fixture incumbent; the rejected second
+candidate preserves it. Fixture checkpoint bytes and measurements never authorize production release.
+
+The following is historical component evidence, preceding this integrated delivery. It is not
+evidence of training or serving either current pinned model profile:
 
 ```text
                             exercised on the live model?
@@ -787,13 +814,14 @@ crown                       tests  nothing has reached 10/10, so no crown has be
 aggregate                   tests  driven on constructed trajectories, not a live run
 ```
 
-Still to build:
+Remaining real-world prerequisites:
 
 ```text
-the pull-request gate that checks a committed digest against the receipts
-the dashboard that renders them
-an approved guest measurement, pinned
-more challenges
+licensed real training corpus and fresh private evaluation families/checks
+real 4B training, then 27B compatibility and measured quality gains
+trusted live serving bound to exact model and deployment identities
+approved hardware and guest measurements for confidential claims
+external SN74 repository approval, miner eligibility and reward-policy agreement
 ```
 
 ### Three limits worth stating rather than discovering
@@ -841,6 +869,24 @@ does not default to 1 anywhere.
 
 ## Quickstart
 
+### CPU operator demonstration
+
+```bash
+scripts/install.sh
+source .venv/bin/activate
+spark-hermes --help
+spark-hermes doctor --software-only --profile rtx5090-poc
+spark-hermes selfcheck
+spark-hermes cycle demo --root /tmp/spark-cycle-demo --mode fixture
+```
+
+Use a fresh demonstration root. This runs deterministic CPU external-boundary fixtures,
+including trainer/model responses and GitHub metadata, through the production controller and
+producers. It performs no real inference, GPU job, GitHub mutation or payout. The demonstration
+summary records the workspaces for `spark-hermes doctor --root WORKSPACE --profile rtx5090-poc`.
+That full readiness report remains nonzero until real external prerequisites can be verified;
+`--software-only` changes the exit scope while retaining those prerequisites in its output.
+
 ### As a miner
 
 ```bash
@@ -865,21 +911,21 @@ says so: the first one written here passed it cleanly and then raised median tok
 
 ### As a validator
 
+Follow [competition ingress](docs/competition-ingress.md) and the
+[settlement operator runbook](docs/competition-settlement.md) for stamped round
+creation, authenticated PR admission, exact-bundle judging, durable crown
+settlement and explicit outbox delivery. Configure a private persistent state root
+and use a trusted checkout; repository credentials belong only in admission and
+delivery processes. Local settlement commands default to no external mutations.
+
+Exercise the same CPU paths without a served model or GitHub calls:
+
 ```bash
-# announce a round, then open a window over a published challenge packet
-python -m hermes.announce commit --round r-001 --tasks tc-log-rotation-order --miners alice,bob
-python -m hermes.announce open   --round r-001 --seed <seed>
-python -m validator.round_loop open --round r-001 \
-  --challenge datasets/challenges/tc-log-rotation-order.json --episodes <baseline.jsonl>
-
-uv run uvicorn validator.api:app --host 127.0.0.1 --port 8080
-
-# after the window closes: run, score, record, then crown and publish
-python -m validator.judge judge --round r-001 --model qwen3.8-27b --repeats 10
-python -m validator.crown select
-python -m validator.audit build --round r-001 --master-salt-env SPARK_MASTER_SALT
-python -m validator.aggregate --out var/datasets
+.venv/bin/python tests/settlement_cli_round.py --root /tmp/spark-settlement-fixture
 ```
+
+The fixture root must be new. Its accepted score and dry-run action receipts do
+not authorize model promotion, live GitHub delivery or SN74 payment.
 
 ### Serving the model the benchmark runs against
 
@@ -961,20 +1007,19 @@ withheld check passed.
 one episode at a time: at the measured median of 124 s per episode, a 190-episode baseline is about
 six and a half hours sequential and under an hour at 8.
 
-### Training a candidate, and deciding whether it ships
+### Preparing a candidate and comparing model-only measurements
+
+Configure the rights-aware replay store and import committed rounds as described in
+[the learning runbook](docs/learning-boundary.md) before exporting a corpus:
 
 ```bash
-# rollouts -> datasets -> adapters
-python -m validator.aggregate --out var/datasets
-scripts/train.sh hermes/recipes/spark-hermes-3.8-27b/stage-c-tools.yaml
+# Freeze admitted replay into an operator workspace; raw episode paths cannot authorize it.
+python -m validator.aggregate --replay-root var/replay/v1 --source competition \
+  --round round-1 --out var/admin/candidate
+spark-hermes prepare --root var/admin/candidate --profile rtx5090-poc --offline
+spark-hermes train --root var/admin/candidate --dry-run
 
-# fold the adapter into the base, after checking it is the right adapter
-scripts/merge_lora.sh hermes/recipes/spark-hermes-3.8-27b/stage-c-tools.yaml
-#  -> outputs/spark-hermes-3.8-27b/stage-c/merged   <- what stage D starts from
-
-scripts/train.sh hermes/recipes/spark-hermes-3.8-27b/stage-d-preference.yaml
-
-# benchmark the candidate the same way, then ask whether it replaces what is served
+# After separately provisioned training/serving, compare compatible model-only runs.
 python -m hermes.promotion --incumbent runs/m0.json --candidate runs/m1.json
 ```
 
@@ -991,12 +1036,17 @@ container; it does not cover precision, device or sampling, and a promotion deci
 in those is a serving change wearing the model's name. A blank field is refused rather than assumed,
 because two runs that both recorded nothing would otherwise compare as identically served.
 
-The gate promotes only when success improves on a **paired test over tasks** — fewer than six tasks
+This exploratory model-only gate reports improvement on a **paired test over tasks** — fewer than six tasks
 changing direction cannot reach p ≤ 0.05 at all, and that is reported as underpowered rather than as
 a negative — and when tokens per success, tool calls per success, median latency and the
 catastrophic-failure rate have not regressed past their guardrail. Malformed-turn rate is bounded
 separately: a well-formed `<tool_call>` costs tokens, so drifting off-protocol improves every other
 metric in the comparison.
+
+That statistical report grants no shipping or activation authority. The
+[strict crossed release flow](docs/crossed-release.md) binds the exact agent/model pair,
+complete original executions and unused confirmation families before `spark-hermes release activate`
+can change the incumbent. CPU fixture approvals remain confined to their fixture namespace.
 
 ---
 
@@ -1024,9 +1074,9 @@ Hermes execution
       ×
 confidential verification
       ×
-open-weight training
+rights-aware private derived-model training
       =
-continuously improving verified agent intelligence
+measured agent and model improvement goals
 ```
 
 ---
@@ -1041,4 +1091,6 @@ Run it only inside an approved sandbox, disposable VM or confidential workload e
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+Repository code: MIT — see [`LICENSE`](LICENSE). Upstream models, runtime components and
+datasets retain their respective licenses and notices. Derived model release and licensed-data
+access follow the policy above; the repository license does not relicense those assets.

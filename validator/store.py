@@ -41,12 +41,13 @@ sees either the previous snapshot or the new one.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from hermes.evidence_json import evidence_object
 from hermes.round import RoundError, RoundWindow
+from validator.persistence import atomic_write, locked, state_identity
 
 # Not `datasets/`: a window snapshot carries verdicts. See the module docstring.
 WINDOW_DIR = Path("var/rounds")
@@ -85,7 +86,14 @@ def store_is_private(root: Path | None = None) -> bool:
 class RoundStore:
     """File-backed rounds, one JSON snapshot per round id."""
 
-    def __init__(self, root: Path | None = None, *, require_private: bool = True) -> None:
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        require_private: bool = True,
+        mode: str | None = None,
+        namespace: str | None = None,
+    ) -> None:
         self.root = root or WINDOW_DIR
         # Refused at construction rather than at the first save. A validator that has already
         # graded a round and then cannot store it has done the expensive part twice.
@@ -96,6 +104,14 @@ class RoundStore:
                 "benchmark. Add it to .gitignore, or pass require_private=False if this really is "
                 "a scratch directory outside any repository."
             )
+
+        try:
+            self.identity = state_identity(self.root, mode=mode, namespace=namespace)
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
+
+    def lock(self, round_id: str) -> Any:
+        return locked(self.path_for(round_id).with_suffix(".lock"))
 
     def path_for(self, round_id: str) -> Path:
         if not round_id or "/" in round_id or round_id in (".", ".."):
@@ -108,17 +124,46 @@ class RoundStore:
         """Write one round's private snapshot. Atomic: temp file, then rename."""
         path = self.path_for(window.round_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(window.snapshot(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temp, path)
+        origin = window.store_identity or self.identity
+        if origin != self.identity:
+            raise StoreError("round belongs to another state root or trust domain")
+        record = window.snapshot()
+        record["store_identity"] = self.identity
+        record["admissions"] = getattr(window, "admissions", {})
+        if window.assignment is not None:
+            record["assignment"] = window.assignment.to_record(reveal_seed=True)
+        atomic_write(path, (json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n").encode())
         return path
 
     def load(self, round_id: str, *, assignment: Any = None, contract: Any = None) -> RoundWindow:
         path = self.path_for(round_id)
         if not path.is_file():
             raise StoreError(f"no stored round at {path}")
-        record = json.loads(path.read_text(encoding="utf-8"))
-        return RoundWindow.from_snapshot(record, assignment=assignment, contract=contract)
+        try:
+            record = evidence_object(path.read_bytes())
+        except ValueError as exc:
+            raise StoreError(f"invalid round snapshot: {exc}") from exc
+        origin = record.get("store_identity")
+        if origin is not None and origin != self.identity:
+            raise StoreError("round belongs to another state root or trust domain")
+        if "assignment" in record:
+            from hermes.seed import Round
+
+            try:
+                stored_assignment = Round.from_record(record["assignment"])
+            except ValueError as exc:
+                raise StoreError(f"invalid stored assignment: {exc}") from exc
+            if assignment is not None and (
+                type(assignment) is not Round
+                or assignment.commitment != stored_assignment.commitment
+                or assignment.state != stored_assignment.state
+            ):
+                raise StoreError("supplied assignment differs from stored assignment")
+            assignment = stored_assignment
+        window = RoundWindow.from_snapshot(record, assignment=assignment, contract=contract)
+        window.store_identity = self.identity
+        window.admissions = record.get("admissions", {})
+        return window
 
     def round_ids(self) -> list[str]:
         if not self.root.is_dir():

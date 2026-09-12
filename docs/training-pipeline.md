@@ -1,7 +1,28 @@
-# The training pipeline, as it actually runs
+# Training pipeline history and current operator entry points
 
-One operator, one GPU, no miners. Every number here was measured on this machine between 2026-08-11
-and 2026-08-12; nothing is a target.
+For current operator commands and readiness limits, use the [training runbook](train-spark-hermes.md).
+The measurements below are historical, preceding the current CPU delivery; they do not prove
+learning or serving compatibility for the current 4B or 27B pins. The installed CLI now connects
+generation, verified corpus/replay, approved-parent preparation, candidate identity, crossed
+agent/model evaluation and resumable release cycles. See [cycles](cycles.md),
+[learning ingress](learning-boundary.md) and [crossed release](crossed-release.md).
+
+The contribution stack is public and reusable; derived Spark Hermes artifacts and licensed
+data remain private unless explicitly released. Preserve upstream Qwen Apache-2.0 and Hermes
+MIT notices, modification attribution and separate data/contribution grants as described in
+[CONTRIBUTING](../CONTRIBUTING.md). Local quality scores and CPU fixtures do not establish
+model novelty, learned improvement, SN74 registration or live payout.
+
+Run `spark-hermes doctor --software-only`, `spark-hermes selfcheck` and
+`spark-hermes cycle demo --root /tmp/spark-cycle-demo --mode fixture` for the CPU path.
+Use `spark-hermes status --root WORKSPACE --profile rtx5090-poc` to inspect a generated cycle
+workspace. The selected first training target is pinned Qwen3.5-4B on RTX 5090; the final
+`bf16` target stays pinned Qwen3.8-27B on PRO 6000 96 GB. Real training, licensed corpus and
+fresh private checks, trusted serving, hardware/optional attestation and external SN74
+onboarding remain separate prerequisites in both empty and populated fixture roots.
+
+The original report below covered one operator and one GPU without miners, between 2026-08-11
+and 2026-08-12. Its measurements are retained as historical observations.
 
 ```
   seeds ──► DNA ──► synth ──► GATE ──► tasks ──► probe ──► rollout ──► corpus ──► train ──► evaluate
@@ -9,7 +30,7 @@ and 2026-08-12; nothing is a target.
  traces            writes    checks            difficulty  per task     + pairs               suite
 ```
 
-The branch is `admin/training-pipeline`. The competition machinery — submissions, commit–reveal,
+The historical branch was `admin/training-pipeline`. The competition machinery — submissions, commit–reveal,
 receipts, the board, the crown — is not in this path. What is kept from it, and why, is in
 [`admin/__init__.py`](../admin/__init__.py).
 

@@ -16,59 +16,49 @@ findings.
 """
 
 import pytest
+from competition_support import EPOCH, admit_receipt
+from competition_support import rows as evidence_rows
+from competition_support import window as fixture_window
 
-from hermes.challenge import Attempt, Baseline, open_challenge
-from hermes.round import open_round
+from hermes.challenge import Attempt, Baseline
+from validator.intake import Intake
 from validator.score import ScoreError, baseline_arm, candidate_arm, epoch_issues, render, score
+from validator.store import RoundStore
 
-EPOCH = {"model_revision": "a" * 40, "harness_digest": "b" * 64}
+_CONTEXT = None
+
+
+@pytest.fixture(autouse=True)
+def context(tmp_path, monkeypatch):
+    global _CONTEXT
+    _CONTEXT = (tmp_path, monkeypatch)
 
 
 def _window(*, spread=True, attempts=10):
-    # The flat variant keeps the same MEDIAN as the spread one. An earlier version set every token
-    # to the spread series' first value, which moved the median as well -- so the comparison it
-    # claimed to make about variability was really about two different point estimates.
-    flat = 78_000 + (attempts - 1) * 1_000
-    ats = tuple(
-        Attempt(
-            public_passed=i < 4,
-            hidden_passed=True if i < 4 else None,
-            tokens=(78_000 + i * 2_000) if spread else flat,
-            tool_calls=11,
-            wall_time_s=317.0,
-            steps=34,
-            max_steps_hit=True,
-        )
-        for i in range(attempts)
-    )
-    challenge = open_challenge(
-        Baseline(task_id="tc-log-rotation-order", attempts=ats),
-        epoch=EPOCH,
-        task_pins={"task_id": "tc-log-rotation-order", "hidden_verify_commitment": "sha256:" + "c" * 64},
-    )
-    return open_round(challenge, round_id="r-001", opened_at=0.0, deadline=1_000.0)
+    import uuid
+
+    root, monkeypatch = _CONTEXT
+    root = root / uuid.uuid4().hex
+    store = RoundStore(root / "rounds", require_private=False, mode="fixture")
+    fixture_window(store, spread=spread)
+    intake = Intake(root / "bundles", root / "receipts.jsonl", mode="fixture")
+    receipt = intake.accept(round_id="r-1", miner_id="alice", files={"SOUL.md": "fixture"}, now=10)
+    admit_receipt(store, intake, receipt, monkeypatch)
+    return store.load("r-1")
 
 
 def _rows(n=10, *, tokens=40_000, public=True, hidden=True, malformed=0):
-    return [
-        {
-            "task_id": "tc-log-rotation-order",
-            "public_passed": public,
-            "hidden_passed": hidden,
-            "tokens_used": tokens,
-            "tool_calls": 6,
-            "steps": 20,
-            "malformed_turns": malformed,
-        }
-        for _ in range(n)
-    ]
+    return evidence_rows(n, tokens=tokens, public=public, hidden=hidden, malformed=malformed)
 
 
 def _score(window, rows):
     return score(
         window=window,
         miner_id="alice",
-        rows=rows,
+        rows=[
+            {**r, "origin": window.store_identity, "bundle_sha256": window.submissions["alice"].payload_digest}
+            for r in rows
+        ],
         model_revision=EPOCH["model_revision"],
         harness_digest=EPOCH["harness_digest"],
     )
@@ -130,7 +120,7 @@ def test_passing_the_published_check_and_failing_the_withheld_one_is_not_a_pass(
 def test_a_task_with_no_withheld_check_still_counts_as_a_pass():
     """`hidden_passed is None` means the task declares no withheld check, which is different from
     having failed one. Treating None as a failure would make every such task unwinnable."""
-    arm, overfit, _ = candidate_arm(_rows(hidden=None))
+    arm, overfit, _ = candidate_arm(_rows(hidden=None), private_required=False)
     assert arm.passes == 10 and overfit == 0
 
 
@@ -145,9 +135,8 @@ def test_overfit_is_reported_apart_from_the_pass_count():
 
 
 def test_protocol_failures_are_counted_and_shown():
-    card = _score(_window(), _rows(malformed=2))
-    assert card.protocol_failures == 10
-    assert "unparseable turn" in render(card)
+    with pytest.raises(ScoreError, match="malformed protocol"):
+        _score(_window(), _rows(malformed=2))
 
 
 # --- the baseline is the published bar -------------------------------------------------------------
@@ -247,7 +236,5 @@ def test_the_live_miner_arm_scores_as_refused_against_the_published_bar():
         {"public_passed": False, "hidden_passed": None, "tokens_used": t, "tool_calls": 11, "steps": 34}
         for t in (110_332, 144_773, 135_302)
     ]
-    card = _score(_window(), rows)
-    assert card.accepted is False
-    assert card.candidate.passes == 0
-    assert "before efficiency is considered" in card.decision.reasons[0]
+    with pytest.raises(ScoreError):
+        _score(_window(), rows)

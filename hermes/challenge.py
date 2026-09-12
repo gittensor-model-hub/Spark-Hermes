@@ -35,6 +35,7 @@ records the observed resource envelope and the gate reads the spread from it.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import sys
@@ -85,6 +86,7 @@ class Attempt:
     setup_failed: bool = False
     malformed_turns: int = 0
     repeated_actions: int = 0
+    evidence: dict[str, Any] | None = None
 
     @property
     def verified(self) -> bool:
@@ -104,6 +106,7 @@ class Attempt:
             setup_failed=bool(metrics.setup_failed),
             malformed_turns=int(getattr(metrics, "malformed_turns", 0)),
             repeated_actions=repeated_actions,
+            evidence=metrics.to_record() if hasattr(metrics, "to_record") else None,
         )
 
 
@@ -233,6 +236,8 @@ class Baseline:
 # nobody reliably does.
 PUBLISHABLE_TASK_KEYS = frozenset(
     {
+        "private_check_required",
+        "verify_digest",
         "task_id",
         "category",
         "prompt",
@@ -468,30 +473,106 @@ CHALLENGES_DIR = Path("datasets/challenges")
 
 
 def episode_metrics_of(row: dict[str, Any]) -> dict[str, Any]:
-    """The metric fields of one logged episode, whichever shape the log is in.
+    """Resolve supported producer assertions without overwriting or hiding facts.
 
-    `JsonlEpisodeSink.append` wraps `EpisodeMetrics.to_record()` under a `"metrics"` key and adds
-    envelope facts beside it -- `episode`, `setup_failed`, `disqualified`. Older exports are flat.
-    Both are real inputs, so this normalises rather than requiring a converter.
-
-    `setup_failed` is lifted out of the wrapper deliberately. It appears in both places and they
-    are not redundant: the sink records the runner's verdict for the episode, and the metrics
-    record what the episode itself measured. Taking the wrapper's value when present keeps a
-    setup failure classified as infrastructure breakage rather than as an agent failure, which is
-    the distinction `open_challenge` refuses on.
-
-    Reading a nested log with a flat reader is silent rather than loud, which is why this exists
-    as a named function with its own tests: every lookup misses, every default applies, and ten
-    healthy episodes read as ten zero-token failures.
+    Metrics/evidence are execution envelopes. VerificationResult, IntegrityReport
+    and AgentTrajectory have explicit projections; transcript/tool payloads and
+    unknown metadata stay opaque. Originals are retained separately by baselines.
     """
-    metrics = row.get("metrics")
-    if not isinstance(metrics, dict):
+    from hermesbench.integrity import validate_integrity_record
+
+    if not isinstance(row, dict):
+        raise ChallengeError("episode must be an object")
+    merged: dict[str, Any] = {}
+
+    def same(left: Any, right: Any) -> bool:
+        if type(left) is not type(right):
+            return False
+        if isinstance(left, dict):
+            return left.keys() == right.keys() and all(same(left[k], right[k]) for k in left)
+        if isinstance(left, list):
+            return len(left) == len(right) and all(same(x, y) for x, y in zip(left, right, strict=True))
+        return left == right
+
+    def add(key: str, value: Any) -> None:
+        if key in merged and not same(merged[key], value):
+            raise ChallengeError(f"conflicting episode evidence: {key}")
+        merged[key] = value
+
+    def integrity_report(value: Any) -> None:
+        add("integrity", value)
+        # Preserve explicit absence; strict consumers will refuse it.
+        if value is None:
+            return
+        if not isinstance(value, dict):
+            raise ChallengeError("episode integrity must be an object")
+        try:
+            validate_integrity_record(value)
+        except ValueError as exc:
+            raise ChallengeError(str(exc)) from exc
+        for source, key in (
+            ("clean", "integrity_clean"),
+            ("fully_checked", "integrity_fully_checked"),
+            ("disqualified", "disqualified"),
+        ):
+            add(key, value[source])
+
+    def verification_report(value: Any) -> None:
+        add("verification", value)
+        if not isinstance(value, dict) or type(value.get("passed")) is not bool:
+            raise ChallengeError("malformed verification report")
+        add("public_passed", value["passed"])
+        for source, key in (("exit_code", "verify_exit_code"), ("timed_out", "verify_timed_out")):
+            if source in value:
+                add(key, value[source])
+
+    for key, value in row.items():
+        if key not in ("metrics", "evidence", "integrity", "verification", "trajectory"):
+            add(key, value)
+    for wrapper in ("metrics", "evidence"):
+        if wrapper in row:
+            if not isinstance(row[wrapper], dict):
+                raise ChallengeError(f"episode {wrapper} must be an object")
+            for key, value in episode_metrics_of(row[wrapper]).items():
+                add(key, value)
+    if "integrity" in row:
+        integrity_report(row["integrity"])
+    if "verification" in row:
+        verification_report(row["verification"])
+    if "trajectory" in row:
+        trajectory = row["trajectory"]
+        add("trajectory", trajectory)
+        if not isinstance(trajectory, dict) or type(trajectory.get("success")) is not bool:
+            raise ChallengeError("malformed trajectory evidence")
+        add("success", trajectory["success"])
+        if "task_id" in trajectory:
+            add("trajectory_task_id", trajectory["task_id"])
+        metadata = trajectory.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ChallengeError("malformed trajectory metadata")
+        for key in ("public_passed", "hidden_passed", "verify_exit_code", "executed", "harness_final"):
+            if key in metadata:
+                add(key, metadata[key])
+        if "integrity_disqualified" in metadata:
+            add("disqualified", metadata["integrity_disqualified"])
+        if "integrity" in metadata:
+            integrity_report(metadata["integrity"])
+        if "verification" in metadata:
+            verification_report(metadata["verification"])
+    if "verify_timed_out" in merged and type(merged["verify_timed_out"]) is not bool:
+        raise ChallengeError("non-boolean verification timed_out")
+    if "verify_exit_code" in merged:
+        code = merged["verify_exit_code"]
+        if code is not None and type(code) is not int:
+            raise ChallengeError("malformed verifier exit code")
+        if "public_passed" in merged and merged["public_passed"] is not (
+            code == 0 and not merged.get("verify_timed_out", False)
+        ):
+            raise ChallengeError("public verifier result contradicts exit code")
+    if merged.get("verify_timed_out") is True and merged.get("public_passed") is True:
+        raise ChallengeError("public verifier passed despite timeout")
+    if not any(key in row for key in ("metrics", "evidence", "integrity", "verification", "trajectory")):
         return row
-    merged = dict(metrics)
-    merged.setdefault("task_id", row.get("task_id"))
-    for key in ("setup_failed", "disqualified"):
-        if key in row:
-            merged[key] = row[key]
     return merged
 
 
@@ -519,26 +600,28 @@ def from_episode_log(
     flaky here" call for different work, and a caller that only sees the successes cannot tell
     which happened.
     """
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
     for row in rows:
-        grouped[str(row.get("task_id") or "")].append(episode_metrics_of(row))
+        metrics = episode_metrics_of(row)
+        grouped[str(metrics.get("task_id") or "")].append((metrics, row))
 
     opened: list[Challenge] = []
     refused: list[tuple[str, str]] = []
-    for task_id, rows in sorted(grouped.items()):
+    for task_id, episodes in sorted(grouped.items()):
         attempts = tuple(
             Attempt(
-                public_passed=bool(r.get("public_passed")),
+                public_passed=r.get("public_passed", False),
                 hidden_passed=r.get("hidden_passed"),
-                tokens=int(r.get("tokens_used") or 0),
-                tool_calls=int(r.get("tool_calls") or 0),
+                tokens=r.get("tokens_used", 0),
+                tool_calls=r.get("tool_calls", 0),
                 wall_time_s=float(r.get("wall_time_s") or 0.0),
                 steps=int(r.get("steps") or 0),
-                max_steps_hit=bool(r.get("max_steps_hit")),
-                setup_failed=bool(r.get("setup_failed")),
-                malformed_turns=int(r.get("malformed_turns") or 0),
+                max_steps_hit=r.get("max_steps_hit", False),
+                setup_failed=r.get("setup_failed", False),
+                malformed_turns=r.get("malformed_turns", 0),
+                evidence=copy.deepcopy(original),
             )
-            for r in rows
+            for r, original in episodes
         )
         baseline = Baseline(task_id=task_id, attempts=attempts)
         try:
@@ -580,7 +663,8 @@ def unverifiable_tasks(
     """
     as_of = as_of or {}
     problems: dict[str, str] = {}
-    for row in rows:
+    for original in rows:
+        row = episode_metrics_of(original)
         task_id = str(row.get("task_id") or "")
         stamped = str(row.get("verify_digest") or "") or as_of.get(task_id, "")
         if not stamped:
@@ -646,6 +730,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--episodes", type=Path, required=True, help="JSONL from `runner --episodes-out`")
     parser.add_argument("--out", type=Path, default=CHALLENGES_DIR, help="where to write challenge packets")
+    parser.add_argument("--epoch-id", required=True)
+    parser.add_argument("--attempts", type=int, default=10)
     parser.add_argument("--model-revision", required=True, help="the pinned model revision this baseline ran")
     parser.add_argument("--harness-digest", required=True, help="the harness digest this baseline ran")
     parser.add_argument("--min-attempts", type=int, default=5)
@@ -669,7 +755,14 @@ def main(argv: list[str] | None = None) -> int:
     from hermesbench.suitecheck import missing_commands
     from hermesbench.tasks import load_suite
 
-    rows = list(read_episodes(args.episodes))
+    try:
+        rows = list(read_episodes(args.episodes))
+        # Filter by the same normalized task/stamp view used in baseline/scoring,
+        # while passing original parsed envelopes through to Attempt.evidence.
+        normalized = [episode_metrics_of(row) for row in rows]
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"hermes.challenge: invalid complete episode evidence: {exc}", file=sys.stderr)
+        return 2
     if not rows:
         print(f"hermes.challenge: no episodes in {args.episodes}", file=sys.stderr)
         return 2
@@ -692,6 +785,7 @@ def main(argv: list[str] | None = None) -> int:
     for t in load_suite("all"):
         record = {f.name: getattr(t, f.name) for f in dataclasses.fields(t)}
         record["hidden_verify_commitment"] = t.hidden_verify_commitment
+        record["private_check_required"] = t.declares_hidden_tests
         pins[t.task_id] = record
     # Prove the grader can run before publishing a challenge on the fact that it did not pass.
     #
@@ -721,8 +815,16 @@ def main(argv: list[str] | None = None) -> int:
                 "machine and every attempt scores 0 for a reason the model never caused"
             )
 
-    gradeable_rows = [r for r in rows if r.get("task_id") not in ungradeable]
-    epoch = {"model_revision": args.model_revision, "harness_digest": args.harness_digest}
+    gradeable_rows = [r for r, n in zip(rows, normalized, strict=True) if n.get("task_id") not in ungradeable]
+    from validator.score import policy_record
+
+    epoch = {
+        "model_revision": args.model_revision,
+        "harness_digest": args.harness_digest,
+        "epoch_id": args.epoch_id,
+        "attempt_ids": [str(i) for i in range(args.attempts)],
+        "score_policy": policy_record(),
+    }
     as_of = _verify_digests_at(args.baseline_ref) if args.baseline_ref else {}
     ungradeable.update(
         unverifiable_tasks(
@@ -733,11 +835,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    gradeable = [r for r in gradeable_rows if r.get("task_id") not in ungradeable]
+    gradeable = [r for r in gradeable_rows if episode_metrics_of(r).get("task_id") not in ungradeable]
     opened, refused = from_episode_log(rows=gradeable, epoch=epoch, task_pins=pins, min_attempts=args.min_attempts)
     refused = sorted([*refused, *ungradeable.items()])
 
-    print(f"{len(rows)} episodes over {len({r.get('task_id') for r in rows})} task(s)")
+    print(f"{len(rows)} episodes over {len({r.get('task_id') for r in normalized})} task(s)")
     for challenge in opened:
         b = challenge.baseline
         print(

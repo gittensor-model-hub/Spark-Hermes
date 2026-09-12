@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Axolotl training stack for SparkDistill recipes.
+# Install the optional Axolotl training stack for Spark Hermes recipes.
 #
 #   scripts/install_train.sh
 #
@@ -10,12 +10,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if ! command -v uv >/dev/null 2>&1; then
-  echo "error: uv not found — run SparkProof scripts/install.sh first" >&2
+  echo "error: install uv first (python3 -m pip install uv)" >&2
   exit 1
 fi
 
-echo ">>> syncing SparkDistill base deps"
-uv sync --extra dev
+echo ">>> syncing Spark Hermes base deps"
+uv sync --frozen --extra dev
 
 # Qwen3.5 binds flash-linear-attention, whose Triton CUDA extensions compile against
 # Python.h. Without python3-dev the build fails and FLA rolls back to a CPU path that
@@ -111,5 +111,5 @@ fi
 
 echo ""
 echo "Next:"
-echo "  scripts/prepare_mining_sft.sh"
-echo "  scripts/train.sh recipes/qwen3.5-4b-phase1/sft-mining.yaml"
+echo "  python -m admin.cli doctor"
+echo "  See docs/train-spark-hermes.md for corpus preparation and training."

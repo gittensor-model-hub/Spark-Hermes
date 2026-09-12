@@ -1,53 +1,8 @@
-"""One crown an hour. Score every standing solution, keep the best, close the rest, open the next.
+"""Rank accepted active-round scores and persist crown intent before any delivery.
 
-    python -m validator.crown select --out datasets/crowns.json
-    python -m validator.crown actions --out datasets/crowns.json
-
-Each hour is a tournament, not a standing record. Every evaluated submission is scored, exactly
-one wins, every other pull request is closed, the crown label moves to the winner, and a new round
-opens. One miner is rewarded per hour and the rest start again.
-
-## Ranking across different tasks
-
-A single winner means comparing a submission on `tc-log-rotation-order` -- baseline 4 of 10 at
-78,417 median tokens -- against one on a task whose bar is nothing like it. Absolute tokens cannot
-do that: it would rank miners by which task they drew.
-
-So the score is the **lower bound of the reduction interval against that submission's own
-baseline**. Each challenge publishes its own bar, so the quantity is already relative, and using
-the lower bound rather than the point estimate makes it noise-aware: a 40% win measured on a wildly
-variable task scores below a 25% win measured on a tight one, because the second is the one we know
-about. `hermes.acceptance.reduction_interval` computes it and this reuses it rather than inventing
-a second notion of "better".
-
-## Eligibility comes before ranking, and cannot be traded against it
-
-A submission must pass **every** attempt, over at least `MIN_ATTEMPTS` of them, before its tokens
-are looked at. This mirrors `acceptance.decide` -- correctness is a gate, not a term -- so no
-amount of token reduction promotes a submission that fails the withheld check. Ranking eligible
-entries only is what stops the hourly cadence from turning into "cheapest wrong answer wins".
-
-## An hour with no winner keeps the incumbent, and two of them move the task
-
-Nothing is crowned when nothing beats its own baseline: an hourly reward that always pays out
-stops carrying information within a week. But the crown does not vacate. The previous holder keeps
-it and the task runs again, because a barren hour says nothing about the miner who last cleared the
-bar -- it says the field this hour did not.
-
-Two barren hours in a row is different. That is evidence about the *task*: either nobody can beat
-its baseline or nobody is trying, and running it a third time spends an hour of everyone's GPU
-time to learn the same thing. So the task rotates and the counter resets.
-
-The crown carries across a rotation. It was won and nothing has taken it, and stripping it because
-the subject changed would punish the holder for other people's failure.
-
-## The label is moved by this job and nothing else
-
-Removals are emitted before additions. A crown only ever added is a crown several people hold at
-once, and this design has exactly one at a time by construction.
-
-The crowned pull request stays open while it holds the crown -- it is the standing result, and
-closing it would make the label point at a closed page. Every challenger closes each hour.
+Use ``validator.settlement activate`` to bind an active round first. ``select``
+commits the outcome and outbox atomically; ``actions`` reads that saved intent.
+Neither command contacts GitHub. See docs/competition-settlement.md.
 """
 
 from __future__ import annotations
@@ -57,7 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hermes.acceptance import MIN_ATTEMPTS, Arm, reduction_interval
+from hermes.acceptance import Arm, Decision, reduction_interval
+from hermes.evidence_json import evidence_object
+from validator.score import ScoreError, acceptance_decision, policy_record
 
 CROWNS = Path("datasets/crowns.json")
 CROWN_LABEL = "crown"
@@ -78,6 +35,9 @@ class Contender:
     baseline: Arm
     pr: int = 0
     received_at: float = 0.0
+    decision: Decision | None = None
+    policy: dict[str, Any] = field(default_factory=policy_record)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     @property
     def median_tokens(self) -> float:
@@ -109,6 +69,9 @@ class Score:
             "median_tokens": self.contender.median_tokens,
             "median_tool_calls": self.contender.median_tool_calls,
             "attempts": self.contender.candidate.attempts,
+            "identity": self.contender.evidence.get("identity", {}),
+            "policy": self.contender.policy,
+            "policy_hash": self.contender.evidence.get("policy_hash"),
         }
 
 
@@ -239,24 +202,16 @@ def available_tasks(challenges: Path) -> list[str]:
 
 
 def eligibility(contender: Contender) -> tuple[bool, str]:
-    """Whether a submission may be ranked at all. Correctness is a gate, not a term."""
-    arm = contender.candidate
-    if not arm.all_passed:
-        return False, (
-            f"passed {arm.passes} of {arm.attempts}; the withheld check must pass on every attempt "
-            "before tokens are looked at, or the hour is won by the cheapest wrong answer"
-        )
-    if arm.attempts < MIN_ATTEMPTS:
-        from hermesbench.repeats import wilson
-
-        bound = wilson(arm.passes, arm.attempts)
-        return False, (
-            f"{arm.passes}/{arm.attempts} is 100% of too few attempts: it bounds the true success "
-            f"rate only to {bound.low:.1%} at 95%. {MIN_ATTEMPTS} attempts are the floor."
-        )
+    """Consume the score producer's decision, checking it against the same policy."""
     if len(contender.baseline.tokens) < 2:
-        return False, "its baseline has fewer than two measurements, so no reduction can be bounded"
-    return True, ""
+        return False, "its baseline has fewer than two measurements"
+    try:
+        decision = acceptance_decision(contender.candidate, contender.baseline, contender.policy)
+    except (ValueError, ScoreError) as exc:
+        return False, str(exc)
+    if contender.decision is not None and contender.decision != decision:
+        return False, "scorecard decision disagrees with its policy and evidence"
+    return decision.accepted, "; ".join(decision.reasons)
 
 
 def score_of(contender: Contender) -> Score:
@@ -271,7 +226,7 @@ def score_of(contender: Contender) -> Score:
 
 
 def select(contenders: list[Contender]) -> Outcome:
-    """Score the field and pick one winner. Ties break on tool calls, then on arriving first."""
+    """Rank accepted entries; ties: tool calls, receipt time, miner, PR, round, task."""
     ranked: list[Score] = []
     ineligible: list[tuple[Contender, str]] = []
     for contender in contenders:
@@ -280,25 +235,19 @@ def select(contenders: list[Contender]) -> Outcome:
             ranked.append(score_of(contender))
         else:
             ineligible.append((contender, why))
-
-    # Sorted, not max(): the full ordering is published so a miner can see where they placed.
-    # Ties go to fewer tool calls and then to whoever submitted first -- deterministic, and it
-    # rewards the earlier of two identical results rather than the later.
-    ranked.sort(key=lambda s: (-s.lower_bound, s.contender.median_tool_calls, s.contender.received_at))
-    ineligible.sort(key=lambda pair: (pair[0].task_id, pair[0].miner_id))
-
-    # A winner still has to have beaten its baseline. A field where every entry is correct but no
-    # cheaper has no winner: the crown is for an improvement, not for turning up.
-    winner = ranked[0] if ranked and ranked[0].lower_bound > 0.0 else None
-    if ranked and winner is None:
-        ineligible.append(
-            (
-                ranked[0].contender,
-                f"best of the field, and its reduction interval {ranked[0].interval} does not clear "
-                "zero: correct but not an improvement anyone can distinguish from noise",
-            )
+    ranked.sort(
+        key=lambda s: (
+            -s.lower_bound,
+            s.contender.median_tool_calls,
+            s.contender.received_at,
+            s.contender.miner_id,
+            s.contender.pr,
+            s.contender.round_id,
+            s.contender.task_id,
         )
-    return Outcome(winner=winner, ranked=ranked, ineligible=ineligible)
+    )
+    ineligible.sort(key=lambda pair: (pair[0].task_id, pair[0].miner_id))
+    return Outcome(winner=ranked[0] if ranked else None, ranked=ranked, ineligible=ineligible)
 
 
 def close_actions(outcome: Outcome, standing: Standing | None = None) -> list[tuple[int, str]]:
@@ -317,54 +266,100 @@ def close_actions(outcome: Outcome, standing: Standing | None = None) -> list[tu
     return [(c.pr, reasons.get(c.miner_id, "the round is over")) for c in outcome.losers if c.pr and c.pr not in spared]
 
 
-def contenders_from(scorecard_dir: Path, *, store: Any = None, registry: Path | None = None) -> list[Contender]:
-    """Every graded result in the current round.
+def contenders_from(
+    scorecard_dir: Path,
+    *,
+    store: Any = None,
+    round_id: str | None = None,
+    registry: Path | None = None,
+) -> list[Contender]:
+    """Read only the explicit active round and bind cards to its trusted admissions.
 
-    A verdict is not published until `RoundWindow.grade`, so an ungraded round yields nothing:
-    crowning on one would rank miners by a result the round itself refuses to serve.
+    Registry input is retained for caller compatibility; PR identity comes exclusively
+    from authenticated admissions. Missing/invalid active evidence aborts settlement.
+    Historical files are never participants and cannot cause PR actions.
     """
     from hermes.round import GRADED, SETTLED
+    from validator.pr_admission import admission_for
+    from validator.score import baseline_arm, policy_hash, schedule
     from validator.store import RoundStore
 
+    if not round_id:
+        raise CrownError("an explicit active round is required")
     store = store or RoundStore()
-    prs = pr_numbers(registry) if registry else {}
+    window = store.load(round_id)
+    if window.state not in (GRADED, SETTLED):
+        raise CrownError("active round must be graded before crown selection")
+    expected_baseline = baseline_arm(window.challenge, origin=store.identity)
+    attempts = schedule(window.challenge)
     out: list[Contender] = []
-    for path in sorted(scorecard_dir.glob("*.json")) if scorecard_dir.is_dir() else []:
-        card = json.loads(path.read_text(encoding="utf-8"))
-        round_id, miner_id = str(card.get("round_id") or ""), str(card.get("miner_id") or "")
+    for miner_id in sorted(window.submissions):
+        admission = admission_for(window, miner_id)
+        path = scorecard_dir / f"{round_id}-{miner_id}.json"
         try:
-            window = store.load(round_id)
-        except Exception:  # noqa: BLE001 - a missing round is a skip, not a failure of the tournament
-            continue
-        if window.state not in (GRADED, SETTLED):
-            continue
-        candidate, baseline = card.get("candidate") or {}, card.get("baseline") or {}
-        tokens = tuple(int(t) for t in candidate.get("tokens") or ())
-        base_tokens = tuple(int(t) for t in baseline.get("tokens") or ())
-        if not tokens or not base_tokens:
-            continue
-        entry = prs.get((round_id, miner_id), {})
-        out.append(
-            Contender(
-                task_id=str(card.get("task_id") or ""),
-                miner_id=miner_id,
-                round_id=round_id,
-                candidate=Arm(
-                    passes=int(candidate.get("verified_passes") or 0),
-                    attempts=int(candidate.get("attempts") or len(tokens)),
-                    tokens=tokens,
-                    tool_calls=tuple(int(c) for c in candidate.get("tool_calls") or ([0] * len(tokens))),
-                ),
-                baseline=Arm(
-                    passes=int(baseline.get("verified_passes") or 0),
-                    attempts=int(baseline.get("attempts") or len(base_tokens)),
-                    tokens=base_tokens,
-                    tool_calls=tuple(int(c) for c in baseline.get("tool_calls") or ([0] * len(base_tokens))),
-                ),
-                pr=int(entry.get("pr") or 0),
-                received_at=float(entry.get("received_at") or 0.0),
+            card = evidence_object(path.read_bytes())
+            identity = {
+                "epoch": window.challenge.epoch,
+                "admission_id": admission["admission_id"],
+                "bundle_sha256": admission["bundle_sha256"],
+                "origin": store.identity,
+            }
+            policy = policy_record()
+            if any(
+                card.get(k) != v
+                for k, v in {
+                    "round_id": round_id,
+                    "task_id": window.task_id,
+                    "miner_id": miner_id,
+                    "identity": identity,
+                    "policy": policy,
+                    "policy_hash": policy_hash(policy),
+                }.items()
+            ) or policy_hash(window.challenge.epoch.get("score_policy")) != policy_hash(policy):
+                raise ValueError("scorecard identity or policy differs from active round")
+
+            def arm(value: Any) -> Arm:
+                n, passes = value["attempts"], value["verified_passes"]
+                if type(n) is not int or n != len(attempts) or type(passes) is not int or not 0 <= passes <= n:
+                    raise ValueError("invalid scorecard attempt counts")
+                for key, minimum in (("tokens", 1), ("tool_calls", 0)):
+                    if (
+                        not isinstance(value[key], list)
+                        or len(value[key]) != n
+                        or any(type(v) is not int or v < minimum for v in value[key])
+                    ):
+                        raise ValueError("invalid scorecard measurements")
+                return Arm(passes, n, tuple(value["tokens"]), tuple(value["tool_calls"]))
+
+            candidate, baseline = arm(card["candidate"]), arm(card["baseline"])
+            decision = acceptance_decision(candidate, baseline, card["policy"])
+            verdict = window.verdicts.get(miner_id)
+            if (
+                baseline != expected_baseline
+                or card["decision"] != decision.to_record()
+                or card["decision"].get("accepted") is not decision.accepted
+                or verdict is None
+                or verdict.passed is not decision.accepted
+                or card["reduction_interval"] != list(reduction_interval(baseline.tokens, candidate.tokens))
+                or card.get("protocol_failures") != 0
+            ):
+                raise ValueError("scorecard disagrees with baseline, verdict or acceptance decision")
+            out.append(
+                Contender(
+                    task_id=window.task_id,
+                    miner_id=miner_id,
+                    round_id=round_id,
+                    candidate=candidate,
+                    baseline=baseline,
+                    pr=admission["pr_number"],
+                    received_at=window.submissions[miner_id].received_at,
+                    decision=decision,
+                    policy=card["policy"],
+                    evidence=card,
+                )
             )
-        )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise CrownError(f"invalid active scorecard for {miner_id}: {exc}") from exc
     return out
 
 
@@ -423,75 +418,9 @@ def render(outcome: Outcome) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import argparse
-    import sys
+    from validator.settlement import crown_main
 
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("action", choices=["select", "actions"])
-    parser.add_argument("--scorecards", type=Path, default=Path("var/scorecards"))
-    parser.add_argument("--store", type=Path, default=None)
-    parser.add_argument("--registry", type=Path, default=Path("datasets/strategies.jsonl"))
-    parser.add_argument("--out", type=Path, default=CROWNS)
-    parser.add_argument(
-        "--challenges",
-        type=Path,
-        default=Path("datasets/challenges"),
-        help="where the challenge packets live; the task rotates through these after two barren rounds",
-    )
-    args = parser.parse_args(argv)
-
-    from validator.store import RoundStore
-
-    try:
-        found = contenders_from(args.scorecards, store=RoundStore(args.store), registry=args.registry)
-    except Exception as exc:  # noqa: BLE001
-        print(f"validator.crown: {exc}", file=sys.stderr)
-        return 2
-
-    outcome = select(found)
-    standing_before = json.loads(args.out.read_text(encoding="utf-8")) if args.out.is_file() else {}
-    tasks = available_tasks(args.challenges)
-    standing_after, labels = settle(standing_before, outcome, available_tasks=tasks)
-
-    if args.action == "actions":
-        for act, pr in labels:
-            print(f"label {act} {CROWN_LABEL} #{pr}")
-        for pr, why in close_actions(outcome, Standing.from_record(standing_before)):
-            print(f"close #{pr} {why[:110]}")
-        if not labels and standing_after.pr:
-            print(f"  crown stays with #{standing_after.pr}; nothing beat it this round", file=sys.stderr)
-        if standing_after.task_id != Standing.from_record(standing_before).task_id:
-            print(
-                f"  task rotates to {standing_after.task_id!r} after {BARREN_ROUNDS_BEFORE_ROTATION} barren round(s)",
-                file=sys.stderr,
-            )
-        for miner in [c.miner_id for c in outcome.losers if not c.pr]:
-            print(f"  no pull request recorded for {miner}; not closing", file=sys.stderr)
-        return 0
-
-    print(render(outcome))
-    if outcome.winner is None and standing_after.pr:
-        print(
-            f"\nNo crown this round, so it stays with #{standing_after.pr}. Barren rounds: {standing_after.barren_rounds}."
-        )
-    if standing_after.task_id != Standing.from_record(standing_before).task_id:
-        print(
-            f"Task rotates to {standing_after.task_id!r}: two barren rounds is evidence about the task, not the field."
-        )
-    elif standing_after.task_id:
-        print(f"Next round runs {standing_after.task_id!r} again.")
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        **outcome.to_record(),
-        "winner": standing_after.winner,
-        "this_round_winner": outcome.winner.to_record() if outcome.winner else None,
-        "task_id": standing_after.task_id,
-        "barren_rounds": standing_after.barren_rounds,
-    }
-    args.out.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"\nwrote {args.out}")
-    return 0
+    return crown_main(argv)
 
 
 __all__ = [

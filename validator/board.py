@@ -86,6 +86,7 @@ def snapshot(*, store: RoundStore, intake: Intake | None = None, now: float | No
         "files",
         "bytes",
         "status",
+        "origin",
     }
     published = []
     for receipt in receipts:

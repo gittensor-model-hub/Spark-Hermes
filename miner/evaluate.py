@@ -104,27 +104,26 @@ def arm_from_log(path: Path, *, label: str) -> ArmResult:
     Reading the metric names off the top level is a real bug that shipped: every lookup missed,
     every default applied, and ten healthy episodes became ten zero-token failures without raising.
     """
-    from hermes.challenge import episode_metrics_of
-    from hermesbench.sink import read_episodes
+    from validator.score import ScoreError, candidate_arm, read_metrics
 
-    rows = [episode_metrics_of(row) for row in read_episodes(path)]
+    try:
+        rows = read_metrics(path)
+    except ScoreError as exc:
+        raise EvaluateError(str(exc)) from exc
     if not rows:
         raise EvaluateError(f"{path} holds no episodes; the {label} arm produced nothing to judge")
 
-    tokens = tuple(int(r.get("tokens_used") or 0) for r in rows)
-    if not all(tokens):
-        raise EvaluateError(
-            f"the {label} arm reported a zero-token episode. That is not a cheap run -- it is a run "
-            "that did not happen, and averaging it in would make the arm look free."
+    # Local rehearsal has only the public verifier. Preserve execution/integrity checks,
+    # while explicitly excluding private evidence from this non-authoritative report.
+    try:
+        arm, _, _ = candidate_arm(
+            [{**r, "hidden_passed": None, "success": r.get("public_passed")} for r in rows], private_required=False
         )
+    except ScoreError as exc:
+        raise EvaluateError(f"{label}: {exc}") from exc
     return ArmResult(
         label=label,
-        arm=Arm(
-            passes=sum(1 for r in rows if r.get("public_passed")),
-            attempts=len(rows),
-            tokens=tokens,
-            tool_calls=tuple(int(r.get("tool_calls") or 0) for r in rows),
-        ),
+        arm=arm,
         steps=tuple(int(r.get("steps") or 0) for r in rows),
         dialects=tuple(str(r.get("dialect") or "") for r in rows),
     )
@@ -168,6 +167,13 @@ def runner_argv(
     allow_unsandboxed: bool,
     dialect: str = "",
     keep_trajectories: bool = True,
+    task_root: Path | None = None,
+    evaluation_context: Path | None = None,
+    release_root: Path | None = None,
+    serving_config: Path | None = None,
+    fixture_serving: Path | None = None,
+    fixture_root: Path | None = None,
+    profile: str | None = None,
 ) -> list[str]:
     """The argv a validator would use.
 
@@ -201,6 +207,19 @@ def runner_argv(
         "--episodes-out",
         str(episodes_out),
     ]
+    if task_root is not None:
+        argv += ["--task-root", str(task_root)]
+    if evaluation_context is not None:
+        argv += ["--evaluation-context", str(evaluation_context)]
+    for flag, value in (
+        ("--release-root", release_root),
+        ("--serving-config", serving_config),
+        ("--fixture-serving", fixture_serving),
+        ("--fixture-root", fixture_root),
+        ("--profile", profile),
+    ):
+        if value is not None:
+            argv += [flag, str(value)]
     if dialect:
         argv += ["--dialect", dialect]
     if keep_trajectories:

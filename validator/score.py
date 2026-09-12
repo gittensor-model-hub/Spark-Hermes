@@ -35,7 +35,9 @@ one rate would hide the only signal that distinguishes them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import dataclasses
+import math
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,8 @@ class Scorecard:
     repeats_to_settle: int | None
     overfit_attempts: int
     protocol_failures: int
+    identity: dict[str, Any] = field(default_factory=dict)
+    policy: dict[str, Any] = field(default_factory=dict)
 
     @property
     def accepted(self) -> bool:
@@ -65,6 +69,9 @@ class Scorecard:
 
     def to_record(self) -> dict[str, Any]:
         return {
+            "identity": self.identity,
+            "policy": self.policy,
+            "policy_hash": policy_hash(self.policy),
             "round_id": self.round_id,
             "miner_id": self.miner_id,
             "task_id": self.task_id,
@@ -131,87 +138,295 @@ def epoch_issues(epoch: dict[str, Any], *, model_revision: str, harness_digest: 
     return issues
 
 
-def candidate_arm(rows: list[dict[str, Any]]) -> tuple[Arm, int, int]:
-    """Build the candidate arm from episode metrics. Returns (arm, overfit, protocol failures).
+def policy_record() -> dict[str, Any]:
+    from hermes import acceptance as a
 
-    A pass is `public_passed and hidden_passed is not False`, matching `Attempt.verified`, because
-    the validator holds the withheld verifiers and the whole point of holding them is that they
-    count.
-    """
+    return {
+        "version": "strategy-score-v1",
+        "min_attempts": a.MIN_ATTEMPTS,
+        "min_token_reduction": a.MIN_TOKEN_REDUCTION,
+        "confidence": a.CONFIDENCE,
+        "bootstrap_resamples": a.BOOTSTRAP_RESAMPLES,
+        "bootstrap_seed": a.BOOTSTRAP_SEED,
+        "correctness": "all_required_verifiers",
+        "verification_unchanged": True,
+        "token_statistic": "median",
+        "interval_gate": "lower_bound_gte_margin",
+    }
+
+
+def policy_hash(value: Any) -> str:
+    from validator.pr_admission import digest
+
+    return digest(value)
+
+
+def acceptance_decision(candidate: Arm, baseline: Arm, policy: dict[str, Any]) -> Decision:
+    """The single versioned gate used by score production and crown consumption."""
+    if policy != policy_record() or policy_hash(policy) != policy_hash(policy_record()):
+        raise ScoreError("unknown, incomplete or changed score policy")
+    return decide(candidate=candidate, baseline=baseline)
+
+
+def private_check_required(challenge: Any) -> bool:
+    pins = challenge.task_pins
+    declaration = pins.get("private_check_required", pins.get("declares_hidden_tests"))
+    if (
+        "private_check_required" in pins
+        and "declares_hidden_tests" in pins
+        and pins["private_check_required"] is not pins["declares_hidden_tests"]
+    ):
+        raise ScoreError("conflicting private-check declarations")
+    commitment = pins.get("hidden_verify_commitment")
+    if declaration is not None and type(declaration) is not bool:
+        raise ScoreError("private-check declaration must be boolean")
+    if commitment:
+        if declaration is False:
+            raise ScoreError("private-free declaration contradicts withheld commitment")
+        return True
+    if declaration is False:
+        return False
+    raise ScoreError("task must explicitly declare its private-check requirement")
+
+
+def _integer(row: dict[str, Any], key: str, *, positive: bool = False) -> int:
+    value = row.get(key)
+    if type(value) is not int or value < (1 if positive else 0):
+        raise ScoreError(
+            f"invalid {key}: expected {'positive' if positive else 'nonnegative'} measured integer; a zero-token run did not happen"
+        )
+    return value
+
+
+def normalize_episode(row: dict[str, Any]) -> dict[str, Any]:
+    from hermes.challenge import ChallengeError, episode_metrics_of
+
+    try:
+        return episode_metrics_of(row)
+    except ChallengeError as exc:
+        raise ScoreError(str(exc)) from exc
+
+
+def validate_execution(row: dict[str, Any], *, private_required: bool) -> None:
+    row = normalize_episode(row)
+    for key in (
+        "public_passed",
+        "success",
+        "setup_failed",
+        "max_steps_hit",
+        "disqualified",
+        "integrity_clean",
+        "integrity_fully_checked",
+        "protocol_clean",
+    ):
+        if type(row.get(key)) is not bool:
+            raise ScoreError(f"missing or non-boolean {key}")
+    for key in ("truncated", "harness_final", "integrity_disqualified"):
+        if key in row and row[key] is not False:
+            raise ScoreError(f"invalid execution flag {key}")
+    integrity = row.get("integrity")
+    if "integrity" in row:
+        if not isinstance(integrity, dict) or any(
+            integrity.get(k) is not row[v]
+            for k, v in (
+                ("clean", "integrity_clean"),
+                ("fully_checked", "integrity_fully_checked"),
+                ("disqualified", "disqualified"),
+            )
+        ):
+            raise ScoreError("contradictory or malformed integrity evidence")
+    if "executed" in row and row["executed"] is not True:
+        raise ScoreError("trajectory was not executed")
+    if "trajectory_task_id" in row and row["trajectory_task_id"] != row.get("task_id"):
+        raise ScoreError("trajectory task differs from episode task")
+    if "private_check_required" in row and row["private_check_required"] is not private_required:
+        raise ScoreError("episode private-check declaration contradicts task")
+    hidden = row.get("hidden_passed")
+    if private_required and type(hidden) is not bool:
+        raise ScoreError("required private result is missing or non-boolean")
+    if not private_required and hidden is not None:
+        raise ScoreError("private-free task has unexpected private evidence")
+    if (
+        row["setup_failed"]
+        or row["max_steps_hit"]
+        or row["disqualified"]
+        or not row["integrity_clean"]
+        or not row["integrity_fully_checked"]
+    ):
+        raise ScoreError("execution failed integrity or was truncated/setup-failed")
+    if _integer(row, "malformed_turns") or not row["protocol_clean"]:
+        raise ScoreError("malformed protocol cannot receive credit")
+    _integer(row, "tokens_used", positive=True)
+    _integer(row, "tool_calls")
+    _integer(row, "steps")
+    latency = row.get("wall_time_s")
+    if not isinstance(latency, (int, float)) or isinstance(latency, bool) or not math.isfinite(latency) or latency < 0:
+        raise ScoreError("invalid measured wall_time_s")
+    if row.get("cost") is not None:
+        cost = row["cost"]
+        if type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0:
+            raise ScoreError("invalid measured cost")
+    verified = row["public_passed"] and (hidden is True if private_required else True)
+    if row["success"] is not verified:
+        raise ScoreError("success contradicts required verifier evidence")
+
+
+def metrics_from_bytes(raw: bytes, *, source: str = "episode snapshot") -> list[dict[str, Any]]:
+    """Normalize exactly the bytes checked for completeness and retained for hashing."""
+    from hermes.challenge import episode_metrics_of
+    from hermesbench.sink import decode_episodes
+
+    try:
+        return [episode_metrics_of(row) for row in decode_episodes(raw, source=source)]
+    except (ValueError, RuntimeError, RecursionError) as exc:
+        raise ScoreError(f"cannot score episode log: {exc}") from exc
+
+
+def read_metrics(path: Path) -> list[dict[str, Any]]:
+    """Read one complete snapshot; never reopen between checking and decoding."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ScoreError(f"cannot read episode log: {exc}") from exc
+    return metrics_from_bytes(raw, source=str(path))
+
+
+def candidate_arm(rows: list[dict[str, Any]], *, private_required: bool = True) -> tuple[Arm, int, int]:
     if not rows:
         raise ScoreError("no episodes; there is nothing to score")
-
-    tokens = tuple(int(r.get("tokens_used") or 0) for r in rows)
-    if not all(tokens):
-        raise ScoreError(
-            "an episode reported zero tokens. That is not a cheap run, it is a run that did not "
-            "happen, and averaging it in would make the surface look free."
-        )
-    verified = sum(1 for r in rows if r.get("public_passed") and r.get("hidden_passed") is not False)
-    overfit = sum(1 for r in rows if r.get("public_passed") and r.get("hidden_passed") is False)
-    malformed = sum(1 for r in rows if int(r.get("malformed_turns") or 0) > 0)
+    rows = [normalize_episode(row) for row in rows]
+    for row in rows:
+        validate_execution(row, private_required=private_required)
     return (
         Arm(
-            passes=verified,
+            passes=sum(r["success"] for r in rows),
             attempts=len(rows),
-            tokens=tokens,
-            tool_calls=tuple(int(r.get("tool_calls") or 0) for r in rows),
+            tokens=tuple(r["tokens_used"] for r in rows),
+            tool_calls=tuple(r["tool_calls"] for r in rows),
         ),
-        overfit,
-        malformed,
+        sum(r["public_passed"] and r.get("hidden_passed") is False for r in rows),
+        0,
     )
 
 
-def baseline_arm(challenge: Any) -> Arm:
-    """The published bar, from the challenge's own attempts.
+def schedule(challenge: Any) -> list[str]:
+    epoch = challenge.epoch
+    attempts = epoch.get("attempt_ids")
+    if not isinstance(epoch.get("epoch_id"), str) or not epoch["epoch_id"]:
+        raise ScoreError("active epoch_id is required")
+    if (
+        not isinstance(attempts, list)
+        or len(attempts) < 10
+        or any(not isinstance(a, str) or not a for a in attempts)
+        or len(set(attempts)) != len(attempts)
+    ):
+        raise ScoreError("epoch must declare at least 10 unique attempt_ids")
+    return attempts
 
-    Read off `Challenge.baseline`, which the round's private snapshot preserves in full. The
-    *published* packet carries only aggregate statistics, so a baseline rebuilt from it would have
-    no individual token counts and `reduction_interval` would have nothing to bootstrap -- the
-    interval would collapse and every margin would clear.
-    """
+
+def validate_identity(
+    rows: list[dict[str, Any]],
+    challenge: Any,
+    *,
+    round_id: str | None = None,
+    bundle_sha256: str | None = None,
+    origin: dict[str, Any] | None = None,
+) -> None:
+    attempts = schedule(challenge)
+    expected = {k: challenge.epoch[k] for k in ("epoch_id", "model_revision", "harness_digest")}
+    expected["task_id"] = challenge.task_id
+    if round_id is not None:
+        expected["round_id"] = round_id
+    if bundle_sha256 is not None:
+        expected["bundle_sha256"] = bundle_sha256
+    if origin is not None:
+        expected["origin"] = origin
+    verify = challenge.task_pins.get("verify_digest")
+    if not verify:
+        import hashlib
+
+        script = challenge.task_pins.get("verify")
+        if not isinstance(script, str) or not script:
+            raise ScoreError("task public verifier identity is missing")
+        verify = "sha256:" + hashlib.sha256(script.encode("utf-8")).hexdigest()
+    expected["verify_digest"] = verify
+    seen = []
+    for row in rows:
+        for key, value in expected.items():
+            if row.get(key) != value:
+                raise ScoreError(f"episode {key} does not match admitted round identity")
+        seen.append(row.get("attempt_id"))
+    if any(not isinstance(x, str) for x in seen) or len(seen) != len(attempts) or set(seen) != set(attempts):
+        raise ScoreError("duplicate, missing or excess attempts; declared schedule must match exactly")
+
+
+def baseline_arm(challenge: Any, *, origin: dict[str, Any] | None = None) -> Arm:
     attempts = challenge.baseline.attempts
     if len(attempts) < 2:
-        raise ScoreError(
-            f"the challenge's baseline has {len(attempts)} attempt(s). A single measurement carries "
-            "no information about its own variability, so no margin computed against it can be "
-            "distinguished from noise."
-        )
-    return Arm(
-        passes=challenge.baseline.passes,
-        attempts=len(attempts),
-        tokens=tuple(a.tokens for a in attempts),
-        tool_calls=tuple(a.tool_calls for a in attempts),
-    )
+        raise ScoreError("single baseline attempt carries no information about its own variability")
+    if challenge.baseline.task_id != challenge.task_id:
+        raise ScoreError("baseline task differs from round task")
+    rows = []
+    for attempt in attempts:
+        row = dataclasses.asdict(attempt)
+        evidence = row.pop("evidence", None)
+        if not isinstance(evidence, dict):
+            raise ScoreError("baseline is missing original execution evidence; re-baseline required")
+        evidence = normalize_episode(evidence)
+        validate_execution(evidence, private_required=private_check_required(challenge))
+        for key, value in row.items():
+            source_key = "tokens_used" if key == "tokens" else key
+            if source_key in evidence and evidence[source_key] != value:
+                raise ScoreError(f"baseline {key} disagrees with original execution evidence")
+        # Original booleans/counts take precedence: evidence cannot replace the oracle.
+        row = {**evidence, **row, "tokens_used": attempt.tokens}
+        rows.append(row)
+    validate_identity(rows, challenge, origin=origin)
+    return candidate_arm(rows, private_required=private_check_required(challenge))[0]
 
 
 def score(
-    *,
-    window: Any,
-    miner_id: str,
-    rows: list[dict[str, Any]],
-    model_revision: str,
-    harness_digest: str,
+    *, window: Any, miner_id: str, rows: list[dict[str, Any]], model_revision: str, harness_digest: str
 ) -> Scorecard:
-    """Judge one submitted surface. Refuses rather than returning a misleading number."""
+    rows = [normalize_episode(row) for row in rows]
     challenge = window.challenge
     mismatch = epoch_issues(challenge.epoch, model_revision=model_revision, harness_digest=harness_digest)
     if mismatch:
         raise ScoreError("; ".join(mismatch))
+    from validator.pr_admission import admission_for
 
-    candidate, overfit, malformed = candidate_arm(rows)
-    baseline = baseline_arm(challenge)
+    try:
+        admission = admission_for(window, miner_id)
+    except ValueError as exc:
+        raise ScoreError(str(exc)) from exc
+    standing = window.submissions[miner_id]
+    baseline = baseline_arm(challenge, origin=admission["origin"])
+    validate_identity(
+        rows, challenge, round_id=window.round_id, bundle_sha256=standing.payload_digest, origin=admission["origin"]
+    )
+    candidate, overfit, malformed = candidate_arm(rows, private_required=private_check_required(challenge))
+    policy = policy_record()
+    declared_policy = challenge.epoch.get("score_policy")
+    if declared_policy != policy or policy_hash(declared_policy) != policy_hash(policy):
+        raise ScoreError("unknown or changed score policy")
     return Scorecard(
         round_id=window.round_id,
         miner_id=miner_id,
         task_id=challenge.task_id,
         candidate=candidate,
         baseline=baseline,
-        decision=decide(candidate=candidate, baseline=baseline),
+        decision=acceptance_decision(candidate, baseline, policy),
         interval=reduction_interval(baseline.tokens, candidate.tokens),
         repeats_to_settle=repeats_needed(baseline.tokens, candidate.tokens),
         overfit_attempts=overfit,
         protocol_failures=malformed,
+        policy=policy,
+        identity={
+            "epoch": challenge.epoch,
+            "admission_id": admission["admission_id"],
+            "bundle_sha256": standing.payload_digest,
+            "origin": admission["origin"],
+        },
     )
 
 
@@ -257,8 +472,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     from hermes.base_model import load as load_pin
-    from hermes.challenge import episode_metrics_of
-    from hermesbench.sink import read_episodes
     from validator.store import RoundStore
 
     if args.episodes is None:
@@ -270,7 +483,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         window = RoundStore(args.store).load(args.round_id)
-        rows = [episode_metrics_of(r) for r in read_episodes(args.episodes)]
+        rows = read_metrics(args.episodes)
         card = score(
             window=window,
             miner_id=args.miner_id,
