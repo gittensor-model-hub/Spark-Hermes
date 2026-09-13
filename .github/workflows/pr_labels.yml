@@ -1,0 +1,88 @@
+name: PR quality labels
+
+# Applies the deterministic `area:*` labels `.gittensor/weights.json` declares and nothing
+# previously computed. A merged pull request otherwise left this repository carrying whatever a
+# human remembered to click, which is the wrong origin for a value a reward reads.
+#
+# SECURITY. This is `pull_request_target`, so it runs with repository context and a token that can
+# write labels. Three rules keep that safe and each matters on its own:
+#
+#   1. NO PR-head checkout. The trusted base is checked out and nothing else; the pull request's
+#      code never reaches this runner. rollout_track.yml carries the same rule and the same note.
+#   2. `contents: read`. A token with write on contents in a pull_request_target job is the single
+#      most dangerous combination GitHub offers. Labels need `pull-requests: write` and nothing
+#      more, so that is all this asks for.
+#   3. The changed-file list comes from the GitHub API, not from the branch. Reading it out of the
+#      PR would let the submission influence its own labels.
+#
+# Labels are ADDED, never removed. A maintainer's deliberate `eval:*` or `dataset:*` tier must not
+# be cleared by an automated pass that only knows about areas.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The BASE, deliberately. Never `github.event.pull_request.head.sha`.
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v7.1.1
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Changed paths, from the API rather than the branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            --jq '.[].filename' > /tmp/changed-files.txt
+          echo "changed paths: $(wc -l < /tmp/changed-files.txt)"
+
+      - name: Compute labels
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m eval.pr_labels \
+            --changed-files /tmp/changed-files.txt > /tmp/labels.json
+          cat /tmp/labels.json
+
+      - name: Apply the area labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          mapfile -t LABELS < <(jq -r '.area_only[]' /tmp/labels.json)
+          if [ "${#LABELS[@]}" -eq 0 ]; then
+            echo "no declared area touched; nothing to apply"
+            exit 0
+          fi
+          for label in "${LABELS[@]}"; do
+            gh pr edit "$PR_NUMBER" --add-label "$label" || true
+          done
+
+      - name: Report any emission-shaped label the weights file does not price
+        run: |
+          set -euo pipefail
+          UNPRICED="$(jq -r '.unpriced | join(", ")' /tmp/labels.json)"
+          if [ -n "$UNPRICED" ]; then
+            echo "::warning::labels carry no multiplier in .gittensor/weights.json: ${UNPRICED}"
+          fi
