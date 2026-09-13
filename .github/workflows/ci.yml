@@ -16,28 +16,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-type-test:
+  # Fast feedback, separated deliberately. These take ~2 minutes and used to sit in front of a
+  # 51-minute test step in the same job, so a one-line formatting fault was reported as a failure
+  # of "lint-type-test" after the whole suite had been queued behind it. A dangling AGENTS.md
+  # symlink killed `ruff format` in 10 seconds and still cost a full CI cycle to learn.
+  lint-type:
     runs-on: ubuntu-latest
-    # 15 was the budget when this suite was ~2600 tests and finished well inside it. The
-    # operator pipeline roughly doubles it to ~3990, and a large share of the new tests spawn
-    # real subprocesses -- installed interpreters out of pytest tmpdirs, supervised train/merge
-    # jobs, cutover fixtures -- which no amount of tuning makes cheap. Measured at 3231s (~54
-    # minutes) locally, so 15 could not pass and GitHub reported the timeout as `cancelled`,
-    # which reads as an infrastructure blip rather than the suite outgrowing its budget.
-    #
-    # Raised to unblock, NOT as the fix. Parallelism is not available here: pytest-xdist is not
-    # a dependency, and `admin.runtime_protocol.campaign_lock` is a single global file lock that
-    # workers would serialise on or deadlock against. The real fix is the slowest subprocess
-    # tests, and it needs the per-test measurement to be worth doing.
-    timeout-minutes: 90
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
           python-version: "3.12"
-
       - name: Install dependencies
         # --extra validator so pyright can resolve validator/ imports (fastapi), the same
         # reason as proof below: an unresolvable import is a type error, and excluding the
@@ -46,30 +37,65 @@ jobs:
         # nv-attestation-sdk). SparkProof itself is not installed here, so the tests
         # that need it skip by design (see tests/conftest.py) — no secret exposure.
         run: uv sync --extra dev --extra proof --extra validator --frozen
-
       - name: Ruff lint
         run: uv run ruff check .
-
       - name: Ruff format
         run: uv run ruff format --check .
-
       - name: Pyright type check
         run: uv run pyright
-
-      - name: Pytest
-        run: uv run pytest -q
-
       - name: Offline CPU pipeline self-check
         run: uv run python -m admin.cli selfcheck
-
       - name: Build distributable package
         run: uv build --wheel
-
       - name: Verify installed package outside the checkout
         run: |
           uv pip install --reinstall --no-deps dist/*.whl
           cd /tmp
           "$GITHUB_WORKSPACE/.venv/bin/spark-hermes" selfcheck
+
+  # The suite is ~4000 tests and 51 minutes on one runner. `pytest-xdist` cannot shorten that:
+  # `admin.runtime_protocol.campaign_lock` is a single global file lock, so in-process workers
+  # would serialise on it or deadlock. Separate RUNNERS have separate filesystems and therefore
+  # separate locks, which is why the split is at the job level and not inside pytest.
+  #
+  # Shards are by MEASURED cost. Timed per shard on one host: 291 tests take ~48 minutes and the
+  # other 3716 take ~5. test_cycles.py alone is ~1200s and is therefore the floor -- no
+  # arrangement of the rest gets wall time below it. See tests/shards.py for the numbers and for
+  # why a --durations top-25 sample is not a substitute for timing the shards.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [cycles, campaign, release, core]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --extra dev --extra proof --extra validator --frozen
+      - name: Pytest (${{ matrix.shard }})
+        run: uv run python tests/shards.py run ${{ matrix.shard }}
+
+  # A shard that silently runs nothing still reports success, and three green jobs would then
+  # mean less than the one job they replaced. This asserts that the shards partition the suite
+  # exactly: every collected test in exactly one shard, none dropped, none run twice.
+  shard-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --extra dev --extra proof --extra validator --frozen
+      - name: Shards partition the suite
+        run: uv run python tests/shards.py verify
 
   cpu-container:
     runs-on: ubuntu-latest
