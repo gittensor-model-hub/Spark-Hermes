@@ -16,8 +16,8 @@ Run `scripts/install.sh` and `scripts/check.sh` to validate the software without
 **Derived artifacts:** private by default; any GGUF distribution requires separate rights review and evaluation
 **Runtime:** Hermes 4, over the `qwen35` wire format the base natively speaks
 **Competition:** verified rollout optimization
-**Confidential execution:** attestation integration available; real deployment evidence and
-an independently approved guest measurement remain prerequisites
+**Verification:** the validator runs every submission itself, on pinned everything, against
+checks the miner never holds
 
 The contribution stack is public and reusable: agent tooling, permitted optimization surfaces,
 training/evaluation code, protocols and reproducibility metadata. Derived Spark Hermes adapters,
@@ -109,10 +109,31 @@ POST /v1/round/{id}/submission     {miner_id, files: {path: content}}
    ↓
 receipt: submission_id, bundle_sha256, status=pending
    ↓
-pull request appends one line naming that digest
+pull request appends one line to datasets/strategies.jsonl naming that digest
+   ↓
+validator.pr_admission fetches the PR from GitHub and admits it
    ↓
 validator runs the bundle the digest identifies
 ```
+
+**Admission is authenticated, and only GitHub's own answer counts.**
+[`validator/pr_admission.py`](validator/pr_admission.py) fetches the pull request itself; the
+uploaded bundle and the caller's JSON confer no authority, and the credential travels in the
+subprocess environment rather than its argv.
+
+```bash
+python -m validator.pr_admission --repository OWNER/REPO --pr 123 --round r-001
+```
+
+That exists to stop one specific attack. **Receipts are public**, so every accepted digest is
+visible — including other people's. The obvious move is to open a pull request naming someone
+else's digest and have their work evaluated under your name. So three identities must agree: the
+pull request's author as **GitHub reports it**, the `miner_id` on the appended line, and the
+`miner_id` on the receipt that digest belongs to. Any disagreement is a rejection, and every
+reason is reported rather than just the first.
+
+`datasets/strategies.jsonl` is append-only: a pull request that rewrites an existing byte is
+refused, because the value of the public record is that it cannot be revised after a result.
 
 Both halves are load-bearing and neither works alone. A private upload with no public
 commitment is unauditable: nothing outside the validator records what was submitted, by whom,
@@ -188,11 +209,10 @@ one of them means the board is lying. They render as different messages.
 At this stage the validator executes the submitted bundle itself: pinned model, pinned
 environment, pinned runtime, on its own hardware, against verifiers the miner never holds.
 
-That removes an entire class of question rather than answering it. Under miner-side generation
-the attestation proves genuine confidential hardware and binds to the exported files — but no
-approved guest measurement is pinned, so a quote proves *a* confidential VM ran, not that it ran
-an image anyone approved. On hardware the submitter owns, that is the whole question. Running it
-here means the model, the environment and the checks are not claims at all.
+That removes an entire class of question rather than answering it. If a miner generated the
+episodes on hardware they own, every number would be a claim about a machine nobody else can
+inspect: which weights answered, which checks ran, whether the budget was really respected.
+Running it here means the model, the environment and the checks are not claims at all.
 
 The cost is that a miner must now trust the validator, which is what the round proof below is
 for.
@@ -281,7 +301,7 @@ Quantization is a **distribution** step that happens after the competition, not 
 |---|---|---|
 | precision | bf16 | GGUF |
 | card | RTX PRO 6000 Blackwell, 96 GB | 32 GB class, e.g. RTX 5090 |
-| why | 30 B parameters at two bytes each is ~60 GB of weights before optimizer state, adapters or KV — it does not fit 32 GB, and a 4-bit *training* base fits adapters to a model nobody serves | four-ish bits a parameter puts the same 30 B model inside 32 GB with room for context |
+| why | 27.78 B parameters at two bytes each is ~56 GB of weights before optimizer state, adapters or KV — it does not fit 32 GB, and a 4-bit *training* base fits adapters to a model nobody serves | four-ish bits a parameter puts the same model inside 32 GB with room for context |
 | who runs it | validators, and miners reproducing a round | whoever wants to run the thing |
 
 The reason to keep them apart is that a score does not survive the crossing.
@@ -300,7 +320,7 @@ is what makes the pair comparable at all.
 
 ---
 
-## The round proof, and where confidential computing becomes load-bearing
+## The round proof
 
 The validator runs the surface, so a miner takes its word for the result unless something makes
 that word checkable. After a round settles it publishes a bundle:
@@ -322,26 +342,16 @@ afterwards to suit a result. The salt is per-task —
 commitment sealed. The master never enters a bundle, and `build` searches for it rather than
 trusting itself not to have written it.
 
-### What the bundle does not prove, and what would
+### What the bundle does not prove
 
 That the episodes came from the pinned model. Nothing in a published bundle can: a validator
 willing to fabricate a log can fabricate a consistent one. The manifest says so in a
 `does_not_prove` field rather than letting a reader infer more from the word "manifest".
 
-That is where confidential computing earns its place. Run the evaluation inside a measured VM and
-bind `claim_sha256` as the NRAS nonce and the TDX REPORTDATA — the same binding
-[`proof/bundle.py`](proof/bundle.py) already uses — and the log is tied to hardware running an
-approved image.
-
-The pieces are real and verified end to end on an RTX PRO 6000 Blackwell with CC enabled: NRAS
-issues a signed token (`measres: success`, `secboot: true`, nonce echoed), and
-[`eval/attestation.py`](eval/attestation.py) accepts it while refusing a self-signed local one.
-
-One gap stands between that and the stronger claim. `check_tdx_measurement` is called with no
-allowlist, so it returns `None` — no approved guest measurement is pinned. Until one is, a quote
-proves a genuine confidential VM ran and committed to this bundle, not that it ran an image we
-approved. The gate also tests `if measured is False`, which cannot fire on `None`: today that is
-a check incapable of failing, and pinning a measurement means fixing both.
+What the bundle *does* give is narrower and still worth having: the validator cannot have graded
+against a check written after seeing a result, because the commitment predates submissions and the
+salt that opens it is released only at settle. The remaining trust is in the operator running the
+round honestly, and it is named here rather than dressed up as something stronger.
 
 ---
 
@@ -467,7 +477,6 @@ No efficiency reward exists until all required gates pass:
 
 ```text
 correct model epoch
-valid Intel TDX + NVIDIA CC evidence
 valid Hermes protocol
 allowed tools only
 complete trace
@@ -707,8 +716,8 @@ unmeasurable, not because the corpus is clean.
 
 Latency is a property of the runtime, and SparkInfer is what delivers it. It is deliberately not a
 competition axis: wall time is reported on every episode and never gates the crown, because the
-same strategy on a different card — or on the same card with confidential computing enabled, which
-encrypts host-device traffic — produces a different number. Rewarding it would pay for hardware.
+same strategy on a different card produces a different number. Rewarding it would pay for
+hardware.
 See [wall time is reported and never gates the crown](#wall-time-is-reported-and-never-gates-the-crown).
 
 ---
@@ -820,11 +829,10 @@ Remaining real-world prerequisites:
 licensed real training corpus and fresh private evaluation families/checks
 real 4B training, then 27B compatibility and measured quality gains
 trusted live serving bound to exact model and deployment identities
-approved hardware and guest measurements for confidential claims
 external SN74 repository approval, miner eligibility and reward-policy agreement
 ```
 
-### Three limits worth stating rather than discovering
+### Two limits worth stating rather than discovering
 
 **Challenge supply is the binding constraint, and it is tighter than task supply.** The suite is
 19 tasks. A task becomes a challenge only if the baseline reliably fails it, and exactly **4**
@@ -842,9 +850,6 @@ tasks    power to detect a 20-point paired improvement
 Every number in this file rests on the first row. Growing the suite is necessary and not
 sufficient; the yield from suite to challenge was 21%.
 
-**Attestation is verified but not policed.** See the round-proof section: no approved guest
-measurement is pinned, and the check that would enforce one cannot currently fail.
-
 **A promising result is usually a small sample.** The first surface written here scored 3 of 3 on
 its first measurement — and 6 of 10 on the next, which is what the attempt floor predicted when it
 refused the 3/3 and said it bounded the true rate to 43.9%. It was a real improvement on both axes
@@ -858,12 +863,18 @@ does not default to 1 anywhere.
 
 | Path | What |
 |---|---|
-| [`hermes/`](hermes) | trajectories, protocol, prompts and training formatting |
+| [`hermes/`](hermes) | trajectories, protocol, wire dialects, prompts and training formatting |
 | [`hermesbench/`](hermesbench) | task execution, mutation supply and objective verification |
+| [`validator/`](validator) | competition service: admission, judging, crown, settlement, round proofs |
+| [`miner/`](miner) | the competitor's surface: init, check, rehearse, ablation search |
+| [`admin/`](admin) | the operator's `spark-hermes` command: corpus, prepare, train, merge, release |
 | [`eval/`](eval) | evaluation and submission gates |
-| [`proof/`](proof) | proof and attestation utilities |
-| [`recipes/`](recipes) | SN74 training recipes |
+| [`teacher/`](teacher) | teacher interfaces used to generate corpus candidates |
+| [`proof/`](proof) | round-proof bundles and attestation utilities |
+| [`recipes/`](recipes) | the separate Qwen3.5-4B student line (not the agent recipes, which live under `hermes/recipes/`) |
 | [`runs/`](runs) | immutable verified run/frontier records |
+| [`scripts/`](scripts) | install, serve, train and check entry points |
+| [`docs/`](docs) | runbooks, serving evidence and design notes |
 
 ---
 
@@ -898,11 +909,11 @@ python -m miner check --dir ./my-surface
 
 # rehearse against the baseline before spending anything on an attested run
 python -m miner evaluate --dir ./my-surface --task tc-log-rotation-order \
-  --base-url http://127.0.0.1:8000/v1 --model qwen3.8-27b --repeats 10
+  --base-url http://127.0.0.1:8001/v1 --model qwen3.8-27b --repeats 10
 
 # which rule is carrying the result, with the leader re-measured on fresh episodes
 python -m miner search --dir ./my-surface --task tc-log-rotation-order \
-  --base-url http://127.0.0.1:8000/v1 --model qwen3.8-27b --repeats 10
+  --base-url http://127.0.0.1:8001/v1 --model qwen3.8-27b --repeats 10
 ```
 
 `check` proves the pinned runtime will load a surface. It does not prove the surface helps, and
@@ -1058,7 +1069,7 @@ can change the incumbent. CPU fixture approvals remain confined to their fixture
 4. **Executed trajectories beat imagined trajectories.**
 5. **Hidden evaluation prevents visible-task hard-coding.**
 6. **Every important artifact is content-addressed.**
-7. **Attestation claims only what the proof actually binds.**
+7. **A proof claims only what it actually binds.**
 8. **Policy is not evidence.**
 9. **Failures are training opportunities.**
 10. **The loop matters more than one checkpoint.**
@@ -1072,7 +1083,7 @@ SN74 competition
       ×
 Hermes execution
       ×
-confidential verification
+withheld-check verification
       ×
 rights-aware private derived-model training
       =
@@ -1085,7 +1096,7 @@ measured agent and model improvement goals
 
 HermesBench executes model-authored tool actions and shell commands.
 
-Run it only inside an approved sandbox, disposable VM or confidential workload environment.
+Run it only inside an approved sandbox or a disposable VM.
 
 ---
 
