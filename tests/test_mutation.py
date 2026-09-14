@@ -254,3 +254,21 @@ def test_generated_prompt_does_not_reveal_the_mutation(project, tmp_path):
     mutant = tasks[0].mutant
     assert str(mutant.line) not in prompt
     assert mutant.operator not in prompt
+
+
+def test_exclusions_apply_inside_the_project_not_to_its_ancestors(tmp_path):
+    """A project checked out under a directory named `venv` must not lose every file.
+
+    `EXCLUDED_DIRS` is matched against the path relative to the project. Matched against the
+    absolute path it would see the ancestor, exclude everything, and rebuild an empty workspace."""
+    from hermesbench.mutation import _setup_script
+
+    project = tmp_path / "venv" / "src" / "proj"
+    (project / "pkg").mkdir(parents=True)
+    (project / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (project / ".git").mkdir()
+    (project / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    script, skipped = _setup_script(project, "pkg/mod.py", "x = 2\n")
+    assert "cat > pkg/mod.py" in script, "the project's own file must be embedded"
+    assert ".git" not in script, "the project's .git must not be"
+    assert skipped == []

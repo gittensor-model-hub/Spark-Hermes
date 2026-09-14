@@ -63,6 +63,12 @@ printf 'total=%s\\nfirst=%s\\n' "$total" "$first" > answer.txt
 """
 
 
+# The inputs the answer is DERIVED from. An agent that may rewrite these can edit `parts/b.txt`
+# until its wrong `first=` is the right one, and the published check cannot tell the difference.
+# Outputs (`answer.txt`) are deliberately absent: protecting one would disqualify every correct run.
+PROTECTED = ("parts/a.txt", "parts/b.txt", "parts/c.txt")
+
+
 def _candidate(**overrides) -> Candidate:
     base = {
         "task_id": "gen-example",
@@ -72,6 +78,7 @@ def _candidate(**overrides) -> Candidate:
         "reference_solution": REFERENCE,
         "cheat_solution": CHEAT,
         "alternate_solution": ALTERNATE,
+        "protected_paths": PROTECTED,
     }
     base.update(overrides)
     return Candidate(**base)
@@ -230,3 +237,128 @@ def test_every_declared_check_is_reachable(check):
     from hermes.taskgen import gate as module
 
     assert f'"{check}"' in inspect.getsource(module), f"{check} is declared but never used"
+
+
+# --- protected paths ---------------------------------------------------------------
+
+
+def test_a_task_that_protects_nothing_is_rejected():
+    """An empty tuple is not "nothing to protect", it is the integrity check switched off.
+
+    `hermesbench.runner` returns early when `protected_paths` is empty, so a task shipping the
+    default grades an agent that rewrote its own inputs exactly the same as one that did the work.
+    """
+    verdict = gate(_candidate(protected_paths=()))
+    assert not verdict.accepted
+    assert verdict.failed_check == "protected_paths_are_sound"
+
+
+def test_a_protected_path_that_does_not_exist_is_rejected():
+    """A path setup never created protects nothing, and the runner would read it as a deletion."""
+    verdict = gate(_candidate(protected_paths=("parts/a.txt", "parts/never-written.txt")))
+    assert not verdict.accepted
+    assert verdict.failed_check == "protected_paths_are_sound"
+    assert "never-written" in verdict.detail
+
+
+def test_protecting_an_output_the_task_asks_for_is_rejected():
+    """`answer.txt` is what the agent must WRITE, so setup never creates it and it protects nothing."""
+    verdict = gate(_candidate(protected_paths=("parts/a.txt", "answer.txt")))
+    assert not verdict.accepted
+    assert verdict.failed_check == "protected_paths_are_sound"
+    assert "do not exist after setup" in verdict.detail
+
+
+def test_a_task_whose_own_solution_rewrites_a_protected_path_is_rejected():
+    """The failure this check exists for, and the one a task author cannot see by inspection.
+
+    The file exists, so the presence check passes; the reference solution then rewrites it. Every
+    agent solving this task the intended way would be disqualified for tampering. Same shape as the
+    defect check 9 catches -- a correct solution scored as cheating -- arriving from the inputs
+    rather than from the verifier.
+    """
+    tampering = REFERENCE + "\nprintf '# seq: 2\\nbeta\\n# touched\\n' > parts/a.txt\n"
+    verdict = gate(_candidate(reference_solution=tampering))
+    assert not verdict.accepted
+    assert verdict.failed_check == "protected_paths_are_sound"
+    assert "modifies protected path" in verdict.detail, verdict.detail
+
+
+def test_protecting_the_inputs_does_not_block_a_correct_solution():
+    """The positive case: inputs protected, outputs free, reference still passes everything."""
+    verdict = gate(_candidate())
+    assert verdict.accepted, f"{verdict.failed_check}: {verdict.detail}"
+    assert "protected_paths_are_sound" in verdict.checks_run
+
+
+# --- workspace escapes ---------------------------------------------------------------
+
+
+def test_prose_inside_a_heredoc_is_data_not_a_command():
+    """The false positive the first version of this check produced on real model output.
+
+    A task writing a runbook that SAYS "run `ssh-add ~/.ssh/id_rsa`" is documenting a system, not
+    touching the home directory. 1 of 11 model-reached generations was rejected for it."""
+    from hermes.taskgen.gate import _escapes_workspace
+
+    setup = "mkdir -p docs\ncat > docs/guide.md <<'EOF'\n## Deploy\n**Fix:** run `ssh-add ~/.ssh/id_rsa`\nsee /etc/ssh/config\nEOF\ntouch done\n"
+    assert _escapes_workspace(setup) == ""
+
+
+def test_an_escape_after_the_heredoc_ends_is_still_caught():
+    from hermes.taskgen.gate import _escapes_workspace
+
+    setup = "cat > a.md <<EOF\nharmless\nEOF\nmkdir -p /opt/app\n"
+    assert "line 4" in _escapes_workspace(setup)
+
+
+def test_home_spelled_as_a_variable_is_the_same_escape():
+    """`~/` and `$HOME` reach the same place; catching one teaches the model the other."""
+    from hermes.taskgen.gate import _escapes_workspace
+
+    assert "home-relative" in _escapes_workspace("mkdir -p $HOME/stash\n")
+    assert "home-relative" in _escapes_workspace("mkdir -p ${HOME}/stash\n")
+    assert "home-relative" in _escapes_workspace("mkdir -p ~/stash\n")
+
+
+def test_legitimate_absolute_paths_are_not_escapes():
+    from hermes.taskgen.gate import _escapes_workspace
+
+    assert (
+        _escapes_workspace("#!/bin/sh\nprintf x >/dev/null\nPY=\"$(command -v python3)\"\n/usr/bin/env awk 'NR>1' f\n")
+        == ""
+    )
+
+
+def test_a_numbered_protected_list_is_read_as_paths():
+    from hermes.taskgen.synth import _bare_path
+
+    assert _bare_path("1. data/x.csv") == "data/x.csv"
+    assert _bare_path("- `data/x.csv`") == "data/x.csv"
+    assert _bare_path("  * data/x.csv  ") == "data/x.csv"
+    assert _bare_path("data/x.csv") == "data/x.csv"
+
+
+def test_protected_paths_survive_yaml_with_a_quote_in_them(tmp_path):
+    """Emitted single-quoted, so a `'` doubles and a `"` or `\\` is literal."""
+    import yaml
+
+    from hermes.taskgen.dna import TaskDNA
+    from hermes.taskgen.synth import Synthesised, to_task_yaml
+
+    dna = TaskDNA(
+        domain="d",
+        skills=("s",),
+        environment="e",
+        difficulty=3,
+        horizon=(2, 4),
+        failure_mode="f",
+        required_tools=("terminal",),
+        verification="v",
+        source={},
+    )
+    c = _candidate(protected_paths=("it's.csv", 'q"uote.txt', "back\\slash"))
+    record = yaml.safe_load(
+        to_task_yaml(Synthesised(candidate=c, prompt="p", dna=dna, raw=""), commitment="sha256:x", max_steps=12)
+    )
+    assert tuple(record["protected_paths"]) == ("it's.csv", 'q"uote.txt', "back\\slash")

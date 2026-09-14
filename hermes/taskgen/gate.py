@@ -15,9 +15,10 @@ shipped:
   * a token-boundary bug the published check passed and the withheld one caught
 
 At three hundred generated tasks that class of defect arrives at scale and silently. So each task
-proves eight things, in a throwaway workspace, before it is allowed to exist:
+proves eleven things, in a throwaway workspace, before it is allowed to exist:
 
-  1. setup exits 0
+  0. no script reaches outside the workspace -- the one static check, see FORBIDDEN_ROOTS
+  1. setup exits 0 (under `set -e`, so EVERY command in it must succeed)
   2. setup is DETERMINISTIC -- run twice, byte-identical
   3. the public check FAILS the untouched workspace
   4. the withheld check FAILS the untouched workspace
@@ -25,6 +26,8 @@ proves eight things, in a throwaway workspace, before it is allowed to exist:
   6. the public check PASSES after the reference solution
   7. the withheld check PASSES after the reference solution
   8. the public and withheld checks DISAGREE on a deliberately overfit solution
+  8b. the protected paths exist and the reference solution does not modify them
+  9. the withheld check ACCEPTS a second solution that reaches the same result another way
 
 Eight is the one that matters most and the one a generator will most often fail. A withheld check
 that agrees with the published one everywhere is not withholding anything: it adds cost, produces an
@@ -44,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -54,6 +58,69 @@ from pathlib import Path
 # script cannot hold a slot for an hour. A task that needs longer than this to build its own
 # workspace is too heavy for a suite meant to run hundreds of episodes.
 STEP_TIMEOUT_S = 120
+
+
+# Absolute paths a generated script may never touch, and the one guard here that is static rather
+# than executed.
+#
+# Everything else this gate asserts is an exit code from a real process, on the principle that a
+# model's claim about its own output is not evidence. This check is the exception because the
+# evidence arrives too late to be useful: the prompt's own requirement 7 spells out the two
+# outcomes -- "on a machine where that path is not writable your setup dies on its first line, and
+# on one where it IS writable it writes into somebody's system" -- and only the first is
+# observable. The second passes every check while escaping the workspace, and `_fingerprint`
+# cannot see it because it walks the workspace and nothing else. Measured: a setup writing a
+# counter to /tmp ran twice, incremented twice, and was accepted 9/9 by the determinism check.
+#
+# So this is the roots requirement 7 actually names, plus the ones the repo has measured itself
+# failing on (`mkdir /workspace`, `mkdir /opt/myapp`). `/usr`, `/bin` and `/dev` are deliberately
+# NOT here: those are overwhelmingly read-only interpreter and device use -- `/bin/sh`,
+# `/usr/bin/env`, `/dev/null` -- and denying them would reject correct scripts, which costs a
+# generation each.
+FORBIDDEN_ROOTS = ("workspace", "tmp", "etc", "var", "opt", "root", "home", "srv", "mnt")
+
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w./-])/(?:" + "|".join(FORBIDDEN_ROOTS) + r")(?:/|\b)")
+# `~/` and `$HOME` are the same escape spelled two ways; a guard that caught one and not the other
+# would be teaching the model which spelling to use.
+_HOME_RE = re.compile(r"(?<![\w./-])~/|\$\{?HOME\b")
+_SUDO_RE = re.compile(r"(?<![\w-])sudo(?![\w-])")
+# `<<EOF`, `<<'EOF'`, `<<"EOF"`, `<<-EOF`: the word that ends a heredoc body.
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _escapes_workspace(script: str) -> str:
+    """The first command line of `script` that reaches outside the workspace, or "".
+
+    Two kinds of line are not commands and are skipped. Comments, because prose explaining why a
+    path is NOT used is not a use of it. And heredoc bodies, because they are DATA being written into
+    the workspace, not instructions: a generated task that writes a runbook saying "run
+    `ssh-add ~/.ssh/id_rsa`" is documenting a system, not touching the home directory -- and that
+    exact task was rejected by the first version of this check, on real model output, 1 in 11.
+
+    Heredoc tracking is deliberately simple: the terminator is the bare word on its own line, with
+    leading tabs tolerated for `<<-`. That is what `/bin/sh` does, and a body the shell would not
+    end is a setup that fails check 1 anyway.
+    """
+    terminator: str | None = None
+    for number, line in enumerate(script.splitlines(), start=1):
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        bare = line.strip()
+        if not bare or bare.startswith("#"):
+            continue
+        for pattern, what in (
+            (_ABSOLUTE_PATH_RE, "an absolute path"),
+            (_HOME_RE, "a home-relative path"),
+            (_SUDO_RE, "sudo"),
+        ):
+            if pattern.search(line):
+                return f"line {number} uses {what}: {bare[:120]}"
+        opened = _HEREDOC_OPEN_RE.search(line)
+        if opened:
+            terminator = opened.group(2)
+    return ""
 
 
 class GateError(RuntimeError):
@@ -78,6 +145,14 @@ class Candidate:
     # to prove the withheld check grades the outcome rather than the method. One solution can never
     # show that: it was written in the same reply as the check and naturally satisfies it.
     alternate_solution: str = ""
+    # Workspace files the agent must not modify -- the inputs its answer is derived FROM.
+    #
+    # `hermesbench` hashes these before and after an episode and disqualifies any run that changed
+    # one. Without them the cheapest way to satisfy a check that pins a value is to edit the data
+    # until the wrong answer is the right one, and nothing notices: `runner.py` skips the integrity
+    # comparison entirely when the tuple is empty. Generated tasks shipped empty, so every one of
+    # them was gradeable by tampering.
+    protected_paths: tuple[str, ...] = ()
 
 
 @dataclass
@@ -126,6 +201,14 @@ def _run(script: str, workspace: Path, *, timeout: int = STEP_TIMEOUT_S) -> tupl
     return done.returncode, (done.stdout + done.stderr)[-4000:]
 
 
+def _digest_file(path: Path) -> str | None:
+    """Content digest of one file, or None when it is absent -- the shape `digest_paths` uses."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def _fingerprint(workspace: Path) -> str:
     """A digest of every file's path and bytes, so two setups can be compared exactly.
 
@@ -162,8 +245,20 @@ def _copy_workspace(source: Path, root: Path, prefix: str) -> Path:
 
 
 def _build(candidate: Candidate, root: Path, timeout: int) -> tuple[Path, str]:
+    """Build the workspace once, under `set -e`.
+
+    `sh -c` reports the exit status of the LAST command, so without `set -e` "setup exits 0" is a
+    much weaker statement than it reads as: a script whose first line fails and whose last line
+    succeeds passes. Measured: `cp /nonexistent/file data/` followed by a valid setup was accepted
+    9/9. Usually checks 3-7 catch the consequences -- but not when the line that failed was the one
+    planting the trap, which yields a task accepted WITHOUT the thing that made it hard, and check
+    2 cannot see it either because it fails identically both times.
+
+    Requirement 1b of the synth prompt tells the model this, so a script that needs a command to be
+    allowed to fail can say `|| true` rather than being rejected for it.
+    """
     workspace = Path(tempfile.mkdtemp(dir=root, prefix=f"{candidate.task_id}-"))
-    code, output = _run(candidate.setup, workspace, timeout=timeout)
+    code, output = _run("set -e\n" + candidate.setup, workspace, timeout=timeout)
     if code != 0:
         raise _Failed("setup_exits_zero", f"setup exited {code}: {output}")
     return workspace, _fingerprint(workspace)
@@ -177,7 +272,7 @@ class _Failed(Exception):
 
 
 def gate(candidate: Candidate, *, root: Path | None = None, timeout_s: int = STEP_TIMEOUT_S) -> Verdict:
-    """Run all eight checks. The first failure stops the rest and names itself.
+    """Run every check in `ALL_CHECKS`. The first failure stops the rest and names itself.
 
     Stopping early is deliberate: once setup is broken, every later check is measuring the broken
     setup, and a verdict listing five failures where one caused the other four tells a reader less
@@ -188,6 +283,28 @@ def gate(candidate: Candidate, *, root: Path | None = None, timeout_s: int = STE
     made_scratch = root is None
     try:
         try:
+            # 0. Static, and first because it is the only check that is cheaper than running the
+            # thing it judges -- and because by the time a path escape is observable it has already
+            # happened.
+            for name, script in (
+                ("setup", candidate.setup),
+                ("the published check", candidate.verify),
+                ("the withheld check", candidate.withheld_verify),
+                ("the reference solution", candidate.reference_solution),
+                ("the alternate solution", candidate.alternate_solution),
+                ("the cheat solution", candidate.cheat_solution),
+            ):
+                escape = _escapes_workspace(script)
+                if escape:
+                    raise _Failed(
+                        "scripts_stay_in_the_workspace",
+                        f"{name} reaches outside the scratch directory -- {escape}. Every path must "
+                        "be relative to the current directory, which already IS the workspace. An "
+                        "absolute path either dies on an unwritable system path or writes into the "
+                        "host, and the second is silent",
+                    )
+            verdict.checks_run.append("scripts_stay_in_the_workspace")
+
             workspace, first = _build(candidate, scratch, timeout_s)
             verdict.checks_run.append("setup_exits_zero")
 
@@ -254,6 +371,39 @@ def gate(candidate: Candidate, *, root: Path | None = None, timeout_s: int = STE
                 )
             verdict.checks_run.append("checks_disagree_on_a_cheat")
 
+            # 8b. Protected paths: declared, present, and not touched by a correct solution.
+            #
+            # The second half is what makes this executable rather than decorative. A task that
+            # protects a file its own reference solution rewrites disqualifies every agent that
+            # solves it properly -- the same shape as the defect check 9 exists for, arriving from
+            # the task's own inputs. Checked against the reference only: the alternate is already
+            # required to satisfy the withheld check, and a second full solution run to re-answer a
+            # question the reference has answered is cost without evidence.
+            if not candidate.protected_paths:
+                raise _Failed(
+                    "protected_paths_are_sound",
+                    "the task declares no protected paths, so an agent may rewrite the very inputs "
+                    "its answer is derived from and the published check cannot tell. Name the data "
+                    "files the agent must not modify",
+                )
+            missing = [rel for rel in candidate.protected_paths if not (workspace / rel).is_file()]
+            if missing:
+                raise _Failed(
+                    "protected_paths_are_sound",
+                    f"protected path(s) {missing} do not exist after setup, so nothing is protected "
+                    "and the runner would record them as deleted by the agent",
+                )
+            changed = [
+                rel for rel in candidate.protected_paths if _digest_file(workspace / rel) != _digest_file(solved / rel)
+            ]
+            if changed:
+                raise _Failed(
+                    "protected_paths_are_sound",
+                    f"the reference solution modifies protected path(s) {changed}, so every agent "
+                    "that solves this task the intended way would be disqualified for tampering",
+                )
+            verdict.checks_run.append("protected_paths_are_sound")
+
             # 9. Method-pinning. The first generated task this gate accepted demanded a *symlink*
             # specifically: an agent that set an environment variable or copied the file would have
             # fixed the service for real and still failed, scoring as `overfit` while being correct.
@@ -296,6 +446,7 @@ def gate(candidate: Candidate, *, root: Path | None = None, timeout_s: int = STE
 
 
 ALL_CHECKS = (
+    "scripts_stay_in_the_workspace",
     "setup_exits_zero",
     "setup_is_deterministic",
     "public_fails_untouched",
@@ -304,6 +455,7 @@ ALL_CHECKS = (
     "public_passes_reference",
     "withheld_passes_reference",
     "checks_disagree_on_a_cheat",
+    "protected_paths_are_sound",
     "withheld_accepts_a_different_method",
 )
 

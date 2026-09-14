@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes.taskgen.dna import TaskDNA, similarity
-from hermes.taskgen.gate import Verdict, gate
+from hermes.taskgen.gate import ALL_CHECKS, Verdict, gate
 from hermes.taskgen.seeds import SOURCES, SeedStats, read
 from hermes.taskgen.synth import SynthError, synthesise, to_task_yaml
 
@@ -46,12 +46,86 @@ from hermes.taskgen.synth import SynthError, synthesise, to_task_yaml
 DUPLICATE_AT = 0.5
 
 
+def _rejection_for(prompt: str, *, generated: list[str], evaluation: list[str]) -> str:
+    """Why this prompt cannot be accepted, or "".
+
+    Two outcomes, deliberately not one bucket. `duplicate` is a corpus-efficiency problem: the same
+    task told twice teaches one thing and is counted as two. `evaluation_contamination` is a
+    correctness problem: an evaluation prompt in the training corpus invalidates every number
+    measured on that suite, including `overfit_rate`. Folding them together would hide the second
+    inside a count of the first, and the second is the one that has to stop a release.
+    """
+    if evaluation and _is_duplicate(prompt, evaluation)[0]:
+        return "evaluation_contamination"
+    if generated and _is_duplicate(prompt, generated)[0]:
+        return "duplicate"
+    return ""
+
+
 def _is_duplicate(prompt: str, accepted_prompts: list[str]) -> tuple[bool, float]:
     """Whether this task has already been generated, and how close the nearest one is."""
     if not accepted_prompts:
         return False, 0.0
     nearest = max(similarity(prompt, other) for other in accepted_prompts)
     return nearest >= DUPLICATE_AT, nearest
+
+
+def _evaluation_prompts() -> list[str]:
+    """Prompts of the committed evaluation suite, which a generated task may never duplicate.
+
+    The 19 hand-written tasks are what every published number in this repository rests on, and
+    `overfit_rate` -- the check that would notice a corpus trained on its own benchmark -- is
+    measured on them too. A generated task that restates one of them puts an evaluation prompt into
+    the training corpus, and the resulting score is real, reproducible and meaningless.
+
+    `admin/split.py` already refuses a rollout set that reached an evaluation task. This is the same
+    refusal one stage earlier, where it costs a rejected generation instead of a discarded run.
+
+    Missing or unreadable suite files yield an empty list rather than raising: this guard makes the
+    corpus safer and must not be the reason a generation run cannot start. The caller says out loud
+    when it is checking against nothing.
+    """
+    import yaml
+
+    from hermesbench.tasks import TASKS_ROOT
+
+    prompts: list[str] = []
+    for path in sorted(Path(TASKS_ROOT).rglob("*.yaml")):
+        try:
+            record = yaml.safe_load(path.read_text(encoding="utf-8"))
+            prompt = str((record or {}).get("prompt") or "").strip()
+        except Exception:  # noqa: BLE001 - an unreadable suite file must not stop generation
+            continue
+        if prompt:
+            prompts.append(prompt)
+    return prompts
+
+
+def _existing_prompts(out: Path) -> list[str]:
+    """The prompts of tasks a previous session already accepted into `out`.
+
+    `accepted` was seeded from disk on resume and `prompts` was not, so duplicate detection compared
+    only against the current session and every task written by the previous one was invisible to it.
+    Resume exists because a run of several hundred WILL be interrupted -- so the run most likely to
+    produce duplicates was the one where the guard was switched off. Reproduced: a resumed run
+    reported `accepted 3 of 3 (100%)` and the three additions were byte-identical to three tasks
+    already in the directory, similarity 1.000, zero detections.
+
+    A task whose prompt cannot be read back is skipped rather than fatal: it makes dedup weaker for
+    that one task, and refusing to resume at all over a single unreadable file is worse.
+    """
+    import yaml
+
+    prompts: list[str] = []
+    for path in sorted(out.glob("*.yaml")):
+        try:
+            record = yaml.safe_load(path.read_text(encoding="utf-8"))
+            prompt = str((record or {}).get("prompt") or "").strip()
+        except Exception:  # noqa: BLE001 - a corrupt file weakens dedup, it does not stop the run
+            continue
+        if prompt:
+            prompts.append(prompt)
+    return prompts
 
 
 def _action_budget(dna: TaskDNA) -> int:
@@ -75,6 +149,20 @@ def task_id_for(index: int, dna: TaskDNA) -> str:
     return f"gen-{dna.domain.split('_')[0][:4]}-{index:04d}"
 
 
+def _incomplete(verdict: Verdict) -> bool:
+    """Whether a verdict says `accepted` on a SUBSET of the checks.
+
+    `gate` is allowed to skip check 9 when a candidate carries no alternate solution, and records
+    the skip by leaving the name out of `checks_run` -- a deliberate design with a test naming it.
+    What was missing is anyone reading that: this driver branched on `accepted` alone, so a task
+    that never ran the method-pinning check was written to disk indistinguishably from one that
+    passed it, and `checks_run` was persisted only for REJECTS. A withheld check that grades the
+    method scores a correct agent as `overfit`, which is the failure check 9 exists to prevent, so
+    it is not a check this pipeline may skip quietly.
+    """
+    return list(verdict.checks_run) != list(ALL_CHECKS)
+
+
 def _write_accepted(
     out: Path,
     withheld_out: Path,
@@ -82,6 +170,7 @@ def _write_accepted(
     *,
     salt: str,
     max_steps: int,
+    checks_run: list[str] | None = None,
 ) -> dict[str, Any]:
     from hermes.harness import derive_task_salt, salted_digest
 
@@ -100,7 +189,19 @@ def _write_accepted(
     # The reference solution is kept beside the withheld check, not with the task. It is the proof
     # the task is solvable and it is also a complete answer, so it lives on the private side.
     (withheld_out / f"{task_id}.solution.sh").write_text(synthesised.candidate.reference_solution, encoding="utf-8")
-    return {"task_id": task_id, "commitment": commitment}
+    # The alternate lives beside the reference, on the private side, for the same reason the
+    # reference does: it is a complete answer. It is kept at all because it is the only artefact
+    # that can re-run gate check 9 -- "the withheld check grades the outcome, not the method" is a
+    # claim about a script, and without the script the claim cannot be re-tested after the withheld
+    # check is ever edited. Unlike the cheat it is NOT a shortcut: it is a correct solution, and
+    # putting it in `shortcuts` would assert it should be caught.
+    if synthesised.candidate.alternate_solution.strip():
+        (withheld_out / f"{task_id}.alternate.sh").write_text(
+            synthesised.candidate.alternate_solution, encoding="utf-8"
+        )
+    # `checks_run` travels with the accepted task so the manifest records WHICH checks cleared it.
+    # Without it an 8-of-10 acceptance and a 10-of-10 one are the same row forever.
+    return {"task_id": task_id, "commitment": commitment, "checks_run": list(checks_run or [])}
 
 
 def _save_reject(rejects: Path, task_id: str, verdict: Verdict | None, synthesised: Any, error: str) -> None:
@@ -140,6 +241,52 @@ def _save_reject(rejects: Path, task_id: str, verdict: Verdict | None, synthesis
             (rejects / f"{task_id}.{name}.sh").write_text(script, encoding="utf-8")
 
 
+# Two different 429s come back from a hosted gateway and they mean different things: a per-key
+# concurrency cap ("at most N concurrent requests per key"), which is yours to schedule around, and
+# upstream capacity ("no serving capacity right now"), which is not. Both are transient and neither
+# is a fact about the generator.
+_RATE_LIMIT_MARKERS = ("rate_limit", "429", "too many requests", "no serving capacity", "concurrent requests")
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    if type(exc).__name__ in ("RateLimitError", "APIStatusError") and getattr(exc, "status_code", None) == 429:
+        return True
+    blob = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in blob for marker in _RATE_LIMIT_MARKERS)
+
+
+def _with_rate_limit_retry(complete: Any, *, attempts: int = 5, base_delay: float = 4.0) -> Any:
+    """Retry a rate-limited generation instead of recording it as one the model failed.
+
+    Without this every capacity blip consumes a `--max-attempts` slot and lands in the `generate`
+    bucket, which is the catch-all for "the model client raised". Measured on a live gateway at a
+    concurrency BELOW its own stated limit: 11 of 15 rejections were 429s, and `stage.json` reported
+    10% acceptance where the true figure over attempts that reached the model was 33%. An operator
+    reading that tunes the prompt when the problem is the backend -- an absence recorded as a
+    measurement, which is the defect this package exists to keep out of the corpus.
+    """
+    import random
+    import time
+
+    def wrapped(messages: list[dict[str, str]], **kwargs: Any) -> Any:
+        last: BaseException | None = None
+        for attempt in range(attempts):
+            try:
+                return complete(messages, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - re-raised below if it is not a rate limit
+                if not _is_rate_limit(exc):
+                    raise
+                last = exc
+                if attempt == attempts - 1:
+                    break
+                # Jittered, because every worker in the pool is hitting the same ceiling at the same
+                # moment and a fixed backoff just re-synchronises them into the next collision.
+                time.sleep(base_delay * (2**attempt) * (0.5 + random.random()))
+        raise RuntimeError(f"rate limited after {attempts} attempts: {last}") from last
+
+    return wrapped
+
+
 def _attempt(dna: TaskDNA, index: int, complete: Any, *, gate_timeout: int) -> tuple[str, Verdict | None, Any]:
     task_id = task_id_for(index, dna)
     try:
@@ -151,7 +298,11 @@ def _attempt(dna: TaskDNA, index: int, complete: Any, *, gate_timeout: int) -> t
         # histogram can be acted on rather than only counted.
         return f"parse: {exc}", None, exc
     except Exception as exc:  # noqa: BLE001 - a served model can fail in many ways; none should stop the run
-        return f"generate: {type(exc).__name__}: {exc}", None, None
+        # Named separately so the histogram distinguishes "the backend had no capacity" from "the
+        # model produced something unusable". Folding them together makes a busy gateway read as a
+        # broken generator.
+        bucket = "rate_limited" if _is_rate_limit(exc) else "generate"
+        return f"{bucket}: {type(exc).__name__}: {exc}", None, None
     verdict = gate(synthesised.candidate, timeout_s=gate_timeout)
     return "", verdict, synthesised
 
@@ -166,6 +317,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:8001/v1")
     parser.add_argument("--model", default="qwen3.8-27b")
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
+    parser.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="extra HTTP header on every request, repeatable. Some gateways admit only particular "
+        "clients and reject the SDK's own User-Agent; without this those endpoints refuse every "
+        "call. Recorded in stage.json by NAME only -- a header can carry a credential and the "
+        "manifest is written beside the tasks",
+    )
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--gate-timeout", type=int, default=120)
     parser.add_argument("--salt-file", type=Path, default=None, help="master withheld salt; required to write")
@@ -234,13 +395,24 @@ def main(argv: list[str] | None = None) -> int:
 
     from hermesbench.policy import openai_completion
 
-    complete = openai_completion(
-        base_url=args.base_url,
-        model=args.model,
-        api_key=os.environ.get(args.api_key_env, ""),
-        timeout_s=args.request_timeout,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
+    headers: dict[str, str] = {}
+    for item in args.header:
+        name, sep, value = str(item).partition("=")
+        if not sep or not name.strip():
+            print(f"hermes.taskgen: --header must be NAME=VALUE, got {item!r}", file=sys.stderr)
+            return 2
+        headers[name.strip()] = value
+
+    complete = _with_rate_limit_retry(
+        openai_completion(
+            default_headers=headers or None,
+            base_url=args.base_url,
+            model=args.model,
+            api_key=os.environ.get(args.api_key_env, ""),
+            timeout_s=args.request_timeout,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+        )
     )
 
     max_attempts = args.max_attempts or args.count * 4
@@ -252,7 +424,26 @@ def main(argv: list[str] | None = None) -> int:
     # resumed run target 150 on top of the 116 it had just found -- and the progress line said 13/150
     # while 129 files sat on disk, which is the kind of number nobody re-derives.
     accepted: list[dict[str, Any]] = [{"task_id": task_id} for task_id in sorted(already)]
-    prompts: list[str] = []
+    # Seeded from disk for the same reason `accepted` is: see `_existing_prompts`.
+    prompts: list[str] = _existing_prompts(args.out)
+    evaluation = _evaluation_prompts()
+    if not evaluation:
+        print(
+            "warning: no evaluation-suite prompts could be read, so generated tasks are NOT being "
+            "checked against the committed benchmark. A task that restates an evaluation task would "
+            "put eval material into the training corpus undetected.",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(f"decontaminating against {len(evaluation)} committed evaluation task(s)", flush=True)
+    if already and len(prompts) < len(already):
+        print(
+            f"warning: {len(already) - len(prompts)} resumed task(s) had no readable prompt, so "
+            "duplicate detection cannot compare against them",
+            file=sys.stderr,
+            flush=True,
+        )
     failures: Counter[str] = Counter()
     attempted = 0
 
@@ -273,14 +464,26 @@ def main(argv: list[str] | None = None) -> int:
                 if error:
                     failures[error.split(":")[0]] += 1
                     _save_reject(rejects_dir, f"attempt-{index:04d}", verdict, synthesised, error)
-                elif verdict is not None and verdict.accepted and _is_duplicate(synthesised.prompt, prompts)[0]:
-                    failures["duplicate"] += 1
-                    _save_reject(rejects_dir, synthesised.candidate.task_id, verdict, synthesised, "duplicate")
+                elif (
+                    verdict is not None
+                    and verdict.accepted
+                    and (reason := _rejection_for(synthesised.prompt, generated=prompts, evaluation=evaluation))
+                ):
+                    failures[reason] += 1
+                    _save_reject(rejects_dir, synthesised.candidate.task_id, verdict, synthesised, reason)
+                elif verdict is not None and verdict.accepted and _incomplete(verdict):
+                    failures["incomplete_checks"] += 1
+                    _save_reject(rejects_dir, synthesised.candidate.task_id, verdict, synthesised, "incomplete_checks")
                 elif verdict is not None and verdict.accepted:
                     prompts.append(synthesised.prompt)
                     accepted.append(
                         _write_accepted(
-                            args.out, withheld_out, synthesised, salt=salt, max_steps=_action_budget(synthesised.dna)
+                            args.out,
+                            withheld_out,
+                            synthesised,
+                            salt=salt,
+                            max_steps=_action_budget(synthesised.dna),
+                            checks_run=list(verdict.checks_run),
                         )
                     )
                     print(f"  accepted {accepted[-1]['task_id']} ({len(accepted)}/{args.count})", flush=True)
@@ -295,18 +498,29 @@ def main(argv: list[str] | None = None) -> int:
             error, verdict, synthesised = future.result()
             if error:
                 failures[error.split(":")[0]] += 1
-            elif verdict is not None and verdict.accepted and _is_duplicate(synthesised.prompt, prompts)[0]:
-                failures["duplicate"] += 1
+            elif (
+                verdict is not None
+                and verdict.accepted
+                and (reason := _rejection_for(synthesised.prompt, generated=prompts, evaluation=evaluation))
+            ):
+                failures[reason] += 1
+            elif verdict is not None and verdict.accepted and _incomplete(verdict):
+                failures["incomplete_checks"] += 1
             elif verdict is not None and verdict.accepted:
                 # Written even past the target. Submission already stopped at `--count`, so what is
                 # still in flight is bounded by the concurrency -- and discarding a task that cleared
-                # nine executed checks to keep a round number is the wrong trade. An earlier version
+                # every executed check to keep a round number is the wrong trade. An earlier version
                 # dropped these AND counted them as rejections under an empty name, which made the
                 # generator look worse than it was and hid that the work was being thrown away.
                 prompts.append(synthesised.prompt)
                 accepted.append(
                     _write_accepted(
-                        args.out, withheld_out, synthesised, salt=salt, max_steps=_action_budget(synthesised.dna)
+                        args.out,
+                        withheld_out,
+                        synthesised,
+                        salt=salt,
+                        max_steps=_action_budget(synthesised.dna),
+                        checks_run=list(verdict.checks_run),
                     )
                 )
             elif verdict is not None:
@@ -320,6 +534,17 @@ def main(argv: list[str] | None = None) -> int:
     fresh = len(accepted) - len(already)
     report = {
         "accepted": [entry["task_id"] for entry in accepted],
+        "checks_run": {entry["task_id"]: entry.get("checks_run", []) for entry in accepted if entry.get("checks_run")},
+        "all_checks": list(ALL_CHECKS),
+        # The acceptance rate over attempts that actually REACHED the model. `acceptance_rate`
+        # divides by every attempt including the ones a gateway refused, so on a busy backend it
+        # reports the generator as broken when the backend is: measured 10% against a true 33%.
+        "rate_limited": failures.get("rate_limited", 0),
+        # Names only. A header can carry a credential and this manifest is written beside the tasks.
+        "extra_headers": sorted(headers),
+        "acceptance_rate_excluding_infrastructure": (
+            round(fresh / max(1, attempted - failures.get("rate_limited", 0)), 3)
+        ),
         "attempted": attempted,
         "resumed": len(already),
         "accepted_this_session": fresh,

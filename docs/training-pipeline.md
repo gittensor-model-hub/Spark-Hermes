@@ -120,9 +120,20 @@ skill and no task twice.
         --repeats 2 --concurrency 12 --keep-trajectories --allow-unsandboxed \
         --episodes-out var/probe/episodes.jsonl --out var/probe/manifest.json
 
-Two attempts per task, withheld checks live. This exists because the gate proves a task *executes
-correctly*, not that it is *worth solving*, and eight rollouts of a trivial task cost the same as eight
-of a hard one.
+Withheld checks live. This exists because the gate proves a task *executes correctly*, not that it is
+*worth solving*, and eight rollouts of a trivial task cost the same as eight of a hard one.
+
+**Run it at `--repeats 8`, not 2, and classify with `hermes.taskgen.triage`:**
+
+    python -m hermes.taskgen.triage --episodes var/probe/episodes.jsonl \
+        --repeats 8 --report var/probe/triage.json --keep-list var/probe/keep.txt
+
+Keep `1 <= passes < repeats`. An all-pass task supplies no gradient and an all-fail task supplies no
+reachable example. The measurements below were taken at `--repeats 2`, and two attempts do not
+support a verdict: through this repo's own `hermesbench.repeats.wilson`, 2/2 leaves the true pass
+rate anywhere in [0.34, 1.00] and 0/2 anywhere in [0.00, 0.66]. `hermes.challenge` already refuses to
+open a challenge on a count for that reason; the probe that feeds it was never held to the same rule.
+So read the `easy 117 (75%)` line below as undersampled rather than established.
 
 ### Measured — 320 episodes over 157 tasks
 

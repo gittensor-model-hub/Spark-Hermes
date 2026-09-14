@@ -1,0 +1,51 @@
+{
+  "_readme": [
+    "Source projects for `python -m hermesbench.supply`, which mutates working code into tasks whose",
+    "answer is known by construction and whose verifier already exists. Copy this file, point it at",
+    "real checkouts, and drop the `_readme` keys.",
+    "",
+    "    python -m hermesbench.supply --manifest <this> --out var/tasks/mut-1 \\",
+    "        --workspace var/mut-ws --report var/mut-1-report.json",
+    "",
+    "WHAT THIS SUPPLY IS AND IS NOT. Mutation tasks carry no withheld check and no commitment, so",
+    "`overfit_rate` is undefined for them and they CANNOT become competition challenges. They are",
+    "training and benchmark supply. Challenges come from `hermes.taskgen`, which generates both",
+    "halves of the verifier.",
+    "",
+    "THEY ARE ALSO THE EASIEST TASK CLASS MEASURED. Published solve rates for procedurally mutated",
+    "code run around 65%, against ~41% for bugs that arose naturally from feature work. Use this for",
+    "volume; do not expect it to produce tasks the pinned model fails.",
+    "",
+    "LINEAGE, NOT TASK, IS THE SPLIT UNIT. Every mutant of one file shares a lineage and the whole",
+    "lineage is drawn into one split. Fewer lineages than splits leaves a split empty and the run",
+    "says so. Aim for many target files across many projects, not many mutants of one file."
+  ],
+  "projects": [
+    {
+      "_readme": [
+        "name          a stable slug; it prefixes every task id generated from this project.",
+        "project_dir   relative to THIS manifest, or absolute. The whole directory is embedded into",
+        "              each task's setup script, minus the excluded dirs in mutation.EXCLUDED_DIRS",
+        "              (.git, caches, node_modules, .venv) and minus any file that is not UTF-8 text.",
+        "              Skipped binaries are recorded in the task's metadata.skipped_binary_files --",
+        "              read that, because a suite that needs a binary fixture cannot be rebuilt here.",
+        "target_files  the files to mutate. One lineage per file.",
+        "verify        MUST PASS on the unmutated project or the run refuses. MUST NOT rely on a bare",
+        "              `python`: the harness does not guarantee one on PATH, and the first attempt at",
+        "              this manifest died on exactly that. Resolve an interpreter explicitly.",
+        "protected_paths  the test files. Without them an agent can edit the tests until they pass;",
+        "              `runner.py` skips the integrity comparison entirely when this is empty.",
+        "limit_per_file   optional cap on mutants per file, to keep one large file from dominating."
+      ],
+      "name": "example-ledger",
+      "project_dir": "../var/sources/example-ledger",
+      "target_files": ["ledger/core.py", "ledger/report.py"],
+      "verify": "/usr/bin/env python3 -m pytest tests -q",
+      "category": "swe",
+      "topic": "debug",
+      "protected_paths": ["tests/test_core.py", "tests/test_report.py"],
+      "timeout_s": 120,
+      "limit_per_file": 12
+    }
+  ]
+}

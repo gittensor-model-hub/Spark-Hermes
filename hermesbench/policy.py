@@ -433,7 +433,13 @@ def steps_from_turn(turn: ParsedTurn) -> list[Step]:
 
 
 def openai_completion(
-    *, base_url: str, model: str, api_key: str = "", timeout_s: int = 300, **params: Any
+    *,
+    base_url: str,
+    model: str,
+    api_key: str = "",
+    timeout_s: int = 300,
+    default_headers: dict[str, str] | None = None,
+    **params: Any,
 ) -> Completion:
     """A `Completion` over any OpenAI-compatible chat endpoint.
 
@@ -448,10 +454,21 @@ def openai_completion(
     Sampling parameters are passed through and belong in the run manifest, not here. They
     change the result as surely as the prompt does -- two runs at different temperatures are
     not the same measurement -- and burying a default inside the adapter would hide that.
+
+    `default_headers` reaches every request. Some gateways admit only particular clients and
+    reject the SDK's own `User-Agent`, so without it those endpoints cannot be used at all. It is
+    an explicit argument rather than an environment variable for the same reason the sampling
+    parameters are: a header that decides whether a request is accepted is part of how a run was
+    produced, and a caller that had to pass it should be able to record that it did.
     """
     from openai import OpenAI
 
-    client = OpenAI(base_url=base_url, api_key=api_key or "not-needed", timeout=timeout_s)
+    client = OpenAI(
+        base_url=base_url,
+        api_key=api_key or "not-needed",
+        timeout=timeout_s,
+        default_headers=dict(default_headers) if default_headers else None,
+    )
 
     def complete(
         messages: list[dict[str, str]], *, tools: list[dict[str, Any]] | None = None

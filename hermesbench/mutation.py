@@ -172,19 +172,78 @@ def iter_mutants(source: str, operators: tuple[str, ...] = DEFAULT_OPERATORS) ->
 
 _HEREDOC = "SPARK_MUTATION_EOF"
 
+# Directories that must never reach a generated workspace, whatever the source project holds.
+#
+# `.git` is the one that matters and it is not a hygiene issue, it is an answer key: a mutation
+# task is "one file was broken, fix it", and a workspace carrying the project's history answers it
+# with `git checkout <target>` or `git log -p`. Every mutant of that project would fall to the same
+# single command, and the suite would report a capable agent.
+#
+# The rest are reconstructible build state. They bloat every setup script with content the task
+# does not need, and a stale cache is workspace state the task never intended to pin.
+EXCLUDED_DIRS = frozenset(
+    {
+        "__pycache__",
+        ".git",
+        ".hg",
+        ".svn",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "venv",
+        "node_modules",
+        ".idea",
+        ".vscode",
+        ".eggs",
+        ".DS_Store",
+    }
+)
 
-def _setup_script(project_dir: Path, target_file: str, mutant_source: str) -> str:
-    """Emit a setup script that rebuilds the whole broken project from scratch.
+
+def _is_text(path: Path) -> bool:
+    """Whether a file can be embedded in a heredoc at all.
+
+    A setup script is text, so a binary file cannot travel in one. Before this check, the reader
+    was `read_text(encoding="utf-8")` over EVERY file under the project, and the first byte that
+    was not valid UTF-8 ended the whole run with a `UnicodeDecodeError` naming neither the file nor
+    the reason. Any real repository trips it -- a PNG fixture, a compiled artifact, a git object.
+    """
+    try:
+        path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return False
+    return True
+
+
+def _setup_script(project_dir: Path, target_file: str, mutant_source: str) -> tuple[str, list[str]]:
+    """Emit a setup script that rebuilds the whole broken project from scratch, and what it skipped.
 
     Self-contained on purpose. A task that points at a fixture directory outside itself
     stops working the moment that directory moves, and a generated suite is exactly the
     kind of thing nobody notices has silently stopped reconstructing its own workspace.
+
+    Returns the script and the relative paths it could not embed, so a caller can report them
+    rather than a suite silently describing a project that is missing files.
     """
     lines = ["set -e"]
+    skipped: list[str] = []
     for path in sorted(project_dir.rglob("*")):
-        if not path.is_file() or "__pycache__" in path.parts:
+        if not path.is_file():
             continue
-        relative = path.relative_to(project_dir).as_posix()
+        relative_path = path.relative_to(project_dir)
+        # Judged on the path INSIDE the project. `path.parts` carries every ancestor too, so a
+        # project checked out under a directory that happens to be named `venv` or `.git` would
+        # have every one of its files excluded and rebuild an empty workspace -- silently.
+        if EXCLUDED_DIRS & set(relative_path.parts):
+            continue
+        relative = relative_path.as_posix()
+        if relative != target_file and not _is_text(path):
+            # Skipped rather than fatal: one binary fixture must not cost the whole project, and a
+            # named skip is something a reader can act on.
+            skipped.append(relative)
+            continue
         content = mutant_source if relative == target_file else path.read_text(encoding="utf-8")
         if _HEREDOC in content:
             raise MutationError(f"{relative} contains the heredoc delimiter; cannot embed it safely")
@@ -194,7 +253,7 @@ def _setup_script(project_dir: Path, target_file: str, mutant_source: str) -> st
         lines.append(f"cat > {relative} <<'{_HEREDOC}'")
         lines.append(content.rstrip("\n"))
         lines.append(_HEREDOC)
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", skipped
 
 
 @dataclass(frozen=True)
@@ -300,6 +359,7 @@ def generate(
             continue
 
         task_id = f"{task_prefix}-{mutant.operator}-{index:04d}"
+        setup_script, skipped = _setup_script(project_dir, target_file, mutant.source)
         tasks.append(
             GeneratedTask(
                 task_id=task_id,
@@ -318,11 +378,15 @@ def generate(
                     "protected_paths": list(protected_paths),
                     "timeout_s": timeout_s,
                     "max_steps": 30,
-                    "setup": _setup_script(project_dir, target_file, mutant.source),
+                    "setup": setup_script,
                     "verify": verify,
                     "metadata": {
                         "generated_by": "hermesbench.mutation",
                         "target_file": target_file,
+                        # Recorded rather than dropped: a workspace missing a binary fixture the
+                        # suite needs fails for a reason that has nothing to do with the agent, and
+                        # the only way to notice is for the omission to be written down.
+                        **({"skipped_binary_files": skipped} if skipped else {}),
                         **mutant.to_record(),
                     },
                 },

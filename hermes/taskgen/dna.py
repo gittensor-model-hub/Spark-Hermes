@@ -41,6 +41,27 @@ from typing import Any
 # would make the check unusable; a run this long shared with the source is quotation.
 VERBATIM_WINDOW = 40
 
+# The window `similarity` compares in, and deliberately NOT `VERBATIM_WINDOW`.
+#
+# Quotation and duplication are different questions and they want opposite window sizes. Quotation
+# asks "did a long literal run survive", so it wants a window long enough that a shared run is
+# evidence. Duplication asks "is this the same task told differently", and at 40 characters two
+# texts must share forty consecutive characters EXACTLY to register any overlap at all -- so a
+# reworded prompt scores 0.000 and the guard sees nothing.
+#
+# Measured on the real suite, `tc-log-rotation-order` against a four-word substitution of itself
+# versus against a genuinely different task:
+#
+#     window     paraphrase     different task
+#          5          0.840              0.120
+#         40          0.456              0.018      <- 0.456 is BELOW the 0.5 threshold
+#
+# At 40 the duplicate lands under the threshold and the different task is indistinguishable from
+# noise; at 5 they are separated by a factor of seven. The low numbers this guard used to report
+# ("closest pair 0.056 against a 0.5 threshold") were not headroom, they were the metric being
+# unable to score anything short of a literal copy.
+SIMILARITY_WINDOW = 5
+
 
 class DNAError(ValueError):
     """A seed could not be reduced to a usable abstraction."""
@@ -65,6 +86,15 @@ class TaskDNA:
     horizon: tuple[int, int]
     failure_mode: str
     required_tools: tuple[str, ...]
+    # A CONSTANT, not a measurement -- `extract` sets it to one literal for every seed, and
+    # `synth.build_prompt` does not read it. Measured over 200 real seeds: one distinct value, 100%.
+    #
+    # Spelled out because this module has already shipped this exact defect twice, both found by
+    # printing distributions rather than reading examples: every DNA in a 400-seed sample came out
+    # `repository_engineering`, and `error_recovery` fired on 93% of seeds. Both were fields that
+    # looked measured and were constant. This is the third, and it is left in place rather than
+    # quietly derived from a classifier invented to fill it -- a guessed axis is worse than an
+    # honest constant. Give it a real derivation before letting anything downstream branch on it.
     verification: str
     # The seed dataset's own subcategory, kept as its own axis rather than folded into `domain`.
     # Three published categories -- Agent Tools, Multi-Tool, Scheduling, roughly 2,200 rows between
@@ -263,6 +293,7 @@ def extract(record: dict[str, Any], *, dataset: str, licence: str, index: int) -
         horizon=(low, high),
         failure_mode=_failure_mode(text, recovered),
         required_tools=tools,
+        # Constant by construction; see the field comment on `TaskDNA.verification`.
         verification="deterministic script over the workspace",
         source={"dataset": dataset, "licence": licence, "row": index, "observed_tool_calls": calls},
     )
@@ -284,15 +315,16 @@ def _failure_mode(text: str, recovered: bool) -> str:
     return "incorrect_assumption_about_api" if recovered else "misleading_documentation"
 
 
-def shingles(text: str) -> set[str]:
-    """Overlapping windows of `VERBATIM_WINDOW` characters, whitespace-normalised.
+def shingles(text: str, window: int = VERBATIM_WINDOW) -> set[str]:
+    """Overlapping windows of `window` characters, whitespace-normalised.
 
-    The unit both duplicate detection and the no-quotation guard work in. Character shingles rather
-    than words because these texts are half prose and half filenames, and a word tokeniser splits
+    The unit both duplicate detection and the no-quotation guard work in, at two different sizes --
+    see `SIMILARITY_WINDOW` for why one constant cannot serve both. Character shingles rather than
+    words because these texts are half prose and half filenames, and a word tokeniser splits
     `opt/webhookd/settings.yaml` into pieces that match nothing.
     """
     flat = re.sub(r"\s+", " ", text).strip().lower()
-    return {flat[i : i + VERBATIM_WINDOW] for i in range(max(0, len(flat) - VERBATIM_WINDOW) + 1)}
+    return {flat[i : i + window] for i in range(max(0, len(flat) - window) + 1)}
 
 
 def similarity(left: str, right: str) -> float:
@@ -301,8 +333,11 @@ def similarity(left: str, right: str) -> float:
     Used to keep a generated corpus from filling up with the same task told twice. Two tasks that
     share most of their prompt teach one thing and are counted as two, which inflates a corpus's row
     count without adding to what it can teach.
+
+    Compares at `SIMILARITY_WINDOW`, not `VERBATIM_WINDOW`: the quotation window cannot see a
+    paraphrase, which is the duplicate this guard actually has to catch.
     """
-    a, b = shingles(left), shingles(right)
+    a, b = shingles(left, SIMILARITY_WINDOW), shingles(right, SIMILARITY_WINDOW)
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)

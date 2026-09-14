@@ -81,6 +81,9 @@ class SynthesisFixture:
 
     def __call__(self, messages, **kwargs):
         # The public check catches missing output; withheld execution checks its content.
+        # `input.txt` is protected because it is the INPUT the answer is copied from: an agent free
+        # to rewrite it could make `cmp` pass by editing the source instead of producing the answer.
+        # `answer.txt` is deliberately not protected -- writing it is the task.
         response = f"""=== PROMPT ===
 Copy input.txt exactly to answer.txt for the {self.label} task.
 === SETUP ===
@@ -95,6 +98,8 @@ cp input.txt answer.txt
 cat input.txt > answer.txt
 === CHEAT ===
 printf 'wrong\\n' > answer.txt
+=== PROTECTED ===
+input.txt
 """
         write_record(self.log, {"fixture_only": True, "messages": messages, "response": response})
         return response, {"prompt_tokens": 1, "completion_tokens": 1}

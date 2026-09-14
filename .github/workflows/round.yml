@@ -1,0 +1,120 @@
+name: round
+
+# Advances the round cycle one step per run. Trusted operator jobs only; the dedicated runner
+# must mount a private durable local filesystem at SPARK_STATE_ROOT.
+#
+# `validator.autoround next` reads the stored round and names ONE next action. It never freezes,
+# admits, judges or delivers: those carry repository credentials or a model endpoint, and the
+# settlement runbook separates them deliberately. This workflow performs only the step that needs
+# neither -- opening the next round -- and reports the rest so the scoped job can run it.
+#
+# Every five minutes rather than hourly: the deadline is a wall-clock instant and a window that
+# closed at :02 should not wait until :23 to be noticed. The decision is read-only and idempotent,
+# so a run that finds nothing to do costs one process.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "Window length for a round this opens"
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+# Shares the group with crown.yml: both mutate the same durable state, and two writers racing over
+# one SQLite settlement database is the failure the durable root exists to prevent.
+concurrency:
+  group: spark-competition-state
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    runs-on: [self-hosted, linux, spark-validator]
+    environment: competition-validator
+    env:
+      SPARK_STATE_ROOT: ${{ vars.SPARK_STATE_ROOT }}
+      SPARK_PYTHON: ${{ vars.SPARK_PYTHON }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Check trusted external interpreter and durable state
+        shell: bash
+        run: bash scripts/competition-environment.sh
+
+      # `baselines/` is where the episode logs the challenge packets were measured from must live
+      # (`runner --episodes-out` output, one log per probe run). It is not in the settlement
+      # runbook's directory list because nothing before this workflow read it on a schedule. A
+      # packet cannot name its own log, so without this directory `autoround open` has nothing to
+      # rebuild a baseline from and refuses -- see `resolve_episodes`.
+      - name: Require durable private state
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SPARK_STATE_ROOT" = /* && "$SPARK_STATE_ROOT" != /tmp* ]]
+          test -d "$SPARK_STATE_ROOT/rounds"
+          if ! test -d "$SPARK_STATE_ROOT/baselines"; then
+            echo "::error title=missing baselines::$SPARK_STATE_ROOT/baselines must hold the episode logs (runner --episodes-out) that datasets/challenges/ packets were opened from"
+            exit 1
+          fi
+
+      # `continue-on-error` because `autoround next` exits 3 on a stalled or blocked cycle -- a
+      # distinct code so any caller can alert without parsing text. Without this the step failure
+      # would end the job here and skip the annotation step below, which is the part a person
+      # actually reads. The job still fails, just with the message rather than an exit code.
+      - name: Decide the next action
+        id: decide
+        continue-on-error: true
+        shell: bash
+        run: >-
+          "$SPARK_PYTHON" -m validator.autoround next
+          --store "$SPARK_STATE_ROOT/rounds"
+          --challenges datasets/challenges
+          --github-output "$GITHUB_OUTPUT"
+
+      # The only action this workflow performs. No credentials, no model: a packet, an episode log
+      # and a store write. Nothing else in the repository opens a round, so without this the cycle
+      # cannot close without a person.
+      - name: Open the next round
+        if: ${{ steps.decide.outputs.action == 'open_next_round' }}
+        shell: bash
+        run: >-
+          "$SPARK_PYTHON" -m validator.autoround open
+          --store "$SPARK_STATE_ROOT/rounds"
+          --challenges datasets/challenges
+          --episodes "$SPARK_STATE_ROOT/baselines"
+          --hours "${{ inputs.hours || '1' }}"
+
+      # Reported, not performed. `judge freeze` is a state change on validator-owned storage and
+      # could run here, but freeze/judge/crown belong to one credential-scoped sequence in
+      # strategy.yml, and splitting its first step across two workflows would make the round's
+      # history harder to read than the one dispatch it replaces.
+      - name: Report the step a scoped job must run
+        if: ${{ contains(fromJSON('["freeze","judge","crown"]'), steps.decide.outputs.action) }}
+        shell: bash
+        run: |
+          echo "::notice title=round ${{ steps.decide.outputs.round_id }}::next action is ${{ steps.decide.outputs.action }}; dispatch strategy.yml"
+
+      # A stalled or blocked cycle produces no crown, no next round and no error of its own. Failing
+      # the job is what turns that silence into something a person sees.
+      - name: Fail on a stalled or blocked cycle
+        if: ${{ steps.decide.outputs.action == 'stalled' || steps.decide.outputs.action == 'blocked' }}
+        shell: bash
+        run: |
+          echo "::error title=round cycle halted::${{ steps.decide.outputs.action }} on ${{ steps.decide.outputs.round_id }}"
+          exit 1
+
+      # `continue-on-error` above swallows every non-zero exit, not only the 3 that means "stalled".
+      # An unreadable store or a crashed decision would otherwise pass as a quiet run, which is the
+      # exact failure this workflow exists to make visible.
+      - name: Fail if the decision itself did not run
+        if: ${{ steps.decide.outcome == 'failure' && steps.decide.outputs.action == '' }}
+        shell: bash
+        run: |
+          echo "::error title=round decision failed::validator.autoround could not read the cycle state"
+          exit 1
