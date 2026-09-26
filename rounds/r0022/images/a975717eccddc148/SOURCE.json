@@ -1,0 +1,6 @@
+{
+ "dataset": "SWE-bench/SWE-smith",
+ "license": "MIT",
+ "repository": "https://github.com/tobymao/sqlglot",
+ "environment": "jyangballin/swesmith.x86_64.tobymao_1776_sqlglot.036601ba"
+}

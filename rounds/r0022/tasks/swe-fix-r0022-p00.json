@@ -1,0 +1,25 @@
+{
+ "schema": "sh-preview-v1",
+ "task_id": "swe-fix-r0022-p00",
+ "round_id": "r0022",
+ "family": "swe_fix",
+ "prompt": "The repository at /testbed has a bug, described below. Fix it by changing the source code; do not modify or\nadd tests. When you are done, the project's existing test suite should pass.\n\n<issue>\nSQL operation modifiers not parsed correctly in SELECT statements\n\n#### Description\n\nWhen parsing SELECT statements with operation modifiers like `HIGH_PRIORITY`, `STRAIGHT_JOIN`, or `SQL_CALC_FOUND_ROWS`, the parser fails to recognize these modifiers properly.\n\n#### Steps/Code to Reproduce\n\n```python\nimport sqlglot\n\n# This should parse correctly but doesn't\nsql = \"SELECT HIGH_PRIORITY STRAIGHT_JOIN SQL_CALC_FOUND_ROWS * FROM t\"\nparsed = sqlglot.parse_one(sql, dialect=\"mysql\")\nprint(parsed)\n\n# Expected: Should include operation modifiers in the parsed result\n# Actual: Operation modifiers are missing from the parsed AST\n```\n\nThe issue affects MySQL-specific operation modifiers that can appear after SELECT but before the column list:\n- `HIGH_PRIORITY`\n- `STRAIGHT_JOIN` \n- `SQL_CALC_FOUND_ROWS`\n\nThese modifiers should be captured and preserved when parsing SELECT statements, but they're currently being ignored.\n</issue>\n",
+ "workdir": "/testbed",
+ "tools": [
+  "terminal",
+  "file"
+ ],
+ "max_turns": 100,
+ "timeout_s": 1800,
+ "token_budget": 600000,
+ "grading": "share of the tests the bug breaks that pass, counted only if no kept test fails",
+ "source": {
+  "dataset": "SWE-bench/SWE-smith",
+  "instance_id": "tobymao__sqlglot.036601ba.func_pm_remove_loop__57lpajcw",
+  "environment": "jyangballin/swesmith.x86_64.tobymao_1776_sqlglot.036601ba",
+  "fail_to_pass": [
+   "tests/dialects/test_mysql.py::TestMySQL::test_identity"
+  ]
+ },
+ "note": "A practice bug. The round is scored on different, hidden bugs from the same repository."
+}

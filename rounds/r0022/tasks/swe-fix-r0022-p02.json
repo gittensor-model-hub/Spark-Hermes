@@ -1,0 +1,33 @@
+{
+ "schema": "sh-preview-v1",
+ "task_id": "swe-fix-r0022-p02",
+ "round_id": "r0022",
+ "family": "swe_fix",
+ "prompt": "The repository at /testbed has a bug, described below. Fix it by changing the source code; do not modify or\nadd tests. When you are done, the project's existing test suite should pass.\n\n<issue>\n### Description\n\nThe recent changes to the `_generate_declarations` function in the CAN database C source generation seem to have introduced an issue. The generated C source code does not correctly handle signal declarations, leading to unexpected behavior when attempting to generate C source files.\n\n### Expected Behavior\n\nThe C source generation should produce valid C declarations for all signals, ensuring that encode, decode, and range check functions are correctly defined and included in the output.\n\n### Actual Behavior\n\nThe generated C source code is missing some signal declarations, particularly for encode and decode functions. This results in incomplete C files that cannot be compiled or used as expected.\n\n### Steps to Reproduce\n\n1. Use the `cantools` library to generate C source code from a CAN database.\n2. Ensure that the database includes messages with signals that require encode and decode functions.\n3. Observe the generated C source code for missing signal declarations.\n\n### Example Code\n\n```python\nimport cantools\n\n# Load a CAN database\ndb = cantools.database.load_file('path/to/your/database.dbc')\n\n# Generate C source code\nc_source = db.as_c_source()\n\n# Check the generated C source for missing signal declarations\nprint(c_source)\n```\n\n### System Details\n\n```\nLinux-5.15.0-1051-azure-x86_64-with-glibc2.31\nPython 3.10.15\ncantools 36.0.0\n```\n\nPlease investigate the changes in the `_generate_declarations` function to ensure all necessary signal declarations are included in the generated C source code.\n</issue>\n",
+ "workdir": "/testbed",
+ "tools": [
+  "terminal",
+  "file"
+ ],
+ "max_turns": 100,
+ "timeout_s": 1800,
+ "token_budget": 600000,
+ "grading": "share of the tests the bug breaks that pass, counted only if no kept test fails",
+ "source": {
+  "dataset": "SWE-bench/SWE-smith",
+  "instance_id": "cantools__cantools.0c6a7871.lm_rewrite__1341pfqw",
+  "environment": "jyangballin/swesmith.x86_64.cantools_1776_cantools.0c6a7871",
+  "fail_to_pass": [
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source",
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source_bit_fields",
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source_database_name",
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source_generate_fuzzer",
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source_no_signal_encode_decode",
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source_sender_node",
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source_sender_node_no_signal_encode_decode",
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source_sym",
+   "tests/test_command_line.py::CanToolsCommandLineTest::test_generate_c_source_working_directory"
+  ]
+ },
+ "note": "A practice bug. The round is scored on different, hidden bugs from the same repository."
+}

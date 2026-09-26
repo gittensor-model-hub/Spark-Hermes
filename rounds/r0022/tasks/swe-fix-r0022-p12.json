@@ -1,0 +1,29 @@
+{
+ "schema": "sh-preview-v1",
+ "task_id": "swe-fix-r0022-p12",
+ "round_id": "r0022",
+ "family": "swe_fix",
+ "prompt": "The repository at /testbed has a bug, described below. Fix it by changing the source code; do not modify or\nadd tests. When you are done, the project's existing test suite should pass.\n\n<issue>\n# OAuth1 Access Token Endpoint raises InvalidClientError instead of returning 401 status code\n\n## Description\n\nI've found an issue with the OAuth1 Access Token Endpoint. When validation fails for various checks (client key, request token, verifier, signature), the endpoint raises `InvalidClientError` instead of returning a 401 status code.\n\nAccording to the OAuth 1.0a spec, the server SHOULD return a 401 (Unauthorized) status code when receiving a request with invalid client credentials or an invalid/expired token.\n\n## Steps to reproduce\n\nHere's a simple example that demonstrates the issue:\n\n```python\nfrom oauthlib.oauth1 import Client\nfrom oauthlib.oauth1.rfc5849.endpoints import AccessTokenEndpoint\nfrom oauthlib.oauth1.rfc5849.request_validator import RequestValidator\n\n# Create a validator that will fail validation\nclass FailingValidator(RequestValidator):\n    def validate_client_key(self, client_key, request):\n        return False\n    \n    def validate_request_token(self, client_key, token, request):\n        return True\n    \n    def validate_verifier(self, client_key, token, verifier, request):\n        return True\n    \n    def validate_timestamp_and_nonce(self, client_key, timestamp, nonce, request, request_token=None):\n        return True\n    \n    def check_request_token(self, token):\n        return True\n\n# Create endpoint with failing validator\nendpoint = AccessTokenEndpoint(FailingValidator())\n\n# Create a request\nuri = 'https://example.com/access_token'\nheaders = {'Authorization': 'OAuth oauth_consumer_key=\"client_key\", oauth_token=\"token\", oauth_verifier=\"verifier\", oauth_signature_method=\"PLAINTEXT\", oauth_signature=\"signature\", oauth_timestamp=\"123456789\", oauth_nonce=\"nonce\", oauth_version=\"1.0\"'}\n\n# This should return a 401 status code, but instead raises InvalidClientError\nresponse = endpoint.create_access_token_response(uri, headers=headers)\n```\n\n## Expected behavior\n\nWhen validation fails for client key, request token, verifier, or signature, the endpoint should return a 401 status code with an appropriate error message.\n\n## Actual behavior\n\nInstead of returning a 401 status code, the endpoint raises an `InvalidClientError` exception, which breaks the expected flow and doesn't allow the application to properly handle the error response.\n\nThe error occurs because the code is raising exceptions directly instead of following the pattern used in the previous implementation where validation failures were collected and then a proper response was generated.\n</issue>\n",
+ "workdir": "/testbed",
+ "tools": [
+  "terminal",
+  "file"
+ ],
+ "max_turns": 100,
+ "timeout_s": 1800,
+ "token_budget": 600000,
+ "grading": "share of the tests the bug breaks that pass, counted only if no kept test fails",
+ "source": {
+  "dataset": "SWE-bench/SWE-smith",
+  "instance_id": "oauthlib__oauthlib.1fd52536.lm_rewrite__13gudrrm",
+  "environment": "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536",
+  "fail_to_pass": [
+   "tests/oauth1/rfc5849/endpoints/test_access_token.py::AccessTokenEndpointTest::test_check_verifier",
+   "tests/oauth1/rfc5849/endpoints/test_access_token.py::AccessTokenEndpointTest::test_validate_client_key",
+   "tests/oauth1/rfc5849/endpoints/test_access_token.py::AccessTokenEndpointTest::test_validate_request_token",
+   "tests/oauth1/rfc5849/endpoints/test_access_token.py::AccessTokenEndpointTest::test_validate_signature",
+   "tests/oauth1/rfc5849/endpoints/test_access_token.py::AccessTokenEndpointTest::test_validate_verifier"
+  ]
+ },
+ "note": "A practice bug. The round is scored on different, hidden bugs from the same repository."
+}

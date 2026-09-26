@@ -1,0 +1,6 @@
+{
+ "dataset": "SWE-bench/SWE-smith",
+ "license": "MIT",
+ "repository": "https://github.com/oauthlib/oauthlib",
+ "environment": "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536"
+}

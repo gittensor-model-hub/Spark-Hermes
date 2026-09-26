@@ -1,0 +1,6 @@
+{
+ "dataset": "SWE-bench/SWE-smith",
+ "license": "MIT",
+ "repository": "https://github.com/cantools/cantools",
+ "environment": "jyangballin/swesmith.x86_64.cantools_1776_cantools.0c6a7871"
+}

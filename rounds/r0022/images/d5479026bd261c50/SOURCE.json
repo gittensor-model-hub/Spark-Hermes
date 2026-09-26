@@ -1,0 +1,6 @@
+{
+ "dataset": "SWE-bench/SWE-smith",
+ "license": "MIT",
+ "repository": "https://github.com/python-openxml/python-docx",
+ "environment": "jyangballin/swesmith.x86_64.python-openxml_1776_python-docx.0cf6d71f"
+}

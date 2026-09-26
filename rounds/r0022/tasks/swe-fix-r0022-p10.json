@@ -1,0 +1,27 @@
+{
+ "schema": "sh-preview-v1",
+ "task_id": "swe-fix-r0022-p10",
+ "round_id": "r0022",
+ "family": "swe_fix",
+ "prompt": "The repository at /testbed has a bug, described below. Fix it by changing the source code; do not modify or\nadd tests. When you are done, the project's existing test suite should pass.\n\n<issue>\nCross joins not being tracked in optimize_joins function\n\n#### Description\n\nThe optimize_joins function is not properly handling cross joins. When processing joins, the code that tracks table references and identifies cross joins has been removed, causing the optimizer to miss cross join optimizations.\n\n#### Steps/Code to Reproduce\n\n```python\nimport sqlglot\nfrom sqlglot.optimizer.optimize_joins import optimize_joins\n\n# Example with cross join that should be optimized\nsql = \"\"\"\nSELECT *\nFROM table1, table2\nWHERE table1.id = table2.id\n\"\"\"\n\nparsed = sqlglot.parse_one(sql)\noptimized = optimize_joins(parsed)\nprint(optimized.sql())\n```\n\nThe cross join should be converted to an inner join with the WHERE condition moved to the ON clause, but this optimization is no longer happening.\n</issue>\n",
+ "workdir": "/testbed",
+ "tools": [
+  "terminal",
+  "file"
+ ],
+ "max_turns": 100,
+ "timeout_s": 1800,
+ "token_budget": 600000,
+ "grading": "share of the tests the bug breaks that pass, counted only if no kept test fails",
+ "source": {
+  "dataset": "SWE-bench/SWE-smith",
+  "instance_id": "tobymao__sqlglot.036601ba.func_pm_remove_cond__cbnrp8hw",
+  "environment": "jyangballin/swesmith.x86_64.tobymao_1776_sqlglot.036601ba",
+  "fail_to_pass": [
+   "tests/test_optimizer.py::TestOptimizer::test_optimize_joins",
+   "tests/test_optimizer.py::TestOptimizer::test_tpcds",
+   "tests/test_optimizer.py::TestOptimizer::test_tpch"
+  ]
+ },
+ "note": "A practice bug. The round is scored on different, hidden bugs from the same repository."
+}

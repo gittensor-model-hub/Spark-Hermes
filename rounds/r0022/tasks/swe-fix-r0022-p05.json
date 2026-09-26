@@ -1,0 +1,25 @@
+{
+ "schema": "sh-preview-v1",
+ "task_id": "swe-fix-r0022-p05",
+ "round_id": "r0022",
+ "family": "swe_fix",
+ "prompt": "The repository at /testbed has a bug, described below. Fix it by changing the source code; do not modify or\nadd tests. When you are done, the project's existing test suite should pass.\n\n<issue>\nDevice authorization endpoint returns incorrect verification URI\n\n#### Description\n\nThe device authorization endpoint is returning an incorrect verification URI with an extra \"/invalid\" suffix appended to it.\n\n#### Steps/Code to Reproduce\n\n```python\nfrom oauthlib.oauth2.rfc8628.endpoints.device_authorization import DeviceAuthorizationEndpoint\n\n# Create endpoint instance\nendpoint = DeviceAuthorizationEndpoint()\nendpoint._verification_uri = 'http://i.b/l/verify'\n\n# Get verification URI\nuri = endpoint.verification_uri()\nprint(f\"Expected: http://i.b/l/verify\")\nprint(f\"Actual: {uri}\")\n```\n\nExpected output:\n```\nExpected: http://i.b/l/verify\nActual: http://i.b/l/verify\n```\n\nActual output:\n```\nExpected: http://i.b/l/verify\nActual: http://i.b/l/verify/invalid\n```\n\nThe verification URI should match what was configured, but it's getting an unwanted \"/invalid\" suffix added to it.\n</issue>\n",
+ "workdir": "/testbed",
+ "tools": [
+  "terminal",
+  "file"
+ ],
+ "max_turns": 100,
+ "timeout_s": 1800,
+ "token_budget": 600000,
+ "grading": "share of the tests the bug breaks that pass, counted only if no kept test fails",
+ "source": {
+  "dataset": "SWE-bench/SWE-smith",
+  "instance_id": "oauthlib__oauthlib.1fd52536.func_basic__yxkg1g6o",
+  "environment": "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536",
+  "fail_to_pass": [
+   "tests/oauth2/rfc8628/test_server.py::DeviceAuthorizationEndpointTest::test_device_authorization_grant"
+  ]
+ },
+ "note": "A practice bug. The round is scored on different, hidden bugs from the same repository."
+}

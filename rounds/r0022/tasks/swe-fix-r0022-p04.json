@@ -1,0 +1,25 @@
+{
+ "schema": "sh-preview-v1",
+ "task_id": "swe-fix-r0022-p04",
+ "round_id": "r0022",
+ "family": "swe_fix",
+ "prompt": "The repository at /testbed has a bug, described below. Fix it by changing the source code; do not modify or\nadd tests. When you are done, the project's existing test suite should pass.\n\n<issue>\nImagePart.load() fails when opening documents with images\n\n#### Description\n\nWhen opening a Word document that contains images, the `ImagePart.load()` method raises an error due to attempting to decode binary image data as UTF-8 text.\n\n#### Steps/Code to Reproduce\n\n```python\nfrom docx import Document\nfrom docx.package import Package\n\n# Try to open a document containing images\npackage = Package.open('document_with_images.docx')\nimage_parts = package.image_parts  # This will fail\n```\n\nThe error occurs when the package tries to load image parts during document opening. Image data is binary and cannot be decoded as UTF-8 text, but the current implementation attempts to do so.\n\n#### Expected Behavior\n\nDocuments containing images should open successfully and image parts should be accessible without errors.\n\n#### Actual Behavior\n\nOpening documents with images raises a `UnicodeDecodeError` when trying to decode binary image data as UTF-8.\n</issue>\n",
+ "workdir": "/testbed",
+ "tools": [
+  "terminal",
+  "file"
+ ],
+ "max_turns": 100,
+ "timeout_s": 1800,
+ "token_budget": 600000,
+ "grading": "share of the tests the bug breaks that pass, counted only if no kept test fails",
+ "source": {
+  "dataset": "SWE-bench/SWE-smith",
+  "instance_id": "python-openxml__python-docx.0cf6d71f.func_basic__pel8lioz",
+  "environment": "jyangballin/swesmith.x86_64.python-openxml_1776_python-docx.0cf6d71f",
+  "fail_to_pass": [
+   "tests/test_package.py::DescribePackage::it_gathers_package_image_parts_after_unmarshalling"
+  ]
+ },
+ "note": "A practice bug. The round is scored on different, hidden bugs from the same repository."
+}
