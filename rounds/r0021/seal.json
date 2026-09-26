@@ -1,0 +1,62 @@
+{
+ "schema": "sh-seal-v3",
+ "round_id": "r0021",
+ "sealed_at": 1790443679.2273126,
+ "active": {
+  "5DPhKi77DLciQzNDr6iCZ2cD41oHcV75vLdf82d3crVnERN6": {
+   "pr": 288,
+   "head": "8927e154542ec2cb5e47ada4a6f0d1217a902c59",
+   "bundle_sha256": "05895823a1e259fcb316894e389716b3099be45faf5d6433803c0e9dd6e7acfc",
+   "incumbent": true,
+   "was_incumbent": false,
+   "defense": true,
+   "github": "kaivaryn"
+  },
+  "5Di3Dd8PKn7uQbBc4WrzxkUqqvSL8QS3KVgCPSt3kzPE5KFb": {
+   "pr": 287,
+   "head": "baa0ce2306558fa086ef7ba0877dc5fd314a894c",
+   "bundle_sha256": "5d01040dd291e5fd1deff6b8ccbaaa73f7eaa01635a5bc4d6f15a1598e831f73",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "harrythomasben"
+  },
+  "5E4iMWRACSJrnbnCLNVfWXjHc5VRkgzRfaAzBiB1VXfkqPUg": {
+   "pr": 291,
+   "head": "1d5b1af7b0eeb53c1a374fbe692c0614b025d092",
+   "bundle_sha256": "4815bc6ab143fd8f7c5b72203d5e0e09a9426cdd57f3a073c30997ecacf27e2c",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "Tet-9"
+  },
+  "5EwAJCVFUV1UwBqQpT7JqcEGSGBsM3gwxiJNehTeVKqKqkqc": {
+   "pr": 290,
+   "head": "1f06373df538b54da2833915a04dcf264af8ec77",
+   "bundle_sha256": "c628d5ffc51a7eecc67fa42c771be73e8e7acfd37654f742f87cd892059b5536",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "K-3-LT"
+  },
+  "5C5JKnm8M8pyn6neLqwmAKZ7DoyzJf7ZB1Mabv62LwfSEsHh": {
+   "pr": 292,
+   "head": "4025a5ac8a10ae34ab691de51c7e4d4fa229884a",
+   "bundle_sha256": "a3ed371650adfd86689ecaef631d0209fa0d7e624fcebf569aa5ad4379c789a4",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "kaivexa"
+  },
+  "5CoTfEgMhZ46ETtT6RSdt3RQkXizYu3vy9Spg33qTSt3eBtQ": {
+   "pr": 289,
+   "head": "5b3b475675c57159b863df5e4afc256fe9aa968e",
+   "bundle_sha256": "8f6e20c3a9335311f2e16210cc18dd8174a788f0f6b08e9b20cb3c531f573369",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "dato-bitar"
+  }
+ },
+ "rejected": {}
+}
