@@ -1,0 +1,46 @@
+{
+ "schema": "sh-instance-v2",
+ "task_id": "swe-fix-r0021-03",
+ "family": "swe_fix",
+ "behaviour": "act",
+ "round_id": "r0021",
+ "prompt": "The repository at /testbed has a bug, described below. Fix it by changing the source code; do not modify or\nadd tests. When you are done, the project's existing test suite should pass.\n\n<issue>\nVersion attributes no longer emit deprecation warnings\n\nWhen accessing the version attributes (`__version__`, `__parsed_version__`, and `__version_info__`), no deprecation warnings are emitted anymore.\n\n```python\nimport marshmallow\n\n# This should emit a deprecation warning but doesn't\nversion = marshmallow.__version__\n\n# These also don't emit warnings\nparsed_version = marshmallow.__parsed_version__\nversion_info = marshmallow.__version_info__\n```\n\nThe attributes still work and return the correct values, but the warnings that were supposed to inform users about their future removal are missing.\n\nThis is inconsistent with the documented behavior and could lead to users continuing to use deprecated attributes without being aware they'll be removed in a future version.\n</issue>\n",
+ "fixture": {},
+ "setup_commands": [],
+ "protected_paths": [
+  "pyproject.toml",
+  "tests/__init__.py",
+  "tests/base.py",
+  "tests/conftest.py",
+  "tests/foo_serializer.py",
+  "tests/mypy_test_cases/test_validation_error.py",
+  "tests/test_decorators.py",
+  "tests/test_deserialization.py",
+  "tests/test_error_store.py",
+  "tests/test_exceptions.py",
+  "tests/test_fields.py",
+  "tests/test_options.py",
+  "tests/test_registry.py",
+  "tests/test_schema.py",
+  "tests/test_serialization.py",
+  "tests/test_utils.py",
+  "tests/test_validate.py",
+  "tox.ini"
+ ],
+ "commands": [],
+ "published": {
+  "predicates": []
+ },
+ "withheld_commitment": "hmac-sha256:98e762822988bcdbe788e87395ca8600dfca3248a3647033622b221790e6aaff",
+ "image": "swe-task:1bcc7a1635ad5672",
+ "network": "none",
+ "tools": [
+  "terminal",
+  "file"
+ ],
+ "workdir": "/testbed",
+ "max_turns": 100,
+ "timeout_s": 1800,
+ "token_budget": 600000,
+ "requires_self_check": false
+}

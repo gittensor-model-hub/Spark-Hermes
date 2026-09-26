@@ -1,0 +1,29 @@
+{
+ "schema": "sh-instance-v2",
+ "task_id": "swe-fix-r0021-07",
+ "family": "swe_fix",
+ "behaviour": "act",
+ "round_id": "r0021",
+ "prompt": "The repository at /testbed has a bug, described below. Fix it by changing the source code; do not modify or\nadd tests. When you are done, the project's existing test suite should pass.\n\n<issue>\nDistance calculation ignores haversine parameter for close points\n\n#### Description\n\nThe distance function in `gpxpy.geo` is not respecting the `haversine` parameter when calculating distances between points that are close together. When `haversine=True` is explicitly passed, the function should use the haversine distance algorithm, but it appears to be using a different calculation method instead.\n\n#### Steps/Code to Reproduce\n\n```python\nimport gpxpy.geo as mod_geo\n\n# Test with close points - haversine parameter should make a difference\nhaversine_dist = mod_geo.distance(0, 0, 0, 0.1, 0.1, 0, haversine=True)\nnonhaversine_dist = mod_geo.distance(0, 0, 0, 0.1, 0.1, 0, haversine=False)\n\nprint('haversine_dist=', haversine_dist)\nprint('nonhaversine_dist=', nonhaversine_dist)\n\n# These should be different values but they're the same\nassert haversine_dist != nonhaversine_dist\n```\n\nAlso affects distance calculations near the 0-longitude meridian:\n\n```python\n# Points on opposite sides of 0-longitude meridian\ndistance = mod_geo.distance(latitude_1=0, longitude_1=0.1, elevation_1=0, \n                           latitude_2=0, longitude_2=-0.1, elevation_2=0, \n                           haversine=True)\nprint(distance)  # Should be < 230000 but returns much larger value\n```\n\nThe issue appears to affect both explicit `haversine=True` calls and automatic haversine selection for distant points.\n</issue>\n",
+ "fixture": {},
+ "setup_commands": [],
+ "protected_paths": [
+  "setup.py"
+ ],
+ "commands": [],
+ "published": {
+  "predicates": []
+ },
+ "withheld_commitment": "hmac-sha256:343099c9d5eae6f86646225e7dbad27b99ac60af3ea8045411223391c869d9b3",
+ "image": "swe-task:390190ab3ccfe413",
+ "network": "none",
+ "tools": [
+  "terminal",
+  "file"
+ ],
+ "workdir": "/testbed",
+ "max_turns": 100,
+ "timeout_s": 1800,
+ "token_budget": 600000,
+ "requires_self_check": false
+}

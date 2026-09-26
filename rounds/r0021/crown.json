@@ -1,0 +1,51 @@
+{
+ "schema": "sh-crown-v1",
+ "round_id": "r0021",
+ "king": "5CoTfEgMhZ46ETtT6RSdt3RQkXizYu3vy9Spg33qTSt3eBtQ",
+ "standings": {
+  "5C5JKnm8M8pyn6neLqwmAKZ7DoyzJf7ZB1Mabv62LwfSEsHh": {
+   "n": 6,
+   "verified": 0,
+   "dq": 0,
+   "credit": 0.0,
+   "delta": -0.055556
+  },
+  "5CoTfEgMhZ46ETtT6RSdt3RQkXizYu3vy9Spg33qTSt3eBtQ": {
+   "n": 6,
+   "verified": 1,
+   "dq": 0,
+   "credit": 0.333333,
+   "delta": 0.277778,
+   "rank": 1
+  },
+  "5DPhKi77DLciQzNDr6iCZ2cD41oHcV75vLdf82d3crVnERN6": {
+   "n": 6,
+   "verified": 0,
+   "dq": 0,
+   "credit": 0.055556,
+   "delta": 0.0
+  },
+  "5Di3Dd8PKn7uQbBc4WrzxkUqqvSL8QS3KVgCPSt3kzPE5KFb": {
+   "n": 6,
+   "verified": 0,
+   "dq": 0,
+   "credit": 0.055556,
+   "delta": 0.0
+  },
+  "5E4iMWRACSJrnbnCLNVfWXjHc5VRkgzRfaAzBiB1VXfkqPUg": {
+   "n": 6,
+   "verified": 0,
+   "dq": 0,
+   "credit": 0.0,
+   "delta": -0.055556
+  },
+  "5EwAJCVFUV1UwBqQpT7JqcEGSGBsM3gwxiJNehTeVKqKqkqc": {
+   "n": 6,
+   "verified": 0,
+   "dq": 0,
+   "credit": 0.0,
+   "delta": -0.055556
+  }
+ },
+ "rule": "highest paired delta vs baseline on this round's instances, > 0, \u2265 4 paired, not disqualified; a tie does not dethrone the incumbent; other ties by pooled \u0394c then a round-keyed hash"
+}
