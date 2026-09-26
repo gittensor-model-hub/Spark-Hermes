@@ -1145,6 +1145,12 @@ def close(cfg: Config, round_id: str, rd: Path) -> dict:
     pooled = window_archive(cfg, round_id)
     window = json.loads((pooled / "rounds.json").read_text())
     record = close_round(rd, pooled, rd / "close", reveal_dir=rd / "withheld", era=cfg.era, window=window)
+    # A family FamilyStats.retirement() has already flagged (in_rotation=False) is written to close.json but
+    # never surfaced while the loop runs — an operator only sees it by reading JSON after the fact. Log it now,
+    # once per close, so a collapsed or retired family is visible immediately, not discovered days later.
+    for family, stats in record.get("family_stats", {}).items():
+        if not stats.get("in_rotation", True):
+            log(rd, "family_retired", family=family, reason=stats.get("retirement"))
     log(
         rd,
         "close",
