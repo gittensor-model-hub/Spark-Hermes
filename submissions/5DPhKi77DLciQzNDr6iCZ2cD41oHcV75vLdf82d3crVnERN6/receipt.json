@@ -1,11 +1,11 @@
 {
  "schema": "sh-receipt-v1",
- "round_id": "r0038",
+ "round_id": "r0039",
  "hotkey": "5DPhKi77DLciQzNDr6iCZ2cD41oHcV75vLdf82d3crVnERN6",
  "digest": "8615b4a7139bacc0d5e3a99ebc7aa3abbca6e1f0721cc022039c40e62a6721b2",
- "signed_at": 1790716836,
- "received_at": 1790716836,
+ "signed_at": 1790734094,
+ "received_at": 1790734094,
  "lint_ok": true,
  "s1_ok": true,
- "server_sig": "9abdac83388e7a4415d8b41708a7c7b05275231a59225527dda02829d9da2da5"
+ "server_sig": "37fdaaee3b7f97eb69872dddb6d9826eb0c8785bccb982e77b965413341b8217"
 }
