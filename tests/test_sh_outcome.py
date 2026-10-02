@@ -112,12 +112,21 @@ def test_a_dethroned_incumbent_leaves_submissions():
 def test_an_incumbent_the_pooled_window_puts_below_the_baseline_is_dethroned():
     """(b) the correctness gate on the eight-round window — the evidence payment uses — says worse than baseline.
     A window too thin to be scored is not evidence and keeps the incumbent."""
+    from sh.scoring.v2 import FamilyReference, MinerWindow, score
     from sh.validator.orchestrate import dethroned
 
+    ref = {"f": FamilyReference(family="f", n=16, successes=8, medians={}, samples={})}
+
+    def scored(n, wins):  # the record `score` really produces, not a hand-built one it never could
+        eps = [{"family": "f", "verified_success": i < wins, "disqualified": False} for i in range(n)]
+        return {"OLD": score(MinerWindow("OLD", eps), ref)}
+
     sealed = _seal(OLD=None)
-    assert dethroned(sealed, None, {"OLD": {"gate": False, "reason": None, "n": 12}}) == ["OLD"]
-    assert dethroned(sealed, None, {"OLD": {"gate": False, "reason": "5 window episodes < 8"}}) == []
-    assert dethroned(sealed, None, {"OLD": {"gate": True, "reason": None}}) == []
+    worse = scored(16, 0)
+    assert worse["OLD"]["gate"] is False and worse["OLD"]["reason"]  # failing the gate always says why
+    assert dethroned(sealed, None, worse) == ["OLD"]
+    assert dethroned(sealed, None, scored(4, 0)) == []  # 4 window episodes < 8: no evidence
+    assert dethroned(sealed, None, scored(16, 8)) == []  # at the baseline: the gate holds
     assert dethroned(sealed, None, {}) == []  # not scored at all: nothing is known
 
 

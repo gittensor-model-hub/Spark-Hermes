@@ -1208,7 +1208,9 @@ def dethroned(
         if not (info.get("incumbent") or info.get("was_incumbent")) or h == king:
             continue
         s = scores.get(h) or {}
-        below = s.get("reason") is None and s.get("gate") is False  # a thin window is no evidence either way
+        # `score` sets `se` only once it has computed the gate; a thin window returns before that and is no evidence
+        # either way. Its `reason` is not the test: a window the gate fails always carries one ("at or below")
+        below = s.get("se") is not None and s.get("gate") is False
         streak = 1
         for entry in reversed(history):
             if entry.get("king") == h:
