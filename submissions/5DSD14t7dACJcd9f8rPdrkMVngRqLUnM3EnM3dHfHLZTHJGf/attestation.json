@@ -1,8 +1,8 @@
 {
  "schema": "sh-attestation-v2",
  "hotkey": "5DSD14t7dACJcd9f8rPdrkMVngRqLUnM3EnM3dHfHLZTHJGf",
- "round_id": "r0059",
+ "round_id": "r0060",
  "bundle_sha256": "c1d7bfa50b71b9ce617da422091369df6b499843c29c0c221fa4913b1b41e498",
- "signed_at": 1791260357,
- "signature": "0xf04e23a7b1e3cade2557be1f15374e0500630ad2ceb741f7d5747288b3a88b5e52e1e0ecd9fa5528314293932ee4b47e679be6c8898eb17a9e471ec3e295ff81"
+ "signed_at": 1791276543,
+ "signature": "0x54b39848e8a158429b05a3774063563a2bbb680fe784fccdcd7103328eebbb5c09d212cc74130e4d3b9162a773971df6889b685f02e9d60067ff60276218388e"
 }
