@@ -1,0 +1,8 @@
+{
+ "schema": "sh-attestation-v2",
+ "hotkey": "5Di3Dd8PKn7uQbBc4WrzxkUqqvSL8QS3KVgCPSt3kzPE5KFb",
+ "round_id": "r0063",
+ "bundle_sha256": "cc64e4f8161fc57f434949d084d70a12da806cf5a2b41b2d319d3dfe9864b0ac",
+ "signed_at": 1791338729,
+ "signature": "0x1c76244e0fe35383499da9c464e970f456466cf8cb09abf8fc785571651a84541ab3b2c83c89b7fa65a1c54bdc5b43314600152bcad32b4878da200eaf70868c"
+}
