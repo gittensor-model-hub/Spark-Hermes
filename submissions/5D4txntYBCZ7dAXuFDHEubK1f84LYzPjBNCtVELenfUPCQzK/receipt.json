@@ -1,0 +1,11 @@
+{
+ "schema": "sh-receipt-v1",
+ "round_id": "r0068",
+ "hotkey": "5D4txntYBCZ7dAXuFDHEubK1f84LYzPjBNCtVELenfUPCQzK",
+ "digest": "72498c13ddca418f15c543b86db54d87a98cec059cc6221b81edd3eee5a0666b",
+ "signed_at": 1791452885,
+ "received_at": 1791452885,
+ "lint_ok": true,
+ "s1_ok": true,
+ "server_sig": "8f76b96621411cb72dd9a3450d5d571471dae5d1a26a0a0df5a14fbcb8f4c684"
+}
