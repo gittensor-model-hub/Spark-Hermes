@@ -1,0 +1,80 @@
+{
+ "schema": "sh-seal-v3",
+ "round_id": "r0077",
+ "sealed_at": 1791841112.3234813,
+ "active": {
+  "5Di3Dd8PKn7uQbBc4WrzxkUqqvSL8QS3KVgCPSt3kzPE5KFb": {
+   "pr": 700,
+   "head": "6bc36938a77d8c8ebf87c81767580db319dd087a",
+   "bundle_sha256": "69ddf500b4c9ea30e50c01826e70480afdb7c8dc37170569cebfe766a0b91e56",
+   "incumbent": false,
+   "was_incumbent": true,
+   "defense": false,
+   "github": "harrythomasben"
+  },
+  "5CoTfEgMhZ46ETtT6RSdt3RQkXizYu3vy9Spg33qTSt3eBtQ": {
+   "pr": 695,
+   "head": "8972c18d0b7ea7d16c6e4ee4164312a41fbb6977",
+   "bundle_sha256": "2859f39e0e0cce4aeba6a096b9e0673114eb1f6e70729b03349ff7db57c3e67c",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "dato-bitar"
+  },
+  "5Et8zmN8dq4eFvy7grf2fqtf5PE2mgngTdr1WA6ADJJUUCrE": {
+   "pr": 696,
+   "head": "6315445f7eedc849471e2bf38c4d578eb102491a",
+   "bundle_sha256": "c61384983d750d321c4dca8c3458e9bb63502004adf15c2646d5ec52ec778792",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "ismayilovibadet802-svg"
+  },
+  "5Dh9YpJeTYKmgh9weSH9j24AtgEwVWoW37xsXakYGcpqVbKJ": {
+   "pr": 698,
+   "head": "af511ef85263e95059eeb38260858b6c8b7dc90a",
+   "bundle_sha256": "8a77193234879d532c0bf9abc1474a5483083267bb5a2f03869336ed11df4aa8",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "e11734937-beep"
+  },
+  "5DPhKi77DLciQzNDr6iCZ2cD41oHcV75vLdf82d3crVnERN6": {
+   "pr": 697,
+   "head": "687e203eeaf81abbf5cf5b16516ac9644ebd69c5",
+   "bundle_sha256": "c11e0161a3063ca108cedcca39bb162f6ad59baa9cab08512b118b7ed5c3ada4",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "kaivaryn"
+  },
+  "5C5JKnm8M8pyn6neLqwmAKZ7DoyzJf7ZB1Mabv62LwfSEsHh": {
+   "pr": 701,
+   "head": "f09dc41d8b5653d2020ff7a9d52893b382410a7f",
+   "bundle_sha256": "c715d8bcc00f3ad61ce29e5298e29abaf5395451900001441b4de05d757d0927",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "kaivexa"
+  },
+  "5EwAJCVFUV1UwBqQpT7JqcEGSGBsM3gwxiJNehTeVKqKqkqc": {
+   "pr": 702,
+   "head": "48414db872a1991931da410012f75b121dbf72f5",
+   "bundle_sha256": "c93a5055538228ba89efbdabf90de4f2694922ef0f9cc39e21035ecff20833c2",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "K-3-LT"
+  },
+  "5D4txntYBCZ7dAXuFDHEubK1f84LYzPjBNCtVELenfUPCQzK": {
+   "pr": 699,
+   "head": "fb42dc99386d65a11cad84cb194c9cb1e8d0ea4e",
+   "bundle_sha256": "ed101c3e542d9640539cc1f469f9a73c75ae33a6f71366d90347c36f4126dc6a",
+   "incumbent": false,
+   "was_incumbent": false,
+   "defense": false,
+   "github": "widecloud"
+  }
+ },
+ "rejected": {}
+}
