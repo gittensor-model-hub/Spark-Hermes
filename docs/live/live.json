@@ -1,6 +1,6 @@
 {
  "schema": "sh-live-v3",
- "updated": 1791841202.1157346,
+ "updated": 1791841672.7894635,
  "round_id": "r0077",
  "stage": "evaluate",
  "stages": [
@@ -44,6 +44,46 @@
   {
    "stage": "resume",
    "t": 1791841188.137464
+  },
+  {
+   "stage": "seal",
+   "t": 1791841207.1533093
+  },
+  {
+   "stage": "evaluate_local_launch",
+   "t": 1791841207.1757
+  },
+  {
+   "stage": "resume",
+   "t": 1791841312.2365313
+  },
+  {
+   "stage": "evaluate_local_launch",
+   "t": 1791841312.2403784
+  },
+  {
+   "stage": "resume",
+   "t": 1791841417.3374214
+  },
+  {
+   "stage": "evaluate_local_launch",
+   "t": 1791841417.3492396
+  },
+  {
+   "stage": "resume",
+   "t": 1791841522.6058683
+  },
+  {
+   "stage": "evaluate_local_launch",
+   "t": 1791841522.612054
+  },
+  {
+   "stage": "resume",
+   "t": 1791841627.7668378
+  },
+  {
+   "stage": "evaluate_local_launch",
+   "t": 1791841627.77365
   }
  ],
  "window": {
@@ -285,9 +325,60 @@
  },
  "rejected": {},
  "progress": {
-  "done": 0,
-  "total": 0,
-  "by_surface": {}
+  "done": 6,
+  "total": 54,
+  "by_surface": {
+   "null": {
+    "n": 6,
+    "verified": 2,
+    "credit": 0.2778,
+    "tasks": {
+     "swe-fix-r0077-00": {
+      "credit": 0.0,
+      "verified": false,
+      "void": false,
+      "dq": false,
+      "tests": null
+     },
+     "swe-fix-r0077-03": {
+      "credit": 0.0,
+      "verified": false,
+      "void": false,
+      "dq": false,
+      "tests": null
+     },
+     "swe-fix-r0077-04": {
+      "credit": 0.0,
+      "verified": false,
+      "void": false,
+      "dq": false,
+      "tests": null
+     },
+     "swe-fix-r0077-05": {
+      "credit": 0.0,
+      "verified": false,
+      "void": false,
+      "dq": false,
+      "tests": null
+     },
+     "swe-fix-r0077-02": {
+      "credit": 1.0,
+      "verified": true,
+      "void": false,
+      "dq": false,
+      "tests": null
+     },
+     "swe-fix-r0077-01": {
+      "credit": 0.6667,
+      "verified": true,
+      "void": false,
+      "dq": false,
+      "tests": null
+     }
+    }
+   }
+  },
+  "best": {}
  },
  "crown": null,
  "scores": null,
